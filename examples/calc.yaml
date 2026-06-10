@@ -1,0 +1,82 @@
+# calc example: minimal end-to-end reflex run that demonstrates every part of
+# the event lifecycle.
+#
+# Chain:
+#   RequestReceived
+#     -> ToolCallProposed   (llm_stub matches "2+2" / "plus" / etc.)
+#       -> ToolResultObserved   (tool_call invokes the calc builtin)
+#         -> AssistantMessageProposed + RequestHandled
+#           -> printer writes to stdout
+#
+# Stub-LLM matching rules below are deterministic substring checks. Run:
+#   reflex --config examples/calc.yaml --message "what is 2+2"
+# and you'll see the assistant reply "The answer is 4".
+settings:
+  max_steps: 64
+
+handlers:
+  - name: brain-initial
+    type: llm_stub
+    on: RequestReceived
+    emits: [ToolCallProposed, AssistantMessageProposed, RequestHandled]
+    config:
+      rules:
+        # Arithmetic via the calc tool. We only forward the operator+operands
+        # part of the user message; the tool parses it.
+        - match: "+"
+          action: tool_call
+          tool: calc
+          args: "{user_message}"
+        - match: "-"
+          action: tool_call
+          tool: calc
+          args: "{user_message}"
+        - match: "*"
+          action: tool_call
+          tool: calc
+          args: "{user_message}"
+        - match: "/"
+          action: tool_call
+          tool: calc
+          args: "{user_message}"
+        # "hello" / "hi" short-circuit to a direct reply.
+        - match: hello
+          action: reply_and_handle
+          reply: "Hi! Ask me an arithmetic question, e.g. 'what is 2+2'."
+        - match: hi
+          action: reply_and_handle
+          reply: "Hi! Ask me an arithmetic question, e.g. 'what is 2+2'."
+      fallback:
+        action: reply_and_handle
+        reply: "I only know basic arithmetic for now."
+
+  - name: brain-after-tool
+    type: llm_stub
+    on: ToolResultObserved
+    emits: [AssistantMessageProposed, RequestHandled]
+    config:
+      trigger_on: [ToolResultObserved]
+      # No rules — every tool result triggers the fallback, which is the
+      # interesting path here.
+      fallback:
+        action: reply_and_handle
+        reply: "The answer is {last_tool_result}"
+
+  - name: calc-tool
+    type: tool_call
+    on: ToolCallProposed
+    emits: [ToolResultObserved]
+    config:
+      tool: calc
+
+  - name: out
+    type: printer
+    on: AssistantMessageProposed
+    config:
+      prefix: "assistant: "
+      field: text
+
+  - name: watcher
+    type: unhandled_watcher
+    on: __noop__
+    emits: [RequestUnhandled]

@@ -1,0 +1,31 @@
+# stall example: deliberately broken handler chain. Reacts to the user
+# message with an AssistantMessageProposed and a tool call, but never emits
+# RequestHandled. Drain quiesces; the watcher post-pass then fires
+# RequestUnhandled and reflex exits with status 2.
+#
+# Run:
+#   reflex --config examples/stall.yaml --message "anything" --trace
+# Expect: the trace contains RequestUnhandled, and the CLI prints
+# "request <uuid> unhandled: drain quiesced without RequestHandled".
+handlers:
+  - name: brain
+    type: llm_stub
+    on: RequestReceived
+    emits: [AssistantMessageProposed]
+    config:
+      # Reply once but DO NOT use reply_and_handle — that's the bug.
+      fallback:
+        action: reply
+        reply: "I will speak, but I will never close the request."
+
+  - name: out
+    type: printer
+    on: AssistantMessageProposed
+    config:
+      prefix: "assistant (stall): "
+      field: text
+
+  - name: watcher
+    type: unhandled_watcher
+    on: __noop__
+    emits: [RequestUnhandled]
