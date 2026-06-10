@@ -68,6 +68,15 @@ const (
 	// terminal: it closes the causal branch for the request_id rather
 	// than spawning further work.
 	TypeLoopExhausted = "LoopExhausted"
+
+	// Phase 1.6: bus meta-events. These describe the bus's own activity
+	// and are first-class events on the same log — handlers may subscribe
+	// to them, the analyzer reads them, the wait-predicates key off them.
+	// All three are terminal: a meta-event is an observation, never a
+	// trigger for further user work.
+	TypeEventDispatched = "EventDispatched"
+	TypeDrainQuiesced   = "DrainQuiesced"
+	TypeHandlerFailed   = "HandlerFailed"
 )
 
 // SessionProjection folds events for one request into a SessionState. Events

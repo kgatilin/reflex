@@ -27,6 +27,21 @@ func (r *recordingSub) React(_ context.Context, _ event.Event, _ []event.Event) 
 	return r.emit, nil
 }
 
+// nonMeta returns ev types from snap that are NOT bus meta-events. Used by
+// dispatcher tests that pre-date Phase 1.6 — those tests assert the user
+// chain, not the meta routing layer the bus emits around it.
+func nonMeta(snap []event.Event) []string {
+	out := []string{}
+	for _, e := range snap {
+		switch e.Type {
+		case EventDispatchedType, DrainQuiescedType, HandlerFailedType:
+			continue
+		}
+		out = append(out, e.Type)
+	}
+	return out
+}
+
 func TestDispatcherFiresMatchingSubscriber(t *testing.T) {
 	store := event.NewStore()
 	b := New(store)
@@ -40,13 +55,24 @@ func TestDispatcherFiresMatchingSubscriber(t *testing.T) {
 	if sub.calls != 1 {
 		t.Fatalf("expected 1 call, got %d", sub.calls)
 	}
-	if store.Len() != 2 {
-		t.Fatalf("expected 2 events, got %d", store.Len())
+	user := nonMeta(store.Snapshot())
+	if len(user) != 2 {
+		t.Fatalf("expected 2 user events, got %d (%v)", len(user), user)
 	}
-	if store.Snapshot()[1].RequestID != "r1" {
+	// Locate the user emission and assert its lineage to the seed.
+	var seed, userEv event.Event
+	for _, e := range store.Snapshot() {
+		switch e.Type {
+		case "RequestReceived":
+			seed = e
+		case "AssistantMessageProposed":
+			userEv = e
+		}
+	}
+	if userEv.RequestID != "r1" {
 		t.Fatal("emitted event did not inherit request_id")
 	}
-	if store.Snapshot()[1].CausedBy != store.Snapshot()[0].ID {
+	if userEv.CausedBy != seed.ID {
 		t.Fatal("emitted event did not record caused_by")
 	}
 }
@@ -60,10 +86,7 @@ func TestDispatcherChainsEvents(t *testing.T) {
 	if err := b.Run(context.Background(), event.Event{Type: "X", RequestID: "r"}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	got := []string{}
-	for _, e := range store.Snapshot() {
-		got = append(got, e.Type)
-	}
+	got := nonMeta(store.Snapshot())
 	want := []string{"X", "Y", "Z"}
 	if len(got) != len(want) {
 		t.Fatalf("event types = %v, want %v", got, want)

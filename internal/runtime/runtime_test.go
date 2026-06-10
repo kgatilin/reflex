@@ -73,6 +73,14 @@ func TestEndToEndCalcScenario(t *testing.T) {
 	}
 	gotTypes := []string{}
 	for _, e := range res.State.Events {
+		// Filter out bus meta-events (Phase 1.6); this assertion is
+		// about the user-level chain.
+		switch e.Type {
+		case projection.TypeEventDispatched,
+			projection.TypeDrainQuiesced,
+			projection.TypeHandlerFailed:
+			continue
+		}
 		gotTypes = append(gotTypes, e.Type)
 	}
 	want := []string{

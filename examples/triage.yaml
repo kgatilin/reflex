@@ -23,6 +23,18 @@
 settings:
   max_steps: 64
 
+# Phase 1.6: declare CLI bindings + default wait predicate for the seed
+# event. With this in place, `reflex invoke triage archai#114` is sugar
+# for `reflex emit --type RequestReceived --payload {"payload":"archai#114"}
+# --wait projection.has=triage.verdict` — and the wait-predicate succeeds
+# precisely when triage_rules has stashed its decision in the projection.
+events:
+  - name: RequestReceived
+    args: { payload: string }
+    cli:
+      command: invoke triage
+      wait: projection.has=triage.verdict
+
 handlers:
   - name: parse
     type: parse_target

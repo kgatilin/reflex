@@ -1,0 +1,84 @@
+# aggregate example: three classifier handlers fan out from a single
+# `ClassifyRequested` event, each emit a `Classification`, and the generic
+# aggregator collects them and emits one `ClassificationsAggregated` event
+# once N (= subscriber_count from EventDispatched of ClassifyRequested)
+# classifications have arrived.
+#
+# This demonstrates Phase 1.6's "no sync hook" model: there is no
+# wait-for-reply primitive. The aggregator is a normal subscriber that
+# reads bus meta-events (EventDispatched) to learn fan-out width and
+# decides when to emit aggregated output based on accumulated state.
+#
+# Run:
+#   reflex emit --config examples/aggregate.yaml --type ClassifyRequested \
+#               --payload '{"item":"foo"}' --wait drain
+#
+# Trace will show:
+#   ClassifyRequested -> Classification x3 -> ClassificationsAggregated
+#   plus bus meta-events: EventDispatched (one per routed event),
+#   DrainQuiesced (one per request_id at end of drain).
+settings:
+  max_steps: 64
+
+events:
+  - name: ClassifyRequested
+    args: { item: string }
+    cli:
+      command: invoke classify
+      wait: drain
+  - name: ClassificationsAggregated
+    args: { items: list, count: int }
+
+handlers:
+  # Three classifiers — each consumes the fan-out trigger and emits a
+  # Classification. Using echo here keeps the example self-contained;
+  # swap for real handlers in production.
+  - name: lang_classifier
+    type: echo
+    on: ClassifyRequested
+    emits: [Classification]
+    config:
+      emit: Classification
+
+  - name: topic_classifier
+    type: echo
+    on: ClassifyRequested
+    emits: [Classification]
+    config:
+      emit: Classification
+
+  - name: sentiment_classifier
+    type: echo
+    on: ClassifyRequested
+    emits: [Classification]
+    config:
+      emit: Classification
+
+  # The aggregator subscribes to Classification AND to
+  # EventDispatched{event_type=ClassifyRequested}. It uses the latter's
+  # subscriber_count (=3 here) as the expected response count.
+  - name: collect
+    type: aggregator
+    on: Classification
+    emits: [ClassificationsAggregated]
+    config:
+      expected_from: ClassifyRequested
+      emit: ClassificationsAggregated
+
+  # Closing the request: announce the aggregate count and terminate.
+  - name: announce
+    type: printer
+    on: ClassificationsAggregated
+    config:
+      prefix: "aggregated count: "
+      field: count
+
+  - name: finalize
+    type: terminator
+    on: ClassificationsAggregated
+    emits: [RequestHandled]
+
+  - name: watcher
+    type: unhandled_watcher
+    on: __noop__
+    emits: [RequestUnhandled, EventOrphaned]

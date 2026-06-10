@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kgatilin/reflex/pkg/event"
+	"github.com/kgatilin/reflex/pkg/projection"
 )
 
 // Subscriber reacts to a single event. It must be a pure function of the
@@ -37,11 +38,18 @@ type Subscriber interface {
 }
 
 // LoopExhaustedType is the event type the dispatcher emits when a declared
-// loop hits its max_iterations cap. The string is duplicated here (rather
-// than imported from pkg/projection) to keep the bus package free of
-// projection imports. The projection layer re-exports the same literal as
-// projection.TypeLoopExhausted.
+// loop hits its max_iterations cap. The projection layer re-exports the
+// same literal as projection.TypeLoopExhausted.
 const LoopExhaustedType = "LoopExhausted"
+
+// Phase 1.6 bus meta-event types — the bus is the source of these. They
+// describe the bus's own activity (routing, drain, failure) and are
+// first-class events on the same log. All three are terminal.
+const (
+	EventDispatchedType = "EventDispatched"
+	DrainQuiescedType   = "DrainQuiesced"
+	HandlerFailedType   = "HandlerFailed"
+)
 
 // Bus owns the event store and the subscriber registry. Dispatch is
 // single-threaded by design: each event drains its consequences before the
@@ -58,6 +66,10 @@ type Bus struct {
 	// fire counts and refuses to fire past the cap; it emits a terminal
 	// LoopExhausted event instead.
 	loopCaps map[string]int
+	// proj is the per-request projection store handlers can read/write.
+	// May be nil — handlers that touch it through ProjectionAware get a
+	// no-op store back in that case.
+	proj *projection.Store
 }
 
 // Option customises a Bus.
@@ -78,6 +90,14 @@ func WithSource(s string) Option {
 // WithClock overrides time.Now for tests.
 func WithClock(c func() time.Time) Option {
 	return func(b *Bus) { b.clock = c }
+}
+
+// WithProjection wires a projection store onto the bus so handlers can
+// stash structured intermediate results keyed by request_id. Optional —
+// when unset, ProjectionAware handlers see a nil store and skip the
+// projection step gracefully.
+func WithProjection(p *projection.Store) Option {
+	return func(b *Bus) { b.proj = p }
 }
 
 // WithLoopCaps installs per-handler iteration caps. Used by the runtime
@@ -130,6 +150,33 @@ func (b *Bus) Subscribers() []Subscriber {
 // Store returns the underlying event store.
 func (b *Bus) Store() *event.Store { return b.store }
 
+// Projection returns the bus's projection store. May be nil if WithProjection
+// was not supplied; callers should nil-check or use the store's nil-safe
+// methods.
+func (b *Bus) Projection() *projection.Store { return b.proj }
+
+// ProjectionAware is implemented by subscribers that want a handle to the
+// bus's projection store at construction time (so they can Set/Get inside
+// React without threading the store through configuration). The runtime
+// calls SetProjection once after Register.
+type ProjectionAware interface {
+	SetProjection(p *projection.Store)
+}
+
+// WireProjection injects b's projection store into every registered
+// subscriber that implements ProjectionAware. Called by the runtime after
+// the bus is fully assembled.
+func (b *Bus) WireProjection() {
+	if b.proj == nil {
+		return
+	}
+	for _, s := range b.subscribers {
+		if pa, ok := s.(ProjectionAware); ok {
+			pa.SetProjection(b.proj)
+		}
+	}
+}
+
 // Emit decorates a partial event with a fresh ID, timestamp, and default
 // source, appends it, and returns the finalised event. Handlers should not
 // call Emit directly — they return events from React and let the dispatcher
@@ -178,6 +225,11 @@ func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 	// trace stays clean.
 	loopExhaustedFired := map[string]map[string]bool{}
 
+	// requestsSeen tracks the order in which request_ids first appear in
+	// the drain so we can emit DrainQuiesced for each at the end.
+	requestsSeen := []string{}
+	seenSet := map[string]bool{}
+
 	for len(queue) > 0 {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -190,11 +242,18 @@ func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 		ev := queue[0]
 		queue = queue[1:]
 
+		if ev.RequestID != "" && !seenSet[ev.RequestID] {
+			seenSet[ev.RequestID] = true
+			requestsSeen = append(requestsSeen, ev.RequestID)
+		}
+
 		// Snapshot here so all subscribers reacting to ev see the same log
 		// state. New events appended by earlier subscribers in this fan-out
 		// are not visible to later ones at the same depth — they show up on
 		// the next iteration. This keeps causal ordering clean.
 		snap := b.store.Snapshot()
+
+		subscriberCount := 0
 
 		for _, sub := range b.subscribers {
 			if !sub.Match(ev) {
@@ -233,8 +292,13 @@ func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 				fireCount[ev.RequestID][sub.Name()]++
 			}
 
+			subscriberCount++
 			emitted, err := sub.React(ctx, ev, snap)
 			if err != nil {
+				// Emit HandlerFailed as a first-class observable event
+				// before returning, so the trace records the failure even
+				// when the caller treats the dispatcher error as fatal.
+				b.emitHandlerFailed(sub.Name(), ev, err)
 				return fmt.Errorf("bus: subscriber %q on %q: %w", sub.Name(), ev.Type, err)
 			}
 			for _, ne := range emitted {
@@ -253,9 +317,95 @@ func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 				queue = append(queue, ne)
 			}
 		}
+
+		// Emit EventDispatched after the fan-out for ev is complete. We
+		// skip meta-events themselves (would be infinite). The meta-event
+		// is enqueued so subscribers to it (e.g. the generic aggregator)
+		// get to react — and the drain continues until quiescence.
+		if !isMetaEventType(ev.Type) {
+			if me := b.emitEventDispatched(ev, subscriberCount); me != nil {
+				queue = append(queue, *me)
+			}
+		}
+	}
+
+	// Drain finished — emit one DrainQuiesced per request_id seen. These
+	// are leaf observations; we don't re-enter the drain for them.
+	for _, rid := range requestsSeen {
+		b.emitDrainQuiesced(rid)
 	}
 
 	return nil
+}
+
+// isMetaEventType reports whether typ is one of the bus's own meta-events.
+// Used to break the recursion: the bus never emits a meta-event about
+// another meta-event.
+func isMetaEventType(typ string) bool {
+	switch typ {
+	case EventDispatchedType, DrainQuiescedType, HandlerFailedType, LoopExhaustedType:
+		return true
+	}
+	return false
+}
+
+// emitEventDispatched appends an EventDispatched meta-event describing the
+// fan-out for trigger and returns it so the caller can enqueue it for
+// dispatch (so aggregators subscribed to EventDispatched fire).
+//
+// The meta-event is terminal: it is a leaf observation about a routing
+// step. Terminal-ness governs the orphan watcher, not the drain — the
+// drain still routes it to subscribers, the orphan check then ignores it.
+func (b *Bus) emitEventDispatched(trigger event.Event, count int) *event.Event {
+	payload := []byte(fmt.Sprintf(`{"event_type":%q,"subscriber_count":%d}`,
+		trigger.Type, count))
+	ne := event.Event{
+		ID:        uuid.NewString(),
+		Type:      EventDispatchedType,
+		RequestID: trigger.RequestID,
+		TS:        b.clock(),
+		Source:    "bus",
+		CausedBy:  trigger.ID,
+		Terminal:  true,
+		Payload:   payload,
+	}
+	b.store.Append(ne)
+	return &ne
+}
+
+// emitDrainQuiesced records that no work remains for requestID. Emitted
+// after the queue empties; not enqueued (drain is already finishing).
+func (b *Bus) emitDrainQuiesced(requestID string) {
+	payload := []byte(fmt.Sprintf(`{"request_id":%q}`, requestID))
+	ne := event.Event{
+		ID:        uuid.NewString(),
+		Type:      DrainQuiescedType,
+		RequestID: requestID,
+		TS:        b.clock(),
+		Source:    "bus",
+		Terminal:  true,
+		Payload:   payload,
+	}
+	b.store.Append(ne)
+}
+
+// emitHandlerFailed records a handler raising an error. We capture handler
+// name, the event type that triggered the failure, and the error string.
+// Not enqueued: the dispatcher is about to abort.
+func (b *Bus) emitHandlerFailed(handlerName string, trigger event.Event, err error) {
+	payload := []byte(fmt.Sprintf(`{"handler_name":%q,"event_type":%q,"error":%q}`,
+		handlerName, trigger.Type, err.Error()))
+	ne := event.Event{
+		ID:        uuid.NewString(),
+		Type:      HandlerFailedType,
+		RequestID: trigger.RequestID,
+		TS:        b.clock(),
+		Source:    "bus",
+		CausedBy:  trigger.ID,
+		Terminal:  true,
+		Payload:   payload,
+	}
+	b.store.Append(ne)
 }
 
 // loopExhaustedPayload formats the diagnostic payload as a JSON object with

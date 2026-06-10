@@ -47,15 +47,23 @@ go run ./cmd/reflex run --config examples/stall.yaml --message "anything" --trac
 
 ## Subcommands
 
-reflex has three verbs, all driven by `--config <yaml>`:
+reflex's verbs, all driven by `--config <yaml>`:
 
 ```
-reflex run      --config <yaml> --message <text> [--trace]
+reflex run      --config <yaml> --message <text> [--trace] [--wait <p>]
+reflex emit     --config <yaml> --type <Type> --payload <json> [--wait <p>]
+reflex invoke   --config <yaml> <command> [args]    [--wait <p>]
+reflex send     --config <yaml> <text>              [--wait <p>]
 reflex validate --config <yaml>
 reflex describe --config <yaml>
 ```
 
 - `run` — execute a single user message through the bus and print the trace.
+- `emit` — seed an arbitrary event into the bus (any type, any payload).
+- `invoke` / `send` — Phase 1.6 sugar over `emit` using the YAML
+  `events.cli` bindings (see Phase 1.6 section above).
+- `--wait <predicate>` — block until a post-drain predicate is satisfied:
+  `drain` | `request_id_terminal` | `projection.has=<key>`.
 - `validate` — compile the YAML into a static handler graph and check for
   uncapped cycles. Exits 0 on a valid config and prints
   `config valid: N handlers, M edges, K declared loops`. Exits 1 on an
@@ -94,6 +102,114 @@ This is the foundation Phase 4 (the daemon + client SDK) will lean on:
 handlers in separate processes will announce themselves to a bus daemon
 using exactly this `HandlerSpec` shape, and the daemon will run the same
 graph validation before letting traffic flow.
+
+## Phase 1.6: meta-events, projection, aggregator, wait-predicates
+
+Reflex's core thesis is **everything is an event**. There is no synchronous
+wait-for-reply primitive — no `hook`, no RPC-shaped addressing. Phase 1.6
+delivers the pieces that let real fan-out / barrier patterns be expressed
+without breaking that invariant.
+
+### Bus meta-events
+
+The bus publishes its own activity onto the same log it routes user
+events on. All three meta-events are terminal (they describe a routing
+step; they don't trigger further user work) and carry a `caused_by`
+linking back to the event they describe:
+
+- `EventDispatched{event_type, subscriber_count}` — emitted after the bus
+  has finished delivering an event to all matching subscribers.
+  `subscriber_count` is the number of handlers that matched.
+- `DrainQuiesced{request_id}` — emitted when no work remains for a
+  `request_id`. One per request_id observed during the run.
+- `HandlerFailed{handler_name, event_type, error}` — emitted when a
+  handler's `React` raises.
+
+Meta-events are first-class. Handlers can subscribe to them
+(`on: EventDispatched`), the analyzer reads them, the CLI wait-predicates
+key off them. The bus never emits a meta-event about another meta-event
+(that would recurse). The orphan watcher specifically ignores
+`EventDispatched` when counting descendants, so the Phase 1 invariant
+stays meaningful.
+
+### Projection as a first-class side-channel
+
+`SessionProjection` (the pure fold) is the canonical state derivation, but
+some patterns want a place to stash a structured intermediate result that
+downstream handlers can pick up by key — a triage verdict, an extracted
+entity, a parsed plan. `pkg/projection.Store` is that side-channel: a
+per-request key/value map that the runtime wires into every handler
+implementing `bus.ProjectionAware`. Handlers `Set(request_id, key, value)`
+during reaction; downstream readers `Get(request_id, key)`.
+
+The projection is not a substitute for events — anything that should
+affect causal structure stays an event. It is a way to express "I have
+decided X" once, without re-emitting an event every time someone wants to
+know. The triage example writes its decision under `triage.verdict`; the
+CLI predicate `projection.has=triage.verdict` waits for it.
+
+### Generic aggregator handler
+
+The `aggregator` handler type collects N responses to a fan-out trigger
+and emits one aggregated event once enough have arrived. Crucially, it
+does not need to know N at construction time — it learns it from
+`EventDispatched.subscriber_count` for the fan-out event:
+
+```yaml
+- name: collect
+  kind: aggregator        # YAML alias: type: aggregator
+  on: Classification      # the per-handler response events to accumulate
+  emits: [ClassificationsAggregated]
+  config:
+    expected_from: ClassifyRequested   # take subscriber_count from EventDispatched of this type
+    emit: ClassificationsAggregated    # the aggregated event type
+```
+
+When the aggregator has seen `subscriber_count` responses for the same
+`request_id`, it emits a terminal
+`ClassificationsAggregated{items: [...], count: N}` event. Exactly once
+per request. `examples/aggregate.yaml` is a 3-classifier fan-out with the
+aggregator finalising into `RequestHandled`.
+
+### CLI: emit, invoke, send + wait-predicates
+
+The `reflex run --message <text>` shorthand still works. Phase 1.6 adds:
+
+- `reflex emit --config <yaml> --type <EventType> --payload <json>` —
+  seed an arbitrary event into the bus.
+- `reflex invoke <command> [args]` — sugar over `emit` using YAML-declared
+  bindings.
+- `reflex send <text>` — even more sugar: emits the event whose
+  `cli.command: send` binding matches.
+
+All three accept `--wait <predicate>`. Three predicates ship:
+
+- `drain` — succeed once `DrainQuiesced` fires for the request_id.
+- `request_id_terminal` — succeed once any user-domain terminal event
+  (RequestHandled, RequestUnhandled, EventOrphaned, LoopExhausted, etc;
+  meta-events don't count) fires for the request_id.
+- `projection.has=<key>` — succeed once the projection store contains
+  `key` for the request_id.
+
+Events can declare their default CLI binding + wait predicate in the YAML:
+
+```yaml
+events:
+  - name: RequestReceived
+    args: { payload: string }
+    cli:
+      command: invoke triage
+      wait: projection.has=triage.verdict
+
+  - name: MessageReceived
+    args: { text: string }
+    cli:
+      command: send
+      wait: drain
+```
+
+So `reflex invoke triage archai#114` is sugar for
+`reflex emit --type RequestReceived --payload '{"payload":"archai#114"}' --wait projection.has=triage.verdict`.
 
 ## Loops
 
@@ -135,7 +251,7 @@ pkg/handler/        built-in handler factories + HandlerSpec self-description + 
 pkg/graph/          static handler graph compiler + Tarjan SCC cycle detection
 pkg/config/         YAML loader + validation (including `loop:` grammar)
 internal/runtime/   glue: build a bus from a config, run a single user message
-examples/           calc / stall / triage (working) + loop (capped cycle) + bad_loop / cycle (validate negatives)
+examples/           calc / stall / triage / aggregate (working) + loop (capped cycle) + bad_loop / cycle (validate negatives)
 ```
 
 ## YAML handler grammar
@@ -168,6 +284,7 @@ handlers:
 | `parse_target`       | typically `RequestReceived` | `TargetParsed`, `ParseFailed`       | `default_owner` (default `kgatilin`) |
 | `gh_query`           | typically `TargetParsed` | `GhQueryResult`, `GhQueryFailed`       | `path` (e.g. `comments`, `timeline`) |
 | `triage_rules`       | typically `GhQueryResult` | `TriageDecided`, `TriagePending`     | `stuck_hours` (48), `kira_login`, `now` (RFC3339, default real `time.Now()`) |
+| `aggregator`         | configurable (the response type) | event type from `config.emit` (terminal) | `expected_from` (fan-out event type), `emit` (aggregated type) |
 
 ### `llm_stub` rule grammar
 

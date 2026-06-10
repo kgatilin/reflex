@@ -64,9 +64,20 @@ func CheckQuiescence(ctx context.Context, b *bus.Bus) error {
 	snapshot = store.Snapshot()
 	childCount := map[string]int{}
 	for _, e := range snapshot {
-		if e.CausedBy != "" {
-			childCount[e.CausedBy]++
+		if e.CausedBy == "" {
+			continue
 		}
+		// EventDispatched is caused-by every routed event by
+		// construction; counting it would hide every genuine orphan.
+		// LoopExhausted, by contrast, IS the descendant the trigger
+		// needed (its whole job in Phase 1.5 was to close the chain),
+		// so it stays in the count. DrainQuiesced has no caused_by;
+		// HandlerFailed implies a fatal abort so the watcher isn't
+		// invoked.
+		if e.Type == projection.TypeEventDispatched {
+			continue
+		}
+		childCount[e.CausedBy]++
 	}
 
 	// Pass 2: event-level — non-terminal events with zero descendants.

@@ -21,9 +21,10 @@ import (
 
 // Result is what the runtime returns to the CLI after a single user message.
 type Result struct {
-	RequestID string
-	Events    []event.Event
-	State     projection.SessionState
+	RequestID  string
+	Events     []event.Event
+	State      projection.SessionState
+	Projection *projection.Store
 }
 
 // Build constructs a bus from cfg with handlers built via the supplied
@@ -40,7 +41,8 @@ func Build(cfg *config.File, reg *handler.Registry) (*bus.Bus, error) {
 		return nil, err
 	}
 	store := event.NewStore()
-	opts := []bus.Option{}
+	proj := projection.NewStore()
+	opts := []bus.Option{bus.WithProjection(proj)}
 	if cfg.Settings.MaxSteps > 0 {
 		opts = append(opts, bus.WithMaxSteps(cfg.Settings.MaxSteps))
 	}
@@ -55,6 +57,7 @@ func Build(cfg *config.File, reg *handler.Registry) (*bus.Bus, error) {
 		}
 		b.Register(sub)
 	}
+	b.WireProjection()
 	return b, nil
 }
 
@@ -80,5 +83,10 @@ func Run(ctx context.Context, b *bus.Bus, message string) (*Result, error) {
 	}
 	all := b.Store().Snapshot()
 	state := projection.SessionProjection(all, reqID)
-	return &Result{RequestID: reqID, Events: all, State: state}, nil
+	return &Result{
+		RequestID:  reqID,
+		Events:     all,
+		State:      state,
+		Projection: b.Projection(),
+	}, nil
 }

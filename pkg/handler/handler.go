@@ -222,6 +222,7 @@ func BuiltinRegistry() *Registry {
 	must(r.Register(parseTargetSpec(), newParseTarget))
 	must(r.Register(ghQuerySpec(), newGhQuery))
 	must(r.Register(triageRulesSpec(), newTriageRules))
+	must(r.Register(aggregatorSpec(), newAggregator, aggregatorSpecResolver))
 	return r
 }
 

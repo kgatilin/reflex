@@ -40,6 +40,20 @@ type triageRulesConfig struct {
 	Now string `yaml:"now"`
 }
 
+// triageRulesSub is the runtime instance of triage_rules. It carries a
+// handle to the projection store so that, when it reaches a decision, it
+// can stash the verdict under projection key "triage.verdict" — making it
+// readable by downstream handlers (and by CLI wait-predicates) without
+// re-deriving from the event log.
+type triageRulesSub struct {
+	*genericSub
+	proj *projection.Store
+}
+
+// SetProjection satisfies bus.ProjectionAware: the runtime wires the
+// bus's projection store into the handler after construction.
+func (t *triageRulesSub) SetProjection(p *projection.Store) { t.proj = p }
+
 // newTriageRules folds the GhQueryResult events for the request into a
 // TriageDecided event. It fires once per GhQueryResult event but skips
 // emission until BOTH `comments` and `timeline` paths have arrived for the
@@ -49,6 +63,11 @@ type triageRulesConfig struct {
 // would be cleaner but adds a YAML concept; the projection makes "do we
 // have both?" a one-line check, and TriageDecided is idempotent on
 // re-emission because the projection-based deduplication catches it.
+//
+// Phase 1.6: when the decision is reached, the verdict is also written
+// into the projection store under "triage.verdict" so downstream
+// handlers (and CLI wait-predicates) can pick it up without scanning
+// the event log themselves.
 func newTriageRules(cfg config.HandlerConfig) (bus.Subscriber, error) {
 	var tc triageRulesConfig
 	if err := decodeConfig(cfg.Config, &tc); err != nil {
@@ -74,7 +93,8 @@ func newTriageRules(cfg config.HandlerConfig) (bus.Subscriber, error) {
 	name := cfg.Name
 	on := cfg.On
 
-	return &genericSub{
+	sub := &triageRulesSub{}
+	sub.genericSub = &genericSub{
 		baseSub: baseSub{name: name},
 		on:      on,
 		run: func(_ context.Context, ev event.Event, log []event.Event) ([]event.Event, error) {
@@ -166,21 +186,30 @@ func newTriageRules(cfg config.HandlerConfig) (bus.Subscriber, error) {
 			reason := fmt.Sprintf("label_age=%dh, kira=%d → %s",
 				hours, kiraInteractions, classification)
 
-			payload, err := json.Marshal(map[string]any{
+			verdict := map[string]any{
 				"classification":    classification,
 				"reason":            reason,
 				"label_age_hours":   hours,
 				"kira_interactions": kiraInteractions,
-			})
+			}
+			payload, err := json.Marshal(verdict)
 			if err != nil {
 				return nil, err
+			}
+			// Phase 1.6 projection write: downstream handlers can read
+			// the verdict by key without re-folding the event log, and
+			// the CLI projection.has=triage.verdict wait-predicate
+			// resolves on this entry.
+			if sub.proj != nil {
+				sub.proj.Set(ev.RequestID, "triage.verdict", verdict)
 			}
 			return []event.Event{{
 				Type:    projection.TypeTriageDecided,
 				Payload: payload,
 			}}, nil
 		},
-	}, nil
+	}
+	return sub, nil
 }
 
 // classifyInputs is the pure decision function — separated so tests can drive

@@ -23,10 +23,37 @@ import (
 )
 
 // File is the top-level YAML document. Settings is optional; Handlers is the
-// list of declared subscribers.
+// list of declared subscribers. Events is the optional Phase 1.6 section
+// that declares known event types and their CLI bindings.
 type File struct {
 	Settings Settings        `yaml:"settings"`
 	Handlers []HandlerConfig `yaml:"handlers"`
+	Events   []EventConfig   `yaml:"events"`
+}
+
+// EventConfig declares a known event type so the CLI can emit it directly
+// (`reflex emit <type>` or `reflex invoke <command>`), and so the analyzer
+// can validate trace events against a schema.
+//
+// Args is an open map: keys are payload field names, values are type hints
+// (e.g. "string", "int"). The current CLI only consumes Args names when
+// binding positional flags; type validation is left to handlers.
+//
+// CLI is the optional binding: it tells the CLI how to surface this event
+// as a friendly subcommand. Command="invoke triage" means
+// `reflex invoke triage <args>` emits this event. Wait names the
+// wait-predicate the CLI applies after emission (drain |
+// request_id_terminal | projection.has=<key>).
+type EventConfig struct {
+	Name string         `yaml:"name"`
+	Args map[string]any `yaml:"args"`
+	CLI  *EventCLI      `yaml:"cli,omitempty"`
+}
+
+// EventCLI is the CLI binding for an EventConfig.
+type EventCLI struct {
+	Command string `yaml:"command"`
+	Wait    string `yaml:"wait"`
 }
 
 // Settings carries optional run-level knobs.
