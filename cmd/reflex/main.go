@@ -56,6 +56,7 @@ func newRunCmd() *cobra.Command {
 		configPath string
 		message    string
 		trace      bool
+		traceFile  string
 	)
 	cmd := &cobra.Command{
 		Use:          "run",
@@ -92,6 +93,28 @@ func newRunCmd() *cobra.Command {
 				}
 			}
 
+			// --trace-file writes the full event log as one JSON object per
+			// line to a file, leaving stdout free for the printer handler's
+			// human-readable output. This is the clean-machine-readable
+			// counterpart to --trace (which mixes JSONL into stdout). The
+			// two flags are independent — set either, both, or neither.
+			if traceFile != "" {
+				f, ferr := os.Create(traceFile)
+				if ferr != nil {
+					return fmt.Errorf("--trace-file: %w", ferr)
+				}
+				enc := json.NewEncoder(f)
+				for _, e := range res.Events {
+					if err := enc.Encode(e); err != nil {
+						_ = f.Close()
+						return err
+					}
+				}
+				if cerr := f.Close(); cerr != nil {
+					return fmt.Errorf("--trace-file close: %w", cerr)
+				}
+			}
+
 			if res.State.Unhandled {
 				fmt.Fprintf(cmd.OutOrStderr(),
 					"request %s unhandled: %s\n",
@@ -109,6 +132,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&configPath, "config", "", "path to handler YAML")
 	cmd.Flags().StringVar(&message, "message", "", "user message to feed into RequestReceived")
 	cmd.Flags().BoolVar(&trace, "trace", false, "dump the full event log to stdout (one JSON object per line)")
+	cmd.Flags().StringVar(&traceFile, "trace-file", "", "write the full event log to a file as one JSON object per line (does not mix with stdout)")
 	return cmd
 }
 
