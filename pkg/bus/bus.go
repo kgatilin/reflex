@@ -36,6 +36,13 @@ type Subscriber interface {
 	React(ctx context.Context, ev event.Event, log []event.Event) ([]event.Event, error)
 }
 
+// LoopExhaustedType is the event type the dispatcher emits when a declared
+// loop hits its max_iterations cap. The string is duplicated here (rather
+// than imported from pkg/projection) to keep the bus package free of
+// projection imports. The projection layer re-exports the same literal as
+// projection.TypeLoopExhausted.
+const LoopExhaustedType = "LoopExhausted"
+
 // Bus owns the event store and the subscriber registry. Dispatch is
 // single-threaded by design: each event drains its consequences before the
 // next event is processed. That gives reflex deterministic event ordering
@@ -46,6 +53,11 @@ type Bus struct {
 	source      string
 	maxSteps    int
 	clock       func() time.Time
+	// loopCaps is the per-handler-name iteration cap. When a subscriber's
+	// Name matches a key here, the dispatcher tracks (requestID, name)
+	// fire counts and refuses to fire past the cap; it emits a terminal
+	// LoopExhausted event instead.
+	loopCaps map[string]int
 }
 
 // Option customises a Bus.
@@ -66,6 +78,26 @@ func WithSource(s string) Option {
 // WithClock overrides time.Now for tests.
 func WithClock(c func() time.Time) Option {
 	return func(b *Bus) { b.clock = c }
+}
+
+// WithLoopCaps installs per-handler iteration caps. Used by the runtime
+// after compiling the YAML into a HandlerGraph: each loop-declared handler
+// is registered here so the dispatcher will refuse to over-fire it.
+//
+// The caller passes a copy of the map; later mutations don't affect the
+// bus. Passing nil clears any previously installed caps.
+func WithLoopCaps(caps map[string]int) Option {
+	return func(b *Bus) {
+		if caps == nil {
+			b.loopCaps = nil
+			return
+		}
+		out := make(map[string]int, len(caps))
+		for k, v := range caps {
+			out[k] = v
+		}
+		b.loopCaps = out
+	}
 }
 
 // New constructs a Bus over store.
@@ -121,6 +153,14 @@ func (b *Bus) Emit(ev event.Event) event.Event {
 //
 // The drain is intentionally a plain loop, not a goroutine pool: reflex
 // wants deterministic ordering and a clean trace.
+//
+// Loop enforcement (Phase 1.5): for every subscriber whose Name is keyed
+// in b.loopCaps, the dispatcher tracks a per-(request_id, handler_name)
+// fire count. When firing one more time would exceed the cap, the
+// subscriber is NOT called; the dispatcher emits a terminal
+// LoopExhausted{handler, max_iterations, request_id} event in its place,
+// caused-by the trigger event. The terminal flag closes the causal branch
+// so the orphan watcher stays silent.
 func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 	if b.store == nil {
 		return errors.New("bus: store is nil")
@@ -129,6 +169,14 @@ func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 	first := b.Emit(seed)
 	queue := []event.Event{first}
 	steps := 0
+	// fireCount[reqID][handlerName] = number of times the handler has
+	// reacted to an event for this request. Only populated for handlers
+	// keyed in b.loopCaps.
+	fireCount := map[string]map[string]int{}
+	// loopExhaustedFired[reqID][handlerName] = true once we've emitted
+	// the diagnostic; we emit at most one per (request, handler) so the
+	// trace stays clean.
+	loopExhaustedFired := map[string]map[string]bool{}
 
 	for len(queue) > 0 {
 		if err := ctx.Err(); err != nil {
@@ -152,6 +200,39 @@ func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 			if !sub.Match(ev) {
 				continue
 			}
+
+			// Loop cap enforcement happens BEFORE the React call.
+			if cap, capped := b.loopCaps[sub.Name()]; capped {
+				if fireCount[ev.RequestID] == nil {
+					fireCount[ev.RequestID] = map[string]int{}
+				}
+				if fireCount[ev.RequestID][sub.Name()] >= cap {
+					// Already at cap — skip and emit diagnostic once.
+					if loopExhaustedFired[ev.RequestID] == nil {
+						loopExhaustedFired[ev.RequestID] = map[string]bool{}
+					}
+					if !loopExhaustedFired[ev.RequestID][sub.Name()] {
+						loopExhaustedFired[ev.RequestID][sub.Name()] = true
+						payload := loopExhaustedPayload(sub.Name(), cap)
+						ne := event.Event{
+							Type:      LoopExhaustedType,
+							RequestID: ev.RequestID,
+							CausedBy:  ev.ID,
+							Source:    "bus",
+							Terminal:  true,
+							Payload:   payload,
+							ID:        uuid.NewString(),
+							TS:        b.clock(),
+						}
+						b.store.Append(ne)
+						// LoopExhausted is terminal and ought not spawn
+						// further reactions, so we don't enqueue it.
+					}
+					continue
+				}
+				fireCount[ev.RequestID][sub.Name()]++
+			}
+
 			emitted, err := sub.React(ctx, ev, snap)
 			if err != nil {
 				return fmt.Errorf("bus: subscriber %q on %q: %w", sub.Name(), ev.Type, err)
@@ -175,4 +256,14 @@ func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 	}
 
 	return nil
+}
+
+// loopExhaustedPayload formats the diagnostic payload as a JSON object with
+// the handler name and the cap that was hit. Kept as raw bytes to avoid an
+// encoding/json import at the package level (used only here).
+func loopExhaustedPayload(handlerName string, cap int) []byte {
+	// Tiny ad-hoc JSON literal — handler names are alphanumeric/underscore
+	// in practice, and the cap is an int, so escaping is unnecessary.
+	return []byte(fmt.Sprintf(`{"handler":%q,"max_iterations":%d,"reason":"loop cap reached"}`,
+		handlerName, cap))
 }

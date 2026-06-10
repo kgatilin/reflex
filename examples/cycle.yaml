@@ -1,0 +1,23 @@
+# cycle: a 3-handler uncapped cycle. `reflex validate --config
+# examples/cycle.yaml` must exit non-zero with a 3-node cycle trace.
+handlers:
+  - name: alpha
+    type: echo
+    on: GammaEvent
+    emits: [AlphaEvent]
+    config:
+      emit: AlphaEvent
+
+  - name: beta
+    type: echo
+    on: AlphaEvent
+    emits: [BetaEvent]
+    config:
+      emit: BetaEvent
+
+  - name: gamma
+    type: echo
+    on: BetaEvent
+    emits: [GammaEvent]
+    config:
+      emit: GammaEvent

@@ -1,0 +1,44 @@
+# loop example: a capped 2-handler cycle that demonstrates Phase 1.5's
+# loop runtime enforcement.
+#
+# Topology:
+#   RequestReceived -> bouncer (echo) -> PingEvent
+#                       ^                    |
+#                       |                    v
+#                       +----- pongbacker (echo) <-+
+#                              consumes PingEvent
+#                              emits PongEvent --> bouncer
+#
+# bouncer declares max_iterations: 2 — so the dispatcher will fire it at
+# most twice per request_id and then emit LoopExhausted (terminal) instead
+# of letting the cycle spin.
+#
+# Run:
+#   reflex run --config examples/loop.yaml --message "start" --trace
+#   # expect: bouncer fires twice, LoopExhausted closes the request.
+settings:
+  max_steps: 64
+
+handlers:
+  - name: bouncer
+    type: echo
+    on: PongEvent
+    emits: [PingEvent]
+    config:
+      emit: PingEvent
+    loop:
+      max_iterations: 2
+
+  - name: kickoff
+    type: echo
+    on: RequestReceived
+    emits: [PingEvent]
+    config:
+      emit: PingEvent
+
+  - name: pongbacker
+    type: echo
+    on: PingEvent
+    emits: [PongEvent]
+    config:
+      emit: PongEvent

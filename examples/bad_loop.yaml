@@ -1,0 +1,24 @@
+# bad_loop: same shape as loop.yaml but without max_iterations.
+# `reflex validate --config examples/bad_loop.yaml` must exit non-zero
+# with a clear cycle trace.
+handlers:
+  - name: bouncer
+    type: echo
+    on: PongEvent
+    emits: [PingEvent]
+    config:
+      emit: PingEvent
+
+  - name: kickoff
+    type: echo
+    on: RequestReceived
+    emits: [PingEvent]
+    config:
+      emit: PingEvent
+
+  - name: pongbacker
+    type: echo
+    on: PingEvent
+    emits: [PongEvent]
+    config:
+      emit: PongEvent

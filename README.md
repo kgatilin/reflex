@@ -25,37 +25,117 @@ requests are observable rather than silent.
 ## Quickstart
 
 ```
-go run ./cmd/reflex --config examples/calc.yaml --message "what is 2+2"
+go run ./cmd/reflex run --config examples/calc.yaml --message "what is 2+2"
 # assistant: The answer is 4
 ```
 
 Add `--trace` to dump the full event log as one JSON object per line:
 
 ```
-go run ./cmd/reflex --config examples/calc.yaml --message "what is 2+2" --trace
+go run ./cmd/reflex run --config examples/calc.yaml --message "what is 2+2" --trace
 ```
 
 Try the deliberately-broken stall example to see the watcher fire:
 
 ```
-go run ./cmd/reflex --config examples/stall.yaml --message "anything" --trace
+go run ./cmd/reflex run --config examples/stall.yaml --message "anything" --trace
 # assistant (stall): I will speak, but I will never close the request.
 # ...trace lines including a RequestUnhandled event...
 # request <uuid> unhandled: drain quiesced without RequestHandled
 # exit status 2
 ```
 
+## Subcommands
+
+reflex has three verbs, all driven by `--config <yaml>`:
+
+```
+reflex run      --config <yaml> --message <text> [--trace]
+reflex validate --config <yaml>
+reflex describe --config <yaml>
+```
+
+- `run` — execute a single user message through the bus and print the trace.
+- `validate` — compile the YAML into a static handler graph and check for
+  uncapped cycles. Exits 0 on a valid config and prints
+  `config valid: N handlers, M edges, K declared loops`. Exits 1 on an
+  uncapped cycle and prints the cycle trace.
+- `describe` — print the handler graph as a textual table: name, type,
+  description, consumes, emits (terminal emissions tagged `(T)`), and the
+  declared loop cap if any.
+
+```
+reflex validate --config examples/triage.yaml
+# config valid: 7 handlers, 6 edges, 0 declared loops
+
+reflex validate --config examples/cycle.yaml
+# cycle detected: alpha -> beta -> gamma -> alpha; no max_iterations declared; refusing to start
+# exit 1
+```
+
+## Handlers are nodes in a graph
+
+From Phase 1.5 on, **handlers are self-describing nodes in a graph from the
+start**. Every registered handler type ships with a `HandlerSpec` declaring
+its `Consumes` event type and its `Emits` set (each with `Terminal` /
+`Optional` flags). The `pkg/handler` registry exposes a read-only
+`Introspect` projection — `ListTypes`, `SpecOf`, `Emitters`, `Consumers` —
+that downstream packages use to reason about the handler topology without
+instantiating a single handler.
+
+`pkg/graph.Build` compiles a YAML config into a `HandlerGraph` via that
+projection: one node per declared handler, one edge per `(emitter, event
+type, consumer)` triple. Tarjan SCC is run over the result; any cycle that
+isn't capped by an explicit `loop: { max_iterations: N }` declaration is a
+hard error and the runtime refuses to start. This makes graph-shape
+validation a load-time concern rather than a runtime surprise.
+
+This is the foundation Phase 4 (the daemon + client SDK) will lean on:
+handlers in separate processes will announce themselves to a bus daemon
+using exactly this `HandlerSpec` shape, and the daemon will run the same
+graph validation before letting traffic flow.
+
+## Loops
+
+Cycles are sometimes the right shape — a reviewer LLM loop, a polling
+fetcher, an iterative refinement chain. Reflex models them explicitly: one
+node in the cycle must declare `loop: { max_iterations: N }`. The static
+graph validator accepts the cycle, and the dispatcher enforces the cap at
+runtime per `(request_id, handler_name)`. When the cap is hit, the
+dispatcher emits a terminal `LoopExhausted{handler, max_iterations, reason}`
+event instead of firing the handler again — the request closes cleanly.
+
+```yaml
+handlers:
+  - name: bouncer
+    type: echo
+    on: PongEvent
+    config: { emit: PingEvent }
+    loop:
+      max_iterations: 2     # bouncer fires at most twice per request
+  - name: pongbacker
+    type: echo
+    on: PingEvent
+    config: { emit: PongEvent }
+```
+
+`examples/loop.yaml` ships a capped 2-handler loop you can run end-to-end;
+`examples/bad_loop.yaml` is the same topology without a cap and
+`examples/cycle.yaml` is a 3-node uncapped cycle — both are intended for
+demonstrating `reflex validate` refusing to start.
+
 ## Repo layout
 
 ```
-cmd/reflex/         single CLI entry point
+cmd/reflex/         CLI entry point (run / validate / describe subcommands)
 pkg/event/          Event type + in-memory append-only store
-pkg/bus/            dispatcher (drain function, not goroutine pool) + Subscriber interface
+pkg/bus/            dispatcher (drain function, not goroutine pool) + Subscriber interface + loop cap enforcement
 pkg/projection/     SessionProjection — pure fold of events for one request
-pkg/handler/        built-in handler factories: llm_stub, tool_call, printer, terminator, unhandled_watcher, echo
-pkg/config/         YAML loader + validation
+pkg/handler/        built-in handler factories + HandlerSpec self-description + Introspect registry projection
+pkg/graph/          static handler graph compiler + Tarjan SCC cycle detection
+pkg/config/         YAML loader + validation (including `loop:` grammar)
 internal/runtime/   glue: build a bus from a config, run a single user message
-examples/           calc.yaml (working) + stall.yaml (intentionally broken)
+examples/           calc / stall / triage (working) + loop (capped cycle) + bad_loop / cycle (validate negatives)
 ```
 
 ## YAML handler grammar
@@ -70,6 +150,9 @@ handlers:
     on:   <event type>    # required, the event the handler subscribes to
     emits: [Type, ...]    # informational, helps readers of the YAML
     config: { ... }       # type-specific parameters
+    loop:                 # optional, Phase 1.5: declares this handler as
+      max_iterations: N   # the cap-bearing node of a cycle
+      name: <loop label>  # optional, defaults to the handler name
 ```
 
 ### Handler types

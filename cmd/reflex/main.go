@@ -4,13 +4,20 @@
 //
 // Usage:
 //
-//	reflex --config examples/calc.yaml --message "what is 2+2"
-//	reflex --config examples/calc.yaml --message "what is 2+2" --trace
+//	reflex run      --config examples/calc.yaml --message "what is 2+2"
+//	reflex run      --config examples/calc.yaml --message "what is 2+2" --trace
+//	reflex validate --config examples/triage.yaml
+//	reflex describe --config examples/triage.yaml
+//
+// Phase 1.5 introduces validate/describe subcommands; `run` is the explicit
+// verb for executing a config. For backwards compatibility, invoking the
+// bare reflex binary with --config/--message still runs the bus.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 
@@ -18,6 +25,7 @@ import (
 
 	"github.com/kgatilin/reflex/internal/runtime"
 	"github.com/kgatilin/reflex/pkg/config"
+	"github.com/kgatilin/reflex/pkg/graph"
 	"github.com/kgatilin/reflex/pkg/handler"
 )
 
@@ -29,17 +37,29 @@ func main() {
 }
 
 func newRoot() *cobra.Command {
+	root := &cobra.Command{
+		Use:   "reflex",
+		Short: "event-sourcing agent PoC — no loop, just events + YAML-declared subscribers",
+		Long: "reflex is a PoC of an agent built as a reactive event bus. " +
+			"Subscribers are declared in YAML; they react to events on the log " +
+			"and emit new ones; session state is projected, never stored.",
+		SilenceUsage: true,
+	}
+	root.AddCommand(newRunCmd())
+	root.AddCommand(newValidateCmd())
+	root.AddCommand(newDescribeCmd())
+	return root
+}
+
+func newRunCmd() *cobra.Command {
 	var (
 		configPath string
 		message    string
 		trace      bool
 	)
 	cmd := &cobra.Command{
-		Use:   "reflex",
-		Short: "event-sourcing agent PoC — no loop, just events + YAML-declared subscribers",
-		Long: "reflex is a PoC of an agent built as a reactive event bus. " +
-			"Subscribers are declared in YAML; they react to events on the log " +
-			"and emit new ones; session state is projected, never stored.",
+		Use:          "run",
+		Short:        "run a single user message through the configured bus",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if configPath == "" {
@@ -72,7 +92,6 @@ func newRoot() *cobra.Command {
 				}
 			}
 
-			// Summary line so the operator sees what happened.
 			if res.State.Unhandled {
 				fmt.Fprintf(cmd.OutOrStderr(),
 					"request %s unhandled: %s\n",
@@ -90,5 +109,74 @@ func newRoot() *cobra.Command {
 	cmd.Flags().StringVar(&configPath, "config", "", "path to handler YAML")
 	cmd.Flags().StringVar(&message, "message", "", "user message to feed into RequestReceived")
 	cmd.Flags().BoolVar(&trace, "trace", false, "dump the full event log to stdout (one JSON object per line)")
+	return cmd
+}
+
+func newValidateCmd() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:          "validate",
+		Short:        "compile the YAML config into a handler graph and check for uncapped cycles",
+		Long:         "validate exits 0 when the config compiles to a cycle-free graph (or one where every cycle has an explicit max_iterations cap), and exits 1 otherwise. The error message names the offending cycle(s).",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if configPath == "" {
+				return fmt.Errorf("--config is required")
+			}
+			reg := handler.BuiltinRegistry()
+			cfg, err := config.Load(configPath, reg.Types())
+			if err != nil {
+				return err
+			}
+			g, err := graph.Build(cfg, reg)
+			if err != nil {
+				var ce *graph.CycleError
+				if errors.As(err, &ce) {
+					fmt.Fprintln(cmd.OutOrStderr(), err.Error())
+					os.Exit(1)
+				}
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(),
+				"config valid: %d handlers, %d edges, %d declared loops\n",
+				len(g.Nodes), len(g.Edges), len(g.DeclaredLoops))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to handler YAML")
+	return cmd
+}
+
+func newDescribeCmd() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:          "describe",
+		Short:        "print the handler graph as a textual table (name, type, description, consumes, emits)",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if configPath == "" {
+				return fmt.Errorf("--config is required")
+			}
+			reg := handler.BuiltinRegistry()
+			cfg, err := config.Load(configPath, reg.Types())
+			if err != nil {
+				return err
+			}
+			// describe must work even when the config is cyclic: humans
+			// inspect a broken topology more often than a healthy one.
+			g, err := graph.Build(cfg, reg)
+			if g == nil {
+				return err
+			}
+			if err := g.Describe(cmd.OutOrStdout()); err != nil {
+				return err
+			}
+			if err != nil {
+				fmt.Fprintln(cmd.OutOrStderr(), "warning:", err.Error())
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to handler YAML")
 	return cmd
 }

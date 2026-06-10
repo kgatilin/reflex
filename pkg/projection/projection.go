@@ -62,6 +62,12 @@ const (
 	TypeGhQueryFailed = "GhQueryFailed"
 	TypeTriagePending = "TriagePending"
 	TypeTriageDecided = "TriageDecided"
+
+	// TypeLoopExhausted is the Phase 1.5 diagnostic emitted by the
+	// dispatcher when a declared loop hits its max_iterations cap. It is
+	// terminal: it closes the causal branch for the request_id rather
+	// than spawning further work.
+	TypeLoopExhausted = "LoopExhausted"
 )
 
 // SessionProjection folds events for one request into a SessionState. Events
@@ -113,6 +119,13 @@ func SessionProjection(events []event.Event, requestID string) SessionState {
 			}
 			_ = e.PayloadAs(&p)
 			state.UnhandledReason = p.Reason
+		case TypeLoopExhausted:
+			// LoopExhausted closes the request cleanly: a declared loop
+			// hit its cap, dispatcher stopped firing, no orphan should
+			// fire. The unhandled watcher reads Handled so we set it
+			// here without emitting a synthetic RequestHandled (which
+			// would lie about what happened).
+			state.Handled = true
 		}
 	}
 	return state

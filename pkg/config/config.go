@@ -39,12 +39,31 @@ type Settings struct {
 // Config is a free-form map that handler implementations parse on their own
 // terms. Keeping it opaque here means new handler types can be added without
 // touching this package.
+//
+// Loop is the Phase 1.5 declaration that this handler closes a cycle in the
+// handler graph. When present, MaxIterations becomes the edge weight on every
+// outgoing edge of this handler that participates in a cycle, and the
+// dispatcher refuses to fire this handler more than MaxIterations times per
+// request_id (emitting LoopExhausted{loop_name, request_id} instead). An
+// optional Name lets multiple disjoint loops coexist in the same config.
 type HandlerConfig struct {
 	Name   string         `yaml:"name"`
 	Type   string         `yaml:"type"`
 	On     string         `yaml:"on"`
 	Emits  []string       `yaml:"emits"`
 	Config map[string]any `yaml:"config"`
+	Loop   *LoopConfig    `yaml:"loop,omitempty"`
+}
+
+// LoopConfig declares this handler as a cycle-closing node with a hard cap.
+type LoopConfig struct {
+	// MaxIterations is the per-request cap on this handler's fire count.
+	// Must be > 0; the validator rejects 0 / negative values.
+	MaxIterations int `yaml:"max_iterations"`
+	// Name is an optional label for the loop, useful when more than one
+	// loop exists in the same config. Defaults to the handler's own Name
+	// when omitted.
+	Name string `yaml:"name"`
 }
 
 // ErrUnknownHandlerType is reported when a handler type is not registered.
@@ -102,6 +121,11 @@ func (f *File) Validate(knownTypes map[string]bool) error {
 		}
 		if h.On == "" {
 			return fmt.Errorf("config: handler %q: on is required", h.Name)
+		}
+		if h.Loop != nil {
+			if h.Loop.MaxIterations <= 0 {
+				return fmt.Errorf("config: handler %q: loop.max_iterations must be > 0", h.Name)
+			}
 		}
 	}
 	return nil
