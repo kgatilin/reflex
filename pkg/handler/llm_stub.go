@@ -16,7 +16,7 @@ import (
 // whose Match substring is present in the trigger (user message or last tool
 // result) wins; on tie, declaration order decides.
 type llmStubRule struct {
-	Match  string `yaml:"match" mapstructure:"match"`
+	Match string `yaml:"match" mapstructure:"match"`
 	// Action is one of: "tool_call", "reply", "reply_and_handle".
 	Action string `yaml:"action" mapstructure:"action"`
 	Tool   string `yaml:"tool" mapstructure:"tool"`
@@ -28,7 +28,7 @@ type llmStubConfig struct {
 	// TriggerOn declares which event types invoke the stub. Defaults to
 	// just RequestReceived. Configure ["RequestReceived",
 	// "ToolResultObserved"] to make the stub react after every tool call.
-	TriggerOn []string      `yaml:"trigger_on"`
+	TriggerOn []string `yaml:"trigger_on"`
 	// Fallback is what happens when no rule matches. Action values are the
 	// same as for rules.
 	Fallback llmStubRule   `yaml:"fallback"`
@@ -139,12 +139,17 @@ func materialise(rule llmStubRule, state projection.SessionState, trigger string
 		if err != nil {
 			return nil, err
 		}
+		// The assistant message is the *visible* leaf — the printer reads
+		// it but emits nothing of its own. Mark it terminal so the orphan
+		// watcher doesn't complain that AMP has no descendants.
 		out = append(out, event.Event{
-			Type:    projection.TypeAssistantMessageProposed,
-			Payload: payload,
+			Type:     projection.TypeAssistantMessageProposed,
+			Payload:  payload,
+			Terminal: true,
 		})
 		out = append(out, event.Event{
-			Type: projection.TypeRequestHandled,
+			Type:     projection.TypeRequestHandled,
+			Terminal: true,
 		})
 	case "", "none":
 		// Deliberate no-op — used by the stall example so nothing fires.

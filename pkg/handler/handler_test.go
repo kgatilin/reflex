@@ -155,12 +155,120 @@ func TestCheckQuiescenceSkipsHandled(t *testing.T) {
 
 func TestBuiltinRegistryHasExpectedTypes(t *testing.T) {
 	r := BuiltinRegistry()
-	want := []string{"llm_stub", "tool_call", "printer", "terminator", "unhandled_watcher", "echo"}
+	want := []string{
+		"llm_stub", "tool_call", "printer", "terminator",
+		"unhandled_watcher", "echo",
+		"parse_target", "gh_query", "triage_rules",
+	}
 	got := r.Types()
 	for _, w := range want {
 		if !got[w] {
 			t.Errorf("missing type %q in registry", w)
 		}
+	}
+}
+
+func TestOrphanWatcherFlagsNonTerminalLeaf(t *testing.T) {
+	store := event.NewStore()
+	b := bus.New(store)
+	// A synthetic chain: A (non-terminal) → B (non-terminal, no children).
+	// Both are emitted directly; B should be flagged as orphan.
+	first := b.Emit(event.Event{Type: "A", RequestID: "r"})
+	b.Emit(event.Event{Type: "B", RequestID: "r", CausedBy: first.ID})
+	if err := CheckQuiescence(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	gotOrphan := false
+	for _, e := range store.Snapshot() {
+		if e.Type == projection.TypeEventOrphaned {
+			gotOrphan = true
+			if !e.Terminal {
+				t.Fatal("EventOrphaned must itself be terminal")
+			}
+			var p map[string]string
+			if err := e.PayloadAs(&p); err != nil {
+				t.Fatalf("decode orphan payload: %v", err)
+			}
+			if p["orphan_type"] != "B" {
+				t.Fatalf("orphan_type = %q, want B", p["orphan_type"])
+			}
+		}
+	}
+	if !gotOrphan {
+		t.Fatal("expected EventOrphaned for leaf B")
+	}
+}
+
+func TestOrphanWatcherSkipsTerminalLeaf(t *testing.T) {
+	store := event.NewStore()
+	b := bus.New(store)
+	// Chain ending in terminal RequestHandled — must NOT produce orphan.
+	first := b.Emit(event.Event{Type: "RequestReceived", RequestID: "r"})
+	b.Emit(event.Event{
+		Type: projection.TypeRequestHandled, RequestID: "r",
+		CausedBy: first.ID, Terminal: true,
+	})
+	if err := CheckQuiescence(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range store.Snapshot() {
+		if e.Type == projection.TypeEventOrphaned {
+			t.Fatalf("unexpected EventOrphaned: %+v", e)
+		}
+	}
+}
+
+func TestOrphanWatcherRespectsExplicitTerminal(t *testing.T) {
+	// A handler that emits an explicit terminal event should not trip the
+	// orphan watcher even if no further descendants follow.
+	store := event.NewStore()
+	b := bus.New(store)
+	first := b.Emit(event.Event{Type: "RequestReceived", RequestID: "r"})
+	b.Emit(event.Event{
+		Type: "AssistantMessageProposed", RequestID: "r",
+		CausedBy: first.ID, Terminal: true,
+	})
+	b.Emit(event.Event{
+		Type: projection.TypeRequestHandled, RequestID: "r",
+		CausedBy: first.ID, Terminal: true,
+	})
+	if err := CheckQuiescence(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range store.Snapshot() {
+		if e.Type == projection.TypeEventOrphaned {
+			t.Fatalf("unexpected EventOrphaned: %+v", e)
+		}
+	}
+}
+
+func TestOrphanWatcherDoesNotLoopOnItself(t *testing.T) {
+	// EventOrphaned itself is terminal — so re-running CheckQuiescence on a
+	// log that already contains one must not multiply the orphans.
+	store := event.NewStore()
+	b := bus.New(store)
+	first := b.Emit(event.Event{Type: "X", RequestID: "r"})
+	b.Emit(event.Event{Type: "Y", RequestID: "r", CausedBy: first.ID}) // orphan
+	if err := CheckQuiescence(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	countAfter1 := 0
+	for _, e := range store.Snapshot() {
+		if e.Type == projection.TypeEventOrphaned {
+			countAfter1++
+		}
+	}
+	if err := CheckQuiescence(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	countAfter2 := 0
+	for _, e := range store.Snapshot() {
+		if e.Type == projection.TypeEventOrphaned {
+			countAfter2++
+		}
+	}
+	if countAfter1 != countAfter2 {
+		t.Fatalf("orphan count changed on second pass: %d → %d", countAfter1, countAfter2)
 	}
 }
 

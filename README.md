@@ -80,8 +80,11 @@ handlers:
 | `tool_call`          | `ToolCallProposed`  | `ToolResultObserved`                       | `tool` (one of `calc`, `echo`, `length`, `upper`) |
 | `printer`            | typically `AssistantMessageProposed` | nothing                  | `prefix`, `field` (default `text`) |
 | `terminator`         | configurable        | `RequestHandled` (if not already)          | (none) |
-| `unhandled_watcher`  | `__noop__`          | `RequestUnhandled` (post-drain)            | (none) |
+| `unhandled_watcher`  | `__noop__`          | `RequestUnhandled`, `EventOrphaned` (post-drain) | (none) |
 | `echo`               | configurable        | event type from `emit:`                    | `emit` |
+| `parse_target`       | typically `RequestReceived` | `TargetParsed`, `ParseFailed`       | `default_owner` (default `kgatilin`) |
+| `gh_query`           | typically `TargetParsed` | `GhQueryResult`, `GhQueryFailed`       | `path` (e.g. `comments`, `timeline`) |
+| `triage_rules`       | typically `GhQueryResult` | `TriageDecided`, `TriagePending`     | `stuck_hours` (48), `kira_login`, `now` (RFC3339, default real `time.Now()`) |
 
 ### `llm_stub` rule grammar
 
@@ -155,6 +158,72 @@ Register a factory for it under a new YAML `type:` (e.g. `anthropic`) via
 done. Nothing else in the pipeline changes — the rest of the system reacts
 only to event types.
 
+## Terminal-event invariant
+
+Every event carries a boolean `terminal` field. Non-terminal events are
+expected to spawn at least one descendant (an event with `caused_by` ==
+their `id`); terminal events are explicit leaves of the causal DAG. The
+post-drain check (`CheckQuiescence`) emits `EventOrphaned{orphan_id,
+orphan_type, request_id}` (terminal) for every non-terminal event with
+zero descendants — a hard architectural-violation diagnostic, distinct
+from `RequestUnhandled` (request-level) vs `EventOrphaned` (event-level).
+
+Stock handlers mark events terminal when appropriate:
+
+- `llm_stub` action `reply_and_handle` → both `AssistantMessageProposed`
+  and `RequestHandled` are terminal (printer reads AMP but emits nothing,
+  so AMP closes the chain).
+- `terminator` → `RequestHandled` is terminal.
+- `unhandled_watcher` → `RequestUnhandled`, `EventOrphaned` are terminal.
+- `parse_target` failure → `ParseFailed` is terminal.
+- `gh_query` failure → `GhQueryFailed` is terminal.
+- `triage_rules` → `TriageDecided` is non-terminal (printer + terminator
+  downstream); `TriagePending` is terminal (covers the "waiting for the
+  other path" and "already decided" cases so trigger events still have
+  a descendant and stay invariant-compliant).
+
+Custom handlers should default to non-terminal (`event.New(...)`) and
+opt into terminal only for genuine leaves (`event.NewTerminal(...)`).
+
+## Triage example
+
+The `examples/triage.yaml` config classifies a real GitHub agent-ready
+issue as `STUCK`, `HEALTHY`, or `FRESH` using only the `gh` CLI on PATH:
+
+```
+go run ./cmd/reflex --config examples/triage.yaml --message "archai#114"
+# triage: label_age=267h, kira=0 → STUCK
+
+go run ./cmd/reflex --config examples/triage.yaml --message "archai#98"
+# triage: label_age=730h, kira=1 → HEALTHY
+
+go run ./cmd/reflex --config examples/triage.yaml --message "archai#9999"
+# (no triage line — GhQueryFailed + RequestUnhandled, exit 2)
+```
+
+Classification rules:
+
+- `STUCK`   — `label_age > 48h` and `kira_interactions == 0`
+- `HEALTHY` — `kira_interactions > 0`
+- `FRESH`   — `label_age ≤ 48h` and `kira_interactions == 0`
+
+`LABEL_AGE_HOURS` = hours since the most recent `labeled` timeline event
+with `label.name == "agent-ready"` (defensive fallback: earliest timeline
+entry, since the `/timeline` endpoint always returns the issue's history).
+
+`KIRA_INTERACTIONS` = comments authored by `kira-autonoma` + timeline
+`cross-referenced` entries whose `source.issue.user.login == kira-autonoma`.
+`mentioned` and `subscribed` timeline events with the same actor are
+deliberately **not** counted (they auto-fire on @-mentions and are false
+positives).
+
+The triage chain ends in `RequestHandled` on success; the example also
+shows the Phase 1 invariant in action — even when only one of the two
+`GhQueryResult` paths arrives at the time the dispatcher pops the first
+event, `triage_rules` emits a terminal `TriagePending` so the trigger
+`GhQueryResult` still has a descendant and the orphan watcher stays
+silent.
+
 ## Tests
 
 ```
@@ -163,5 +232,8 @@ go test ./...
 
 Covers the projection fold, dispatcher fan-out and bounded termination,
 YAML parse + validate (including unknown-type rejection), the calc tool,
-the printer, the watcher, the end-to-end calc scenario, and the stall
-scenario producing `RequestUnhandled`.
+the printer, the request-unhandled watcher, the event-orphan watcher
+(Phase 1 invariant), `parse_target` / `gh_query` / `triage_rules`
+(Phase 2 triage pipeline) with mocked CmdRunner against captured-from-prod
+fixtures in `pkg/handler/testdata/`, and three end-to-end runs covering
+STUCK / HEALTHY / 404-not-found.

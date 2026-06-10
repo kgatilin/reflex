@@ -27,7 +27,10 @@ func newTerminator(cfg config.HandlerConfig) (bus.Subscriber, error) {
 			if state.Handled {
 				return nil, nil
 			}
-			return []event.Event{{Type: projection.TypeRequestHandled}}, nil
+			return []event.Event{{
+				Type:     projection.TypeRequestHandled,
+				Terminal: true,
+			}}, nil
 		},
 	}, nil
 }

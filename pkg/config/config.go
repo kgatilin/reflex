@@ -5,9 +5,9 @@
 //   - type:    one of the registered handler types (see pkg/handler)
 //   - on:      the event type it subscribes to
 //   - emits:   the event types it may emit (informational; checked for unknown
-//              event names so typos in the YAML fail fast)
+//     event names so typos in the YAML fail fast)
 //   - config:  type-specific parameters (left opaque here, parsed by the
-//              handler implementation)
+//     handler implementation)
 //
 // The package is intentionally validation-only. Wiring handlers into the bus
 // happens in pkg/handler.

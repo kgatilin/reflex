@@ -20,6 +20,12 @@ import (
 // basis. Type is the discriminator that handlers match on (e.g.
 // "RequestReceived", "ToolCallProposed"). Payload is opaque JSON so handlers
 // can attach arbitrary structured data without changing the core type.
+//
+// Terminal marks an event as an explicit leaf of the causal DAG: it is not
+// expected to spawn any descendant events. Combined with CausedBy this lets
+// reflex enforce a system-level invariant — every non-terminal event must
+// have at least one child reaction; the post-drain orphan check (see
+// CheckQuiescence) emits an EventOrphaned diagnostic otherwise.
 type Event struct {
 	ID        string          `json:"id"`
 	Type      string          `json:"type"`
@@ -27,7 +33,20 @@ type Event struct {
 	TS        time.Time       `json:"ts"`
 	Source    string          `json:"source"`
 	CausedBy  string          `json:"caused_by,omitempty"`
+	Terminal  bool            `json:"terminal"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
+}
+
+// New returns a non-terminal Event with the given type and payload. It is a
+// convenience for handlers so they don't have to spell out the struct literal.
+func New(typ string, payload json.RawMessage) Event {
+	return Event{Type: typ, Payload: payload}
+}
+
+// NewTerminal returns a Terminal=true Event. Use it for events that close a
+// causal chain (RequestHandled, RequestUnhandled, EventOrphaned, etc.).
+func NewTerminal(typ string, payload json.RawMessage) Event {
+	return Event{Type: typ, Payload: payload, Terminal: true}
 }
 
 // PayloadAs decodes the event payload into v. If the payload is empty it is

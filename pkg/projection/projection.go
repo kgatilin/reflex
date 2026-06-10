@@ -45,12 +45,23 @@ type ToolResult struct {
 // configurations may emit additional event types; the projection only
 // understands these.
 const (
-	TypeRequestReceived         = "RequestReceived"
-	TypeToolCallProposed        = "ToolCallProposed"
-	TypeToolResultObserved      = "ToolResultObserved"
+	TypeRequestReceived          = "RequestReceived"
+	TypeToolCallProposed         = "ToolCallProposed"
+	TypeToolResultObserved       = "ToolResultObserved"
 	TypeAssistantMessageProposed = "AssistantMessageProposed"
-	TypeRequestHandled          = "RequestHandled"
-	TypeRequestUnhandled        = "RequestUnhandled"
+	TypeRequestHandled           = "RequestHandled"
+	TypeRequestUnhandled         = "RequestUnhandled"
+	TypeEventOrphaned            = "EventOrphaned"
+
+	// Triage-pipeline event types (Phase 2). Kept in this package so the
+	// projection — and any handler that needs to filter by type — sees a
+	// single source of truth.
+	TypeTargetParsed  = "TargetParsed"
+	TypeParseFailed   = "ParseFailed"
+	TypeGhQueryResult = "GhQueryResult"
+	TypeGhQueryFailed = "GhQueryFailed"
+	TypeTriagePending = "TriagePending"
+	TypeTriageDecided = "TriageDecided"
 )
 
 // SessionProjection folds events for one request into a SessionState. Events

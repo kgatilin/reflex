@@ -66,14 +66,18 @@ func newPrinter(cfg config.HandlerConfig) (bus.Subscriber, error) {
 		baseSub: baseSub{name: cfg.Name},
 		on:      on,
 		run: func(_ context.Context, ev event.Event, _ []event.Event) ([]event.Event, error) {
-			var p map[string]string
+			// Decode into a permissive map so the printer can read mixed
+			// payload shapes (TriageDecided has ints + strings; the calc
+			// AssistantMessageProposed has only strings).
+			var p map[string]any
 			if err := ev.PayloadAs(&p); err != nil {
 				return nil, fmt.Errorf("printer %q: decode payload: %w", cfg.Name, err)
 			}
-			text, ok := p[field]
+			raw, ok := p[field]
 			if !ok {
 				return nil, nil
 			}
+			text := fmt.Sprintf("%v", raw)
 			w := currentPrinterOutput()
 			if _, err := io.WriteString(w, prefix+text+"\n"); err != nil {
 				return nil, err

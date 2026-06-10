@@ -59,8 +59,9 @@ func (r *Registry) Build(cfg config.HandlerConfig) (bus.Subscriber, error) {
 }
 
 // BuiltinRegistry returns a Registry populated with reflex's stock handler
-// types: llm_stub, tool_call, printer, terminator, unhandled_watcher, and
-// echo. These cover the calc and stall examples.
+// types: llm_stub, tool_call, printer, terminator, unhandled_watcher, echo,
+// plus the triage-pipeline trio (parse_target, gh_query, triage_rules).
+// These cover the calc, stall, and triage examples.
 func BuiltinRegistry() *Registry {
 	r := NewRegistry()
 	must(r.Register("llm_stub", newLLMStub))
@@ -69,6 +70,9 @@ func BuiltinRegistry() *Registry {
 	must(r.Register("terminator", newTerminator))
 	must(r.Register("unhandled_watcher", newUnhandledWatcher))
 	must(r.Register("echo", newEcho))
+	must(r.Register("parse_target", newParseTarget))
+	must(r.Register("gh_query", newGhQuery))
+	must(r.Register("triage_rules", newTriageRules))
 	return r
 }
 
