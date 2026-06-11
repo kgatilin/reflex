@@ -29,6 +29,11 @@ import (
 // configured sink under a mutex.
 type auditConfig struct {
 	Sink string `yaml:"sink"`
+	// Types overrides the audited event-type set. Default is the
+	// control-plane set (auditedTypes); a topology can instead point the
+	// same JSONL machinery at any events — e.g. `types: [llm.usage]` for
+	// the cost-tracking sink (see pkg/cost and examples/agent.yaml).
+	Types []string `yaml:"types" json:"types"`
 }
 
 type auditSub struct {
@@ -37,8 +42,10 @@ type auditSub struct {
 	mu   sync.Mutex
 	sink func(line []byte) error
 
-	// matched event types — Phase 4b control-plane set
-	types map[string]bool
+	// matched event types — the control-plane set by default, or the
+	// config.types override.
+	typeList []string
+	types    map[string]bool
 }
 
 // auditedTypes returns the set of control-plane event types the audit
@@ -67,14 +74,19 @@ func newAudit(cfg config.HandlerConfig) (bus.Subscriber, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit %q: %w", cfg.Name, err)
 	}
+	typeList := ac.Types
+	if len(typeList) == 0 {
+		typeList = auditedTypes()
+	}
 	types := map[string]bool{}
-	for _, t := range auditedTypes() {
+	for _, t := range typeList {
 		types[t] = true
 	}
 	return &auditSub{
-		baseSub: baseSub{name: cfg.Name},
-		sink:    sink,
-		types:   types,
+		baseSub:  baseSub{name: cfg.Name},
+		sink:     sink,
+		typeList: typeList,
+		types:    types,
 	}, nil
 }
 
@@ -88,8 +100,8 @@ func (a *auditSub) Match(ev event.Event) bool {
 func (a *auditSub) Descriptor() bus.HandlerDescriptor {
 	d := bus.HandlerDescriptor{
 		Name:          a.name,
-		MultiConsumes: auditedTypes(),
-		Description:   "audit: log control-plane events to a JSONL sink",
+		MultiConsumes: a.typeList,
+		Description:   "audit: log subscribed events to a JSONL sink",
 	}
 	return d
 }

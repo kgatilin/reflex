@@ -116,3 +116,50 @@ func TestAuditDescriptorReportsMultiConsumes(t *testing.T) {
 		t.Fatalf("MultiConsumes = %v, want %v", desc.MultiConsumes, auditedTypes())
 	}
 }
+
+// TestAuditTypesOverride: a `types:` config points the audit machinery at an
+// arbitrary event set (the cost-tracking sink pattern) instead of the
+// control-plane defaults.
+func TestAuditTypesOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/usage.jsonl"
+	sub, err := newAudit(config.HandlerConfig{
+		Name: "usage-meter",
+		Type: "audit",
+		Config: map[string]any{
+			"sink":  "file://" + path,
+			"types": []any{"llm.usage"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("newAudit: %v", err)
+	}
+	a := sub.(*auditSub)
+
+	if !a.Match(event.Event{Type: "llm.usage"}) {
+		t.Error("must match the configured type")
+	}
+	if a.Match(event.Event{Type: bus.HandlerRegisteredType}) {
+		t.Error("control-plane defaults must be replaced, not extended")
+	}
+	if got := a.Descriptor().MultiConsumes; len(got) != 1 || got[0] != "llm.usage" {
+		t.Errorf("descriptor consumes = %v", got)
+	}
+
+	ev := event.Event{
+		ID:        "e1",
+		Type:      "llm.usage",
+		RequestID: "r1",
+		Payload:   json.RawMessage(`{"model":"vertex:anthropic/claude-opus-4-8","input_tokens":10,"output_tokens":2}`),
+	}
+	if _, err := a.React(context.Background(), ev, nil); err != nil {
+		t.Fatalf("React: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("sink file: %v", err)
+	}
+	if !strings.Contains(string(raw), `"llm.usage"`) || !strings.Contains(string(raw), `"input_tokens":10`) {
+		t.Errorf("sink line = %s", raw)
+	}
+}
