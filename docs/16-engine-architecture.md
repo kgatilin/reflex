@@ -57,10 +57,11 @@ three things beyond routing:
    is refused. This is the one place a projection feeds back into the
    mechanism (the "one concession" of doc 11) — the projection remains a
    view, but a view the bus reads at delivery time.
-3. **Enforces the cycle cap.** A subscription that would close an uncapped
-   cycle is refused at wiring time (boot or runtime, same Tarjan check —
-   doc 05); a capped cycle that exhausts its budget at dispatch time
-   produces `loop.exhausted` (T).
+3. **Enforces budgets.** A scope whose budget for a kind is exhausted gets
+   no further dispatches of that kind into its cone; the refusal is
+   announced as `scope.budget_exhausted` (T) `(was loop.exhausted)`. A
+   subscription that would close a cycle not covered by any budget is
+   refused at wiring time (boot or runtime, same Tarjan check — doc 05).
 
 A handler error during dispatch is **not fatal**: the engine appends
 `{node}.failed` (non-terminal) into the cone and continues. Failed branches
@@ -99,14 +100,32 @@ A scope is rooted at an event `R`; its members are `R`'s causal descendants:
 
 ```
 E ∈ scope(R)  ⟺  R is an ancestor of E
+               and the path R → E does not pass through scope.closed(R)
                and no other scope root lies on the path R → E
 ```
 
-The second clause makes nesting a *partition*: an event belongs directly to
+The second clause is the **sealing rule**: `scope.closed` is a boundary
+node through which causality *exits* the scope. Without it the model
+self-invalidates — `scope.closed.caused_by[]` is the cone's frontier, so
+every reaction to a closure would formally be a descendant of the root and
+would re-open the scope it just observed closing. With it, the consumer of
+`scope.closed` lives in the *parent* scope by construction (exactly
+structured concurrency: a join's continuation belongs to the enclosing
+block, not the finished one), and doc 15's "turn N+1 never emits back into
+the closed cone" is geometry, not discipline.
+
+The third clause makes nesting a *partition*: an event belongs directly to
 its nearest enclosing scope. **Nesting is transitive quiescence, for free
 from the geometry**: a nested scope's `scope.closed` is itself a non-terminal
 event in the parent's cone, so the parent cannot quiesce until every nested
 scope has closed. No nesting mechanism exists — only the membership rule.
+
+Events are never *addressed* to a scope — they **land** in one, by
+causality alone. `caused_by` is engine-stamped (doc 17), so an emit is
+always a child of its trigger and lives wherever the trigger lives; no
+handler can place an event in a scope of its choosing. Membership is a
+fact of the log, not a sender decision — which is what keeps every scope
+property derivable.
 
 How a scope gets rooted is the main open fork (also flagged in doc 15):
 
@@ -150,6 +169,10 @@ Two deliberate stances:
    errgroup row is therefore **opt-in, never implicit**: an author who
    wants first-error-cancels semantics writes the predicate and accepts
    that cancelled branches end as refused deliveries, not as handled work.
+   Corollary: every predicate that can close *before* quiescence **must**
+   cancel the remaining cone — a closed scope is sealed (membership rule),
+   so a straggler result arriving later is appended to the log but refused
+   dispatch (G9). Early closure without cancellation is not expressible.
 2. **The predicates read structure, not payloads.** `count`, `any`,
    `quiescent` are over event kinds, terminality, and the DAG. A condition
    over payload *values* is not a closure predicate — that is a reaction's
@@ -181,7 +204,7 @@ cone:
   result is appended (the log records what happened) but not dispatched
   into the cancelled cone. Idempotency-keyed effects (G5) make this safe.
 
-### Budgets
+### Budgets — and loops are budgets
 
 The guillotine problem (12 F1): a hard cap that silently discards work. The
 engine's shape for any quantitative limit (loop iterations, token spend,
@@ -191,13 +214,38 @@ wall clock):
 budget   = a counting fold over the cone (a projection)
 warning  = a threshold event into the cone (scope.budget_low),
            early enough for the consumer to wrap up
-backstop = the hard mechanism (refused dispatch / loop.exhausted)
+backstop = the hard mechanism (refused dispatch / scope.budget_exhausted)
 ```
 
 Soft limit as information, hard limit as mechanism, always in that order.
 The model sees `scope.budget_low` in its transcript fold and can choose to
 answer with what it has; the guillotine remains for the case where it
 doesn't.
+
+A budget is declared on a scope, per event kind (plus wall clock), and is
+maintained by the same incremental counters that detect quiescence
+(doc 17) — one mechanism, filtered by kind:
+
+```yaml
+scopes:
+  - root: request.received
+    budget:
+      llm.completed: 20        # at most 20 model calls in this cone
+      tool.search.call: 10     # this tool at most 10 times
+      wall_clock: 120s
+```
+
+**This dissolves the loop cap as a separate concept.** In cone geometry a
+subscription-graph cycle never exists at runtime — each iteration is fresh
+DAG nodes — so "bound the loop" *means* "bound the count of a kind within a
+cone". `loop: max_iterations` on a subscription edge is sugar for a budget
+on the corresponding scope, declared at the wrong site (the limit belongs
+to the region of work, not the wiring); `loop.exhausted` is the special
+case of `scope.budget_exhausted` where the kind is the cycle's trigger.
+Global boundedness then comes from a **mandatory default budget on the
+session scope**: every cycle lives inside some budgeted cone, trivially.
+The static Tarjan check (doc 05) remains as a *lint* — "this cycle is not
+covered by a tight budget" — not as the load-bearing mechanism.
 
 ## What the engine emits
 
@@ -211,7 +259,7 @@ are `app.session.{id}.*`; session-less machinery is `sys.*`.)
 |---|---|---|
 | dispatcher | `sys.event.dispatched` | a fan-out happened (excluded from descendant counts — see G4) |
 | dispatcher | `{node}.failed` | a handler errored; non-terminal, drain continues |
-| dispatcher | `loop.exhausted` (T) | a capped cycle hit its cap — the hard backstop |
+| dispatcher | `scope.budget_exhausted` (T) `(was loop.exhausted)` | a cone's budget for a kind ran out — the hard backstop |
 | dispatcher (control plane) | `sys.handler.registered` / `.deregistered` · `sys.subscribed` / `.unsubscribed` · `sys.subscription.rejected` | the live table's own change history (doc 05) |
 | progress projection | `scope.opened` / `scope.closed` / `scope.deadline_reached` / `scope.budget_low` | scope lifecycle: threshold crossings of the fold, announced as events |
 | watcher (post-quiescence) | `event.orphaned` (T) · `request.unhandled` (T) | the orphan invariant made visible (G4) |
@@ -257,10 +305,12 @@ any one breaks a documented behaviour.
   consumer subscribed to its own sub-scope's closure fires exactly once
   per fan-out, whatever N is — this is the syncgroup guarantee, and it is
   what doc 15's loop rests on.
-- **G7 — No unbounded loops.** An uncapped cycle cannot be wired (refused
-  at boot and at runtime by the same check); a capped cycle that exhausts
-  its budget ends in a visible `loop.exhausted`, preceded by a
-  `scope.budget_low` warning into the cone.
+- **G7 — No unbounded work.** Every cone lives under a budget (the session
+  scope carries a mandatory default; narrower scopes refine it), so no
+  cycle can run unbounded; exhaustion is visible (`scope.budget_exhausted`,
+  preceded by a `scope.budget_low` warning into the cone). The wiring-time
+  cycle check (boot and runtime alike) remains as a lint for cycles not
+  covered by a tight budget.
 - **G8 — No privileged plane.** The engine's own operations — wiring,
   refusals, scope lifecycle, failures — are events on the same log, subject
   to the same subscription, audit, and permission machinery as domain
