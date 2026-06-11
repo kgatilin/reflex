@@ -85,6 +85,12 @@ reflex from another application, jump to
     resulting-graph validation with reject/lint severities, scopes and
     projections as managed objects, pin-at-root declarations with
     per-instance intervention events, and the daemon CLI surface.
+21. [`21-operator-exercise.md`](./21-operator-exercise.md) *(draft)* —
+    dogfooding stress-test: improving the coding agent through topology
+    changesets alone (gates, subagents-as-horizons, lanes, judges,
+    crystallisation), and the ranked gaps it surfaces — context
+    budget/view compaction, log payload weight, the mid-flight steering
+    rule, `sys.node.updated`, streaming as a sink concern, eval forking.
 
 ## Convention
 
