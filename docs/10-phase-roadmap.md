@@ -14,7 +14,7 @@ tracked under its own repo and cited where reflex depends on it.
 | 1.6   | done       | events-only model: bus meta-events, projection store, generic aggregator, CLI wait-predicates (`c545df4`)                | 1.5                         |
 | 4a    | done       | bus daemon + remote handler SDK over a Unix socket (`c1b735c`)                                                            | 1.6                         |
 | 4b    | done       | control-plane events + live-table cycle detector + daemon completeness (multi-handler mux, projection RPCs, await frames, CheckQuiescence)  | 4a                          |
-| 4c    | done       | scope-based permission layer (`PermissionGranted`, `PermissionRevoked`, `PermissionDenied`) gated at the bus edge          | 4b                          |
+| 4c    | done       | scope-based permission layer (`PermissionGranted`, `PermissionRevoked`, `PermissionDenied`) gated at the bus edge (`4c00c66`) | 4b                          |
 | 4d    | pending    | scaffold CLI + tag archmotif release exposing `pkg/metrics` shim → drop the `go.mod replace` directive                   | 4a, archmotif side-quest    |
 | 4e    | pending    | external embedder API (Go `pkg/embed` package + HTTP daemon + optional gRPC)                                             | 4a                          |
 | 5     | pending    | embeddings on declared embeddable nodes + semantic-search API                                                            | 1.6                         |
