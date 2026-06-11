@@ -282,6 +282,52 @@ The same projection feeds the static cycle detector (Phase 1.5) and the
 runtime analyzer (Phase 3). See
 [`04-static-and-runtime-analysis.md`](./04-static-and-runtime-analysis.md).
 
+## Scaffolding
+
+`reflex new-handler` writes boilerplate so a new subscription can be
+added without copying a previous one. The subcommand has two modes,
+selected by `--language`:
+
+```
+reflex new-handler my-classifier \
+  --consumes Classification \
+  --emits ClassificationResult,RequestHandled \
+  --terminal RequestHandled \
+  --scope triage.classifiers \
+  [--language yaml|go] \
+  [--config path/to/handlers.yaml]
+```
+
+YAML mode (default) appends a new handler entry to the file passed via
+`--config`. When `--config` is omitted, the block is printed to stdout
+for hand-editing. The scaffolder refuses to overwrite an existing entry
+with the same name and refuses to write to a file without a top-level
+`handlers:` key. The emitted block sets `type:` to
+`TODO_handler_type` so the config doesn't accidentally validate against
+the registry before the user wires the real type:
+
+```yaml
+  - name: my-classifier
+    type: TODO_handler_type   # set to a registered handler type before running
+    on: Classification
+    emits: [ClassificationResult, RequestHandled]
+    scope: triage.classifiers
+    # NOTE: terminal emits — RequestHandled
+```
+
+Go mode writes a runnable handler binary at `cmd/<name>/main.go` (override
+with `--output-dir`). The generated file uses `pkg/sdk` with the
+declared `Consumes` / `Emits` / `Terminal` / `WithScope` options and
+includes an `OnEvent` skeleton with a `TODO` marker for the reaction. It
+refuses to overwrite an existing `main.go`. The result is a self-
+contained handler binary that connects to a running daemon over a Unix
+socket — same shape as the example at `cmd/reflex-sample-handler/`.
+
+Name validation: handler name must match `[a-z][a-z0-9-]*`; event types
+and scope dotted-paths must be Go-identifier-ish with optional dots
+(`Foo`, `core.RequestReceived`, etc.). Anything else is rejected up
+front so typos surface before they reach the YAML.
+
 ## Why self-description matters
 
 When Phase 4 promotes the runtime to a daemon with multi-process

@@ -16,13 +16,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/kgatilin/reflex/pkg/cycle"
 	"github.com/kgatilin/reflex/pkg/event"
 	"github.com/kgatilin/reflex/pkg/projection"
 )
@@ -1049,33 +1049,30 @@ func (b *Bus) emitSubscriptionRejected(handler, eventType, reason string) {
 	})
 }
 
-// liveTableHasUncappedCycle runs Tarjan's SCC over the live subscription
-// table. For every (handler H, event E) binding in `subs`, an edge exists
-// from any handler whose descriptor lists E in Emits to H. An SCC is
-// acceptable when at least one node in the SCC has MaxIterations > 0 on
-// the subscription that's part of the cycle.
+// liveTableHasUncappedCycle delegates to pkg/cycle.DetectUncappedCycle
+// over the live subscription table. For every (handler H, event E)
+// binding in `subs`, an edge exists from any handler whose descriptor
+// lists E in Emits (and not Terminal) to H. The edge is marked Capped
+// iff the consuming subscription declares MaxIterations > 0 — that
+// node's presence in the SCC absolves the cycle.
 //
 // Returns (offending-scc, ok). ok=true means no uncapped cycle.
 func liveTableHasUncappedCycle(descs map[string]HandlerDescriptor, subs []SubscriptionInfo) ([]string, bool) {
-	// Build adjacency: from = emitter handler name, to = subscribed handler name.
-	// Also record the per-handler "cap" — true if any of this handler's
-	// subscriptions has MaxIterations > 0, OR (back-compat) if loopCaps
-	// records this handler.
+	// Per-handler capped-ness: a handler is "capped" iff any of its
+	// subscriptions declares MaxIterations > 0. Computed up front so we
+	// can stamp each outbound edge's Capped flag consistently — the
+	// shared detector treats the cycle as acceptable when any node in
+	// the SCC is the source of a capped edge inside that SCC.
 	capped := map[string]bool{}
 	for _, s := range subs {
 		if s.MaxIterations > 0 {
 			capped[s.Handler] = true
 		}
 	}
-	adj := map[string][]string{}
-	for name := range descs {
-		adj[name] = nil
-	}
+
+	edges := make([]cycle.Edge, 0, len(subs))
 	for _, s := range subs {
 		consumer := s.Handler
-		// For each handler whose descriptor emits s.EventType, add an edge
-		// emitter → consumer. Skip terminal emissions — a terminal cannot
-		// spawn descendants, so it can't close a runtime cycle.
 		for emitterName, d := range descs {
 			for _, em := range d.Emits {
 				if em.Type != s.EventType {
@@ -1084,88 +1081,20 @@ func liveTableHasUncappedCycle(descs map[string]HandlerDescriptor, subs []Subscr
 				if em.Terminal {
 					continue
 				}
-				adj[emitterName] = append(adj[emitterName], consumer)
+				edges = append(edges, cycle.Edge{
+					From:   emitterName,
+					To:     consumer,
+					Capped: capped[emitterName],
+				})
 			}
 		}
 	}
-	// Tarjan
-	index := 0
-	indexOf := map[string]int{}
-	lowlink := map[string]int{}
-	onStack := map[string]bool{}
-	stack := []string{}
-	var sccs [][]string
 
-	var strongConnect func(v string)
-	strongConnect = func(v string) {
-		indexOf[v] = index
-		lowlink[v] = index
-		index++
-		stack = append(stack, v)
-		onStack[v] = true
-		for _, w := range adj[v] {
-			if _, seen := indexOf[w]; !seen {
-				strongConnect(w)
-				if lowlink[w] < lowlink[v] {
-					lowlink[v] = lowlink[w]
-				}
-			} else if onStack[w] {
-				if indexOf[w] < lowlink[v] {
-					lowlink[v] = indexOf[w]
-				}
-			}
-		}
-		if lowlink[v] == indexOf[v] {
-			var scc []string
-			for {
-				w := stack[len(stack)-1]
-				stack = stack[:len(stack)-1]
-				onStack[w] = false
-				scc = append(scc, w)
-				if w == v {
-					break
-				}
-			}
-			// Non-trivial only (size > 1 OR self-loop).
-			if len(scc) > 1 || hasSelfLoopName(scc[0], adj) {
-				sccs = append(sccs, scc)
-			}
-		}
+	scc, found := cycle.DetectUncappedCycle(edges)
+	if !found {
+		return nil, true
 	}
-	var names []string
-	for n := range adj {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	for _, v := range names {
-		if _, seen := indexOf[v]; !seen {
-			strongConnect(v)
-		}
-	}
-	for _, scc := range sccs {
-		// Any capped node in the SCC absolves it.
-		anyCapped := false
-		for _, n := range scc {
-			if capped[n] {
-				anyCapped = true
-				break
-			}
-		}
-		if !anyCapped {
-			sort.Strings(scc)
-			return scc, false
-		}
-	}
-	return nil, true
-}
-
-func hasSelfLoopName(v string, adj map[string][]string) bool {
-	for _, w := range adj[v] {
-		if w == v {
-			return true
-		}
-	}
-	return false
+	return scc, false
 }
 
 // loopExhaustedPayload formats the diagnostic payload as a JSON object with

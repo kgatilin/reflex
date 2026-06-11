@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/kgatilin/reflex/pkg/config"
+	"github.com/kgatilin/reflex/pkg/cycle"
 	"github.com/kgatilin/reflex/pkg/handler"
 )
 
@@ -180,15 +181,15 @@ func Build(cfg *config.File, intro handler.Introspect) (*HandlerGraph, error) {
 
 	// Cycle detection ignores Terminal edges — a terminal emission cannot
 	// trigger downstream by construction, so it can't close a runtime cycle.
-	cycles := stronglyConnected(g, false)
-	g.Cycles = cycles
+	// The shared detector lives in cycle.go and is also used by the live-
+	// table check in pkg/bus.
+	g.Cycles = findHandlerCycles(g)
 
 	// Validate every cycle is capped. A cycle is capped iff at least one
-	// node in the SCC declares a Loop AND every edge inside the SCC has
-	// Weight >= 1 (always true given defaults, but kept explicit).
-	if len(cycles) > 0 {
+	// node in the SCC declares a Loop (LoopCap > 0).
+	if len(g.Cycles) > 0 {
 		var uncapped [][]string
-		for _, scc := range cycles {
+		for _, scc := range g.Cycles {
 			if !cycleIsCapped(scc, g) {
 				uncapped = append(uncapped, scc)
 			}
@@ -199,6 +200,23 @@ func Build(cfg *config.File, intro handler.Introspect) (*HandlerGraph, error) {
 	}
 
 	return g, nil
+}
+
+// findHandlerCycles is the HandlerGraph-shaped adapter over
+// cycle.FindCycles. It maps every non-terminal edge into a cycle.Edge
+// (with Capped left false — the capped-ness check happens later via
+// cycleIsCapped, which looks at LoopCap on nodes). Isolated nodes don't
+// need explicit entries; they never participate in cycles by
+// construction.
+func findHandlerCycles(g *HandlerGraph) [][]string {
+	cedges := make([]cycle.Edge, 0, len(g.Edges))
+	for _, e := range g.Edges {
+		if e.Terminal {
+			continue
+		}
+		cedges = append(cedges, cycle.Edge{From: e.From, To: e.To})
+	}
+	return cycle.FindCycles(cedges)
 }
 
 // CycleError is returned by Build when one or more cycles in the handler
@@ -224,101 +242,6 @@ func cycleIsCapped(scc []string, g *HandlerGraph) bool {
 			if n.Name == name && n.LoopCap > 0 {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-// stronglyConnected returns SCCs that represent actual cycles. A trivial SCC
-// (single node, no self-loop) is dropped. If includeTerminal is false,
-// edges marked Terminal are excluded from the traversal.
-//
-// We use Tarjan's algorithm; the implementation is the textbook iterative
-// form to avoid stack overflows on large configs (none yet, but the cost
-// is one map lookup per edge).
-func stronglyConnected(g *HandlerGraph, includeTerminal bool) [][]string {
-	// Build adjacency by name → []name. Self-loops kept; terminal edges
-	// gated by flag.
-	adj := map[string][]string{}
-	for _, n := range g.Nodes {
-		adj[n.Name] = nil
-	}
-	for _, e := range g.Edges {
-		if !includeTerminal && e.Terminal {
-			continue
-		}
-		adj[e.From] = append(adj[e.From], e.To)
-	}
-
-	index := 0
-	indexOf := map[string]int{}
-	lowlink := map[string]int{}
-	onStack := map[string]bool{}
-	stack := []string{}
-	var sccs [][]string
-
-	var strongConnect func(v string)
-	strongConnect = func(v string) {
-		indexOf[v] = index
-		lowlink[v] = index
-		index++
-		stack = append(stack, v)
-		onStack[v] = true
-
-		for _, w := range adj[v] {
-			if _, seen := indexOf[w]; !seen {
-				strongConnect(w)
-				if lowlink[w] < lowlink[v] {
-					lowlink[v] = lowlink[w]
-				}
-			} else if onStack[w] {
-				if indexOf[w] < lowlink[v] {
-					lowlink[v] = indexOf[w]
-				}
-			}
-		}
-
-		if lowlink[v] == indexOf[v] {
-			var scc []string
-			for {
-				w := stack[len(stack)-1]
-				stack = stack[:len(stack)-1]
-				onStack[w] = false
-				scc = append(scc, w)
-				if w == v {
-					break
-				}
-			}
-			// Keep only non-trivial SCCs (size > 1 OR self-loop).
-			if len(scc) > 1 || hasSelfLoop(scc[0], adj) {
-				sort.Strings(scc)
-				sccs = append(sccs, scc)
-			}
-		}
-	}
-
-	// Walk in deterministic order for reproducible output.
-	var names []string
-	for _, n := range g.Nodes {
-		names = append(names, n.Name)
-	}
-	sort.Strings(names)
-	for _, v := range names {
-		if _, seen := indexOf[v]; !seen {
-			strongConnect(v)
-		}
-	}
-
-	sort.Slice(sccs, func(i, j int) bool {
-		return strings.Join(sccs[i], ",") < strings.Join(sccs[j], ",")
-	})
-	return sccs
-}
-
-func hasSelfLoop(v string, adj map[string][]string) bool {
-	for _, w := range adj[v] {
-		if w == v {
-			return true
 		}
 	}
 	return false

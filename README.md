@@ -55,12 +55,13 @@ go run ./cmd/reflex run --config examples/stall.yaml --message "anything" --trac
 reflex's verbs, all driven by `--config <yaml>`:
 
 ```
-reflex run      --config <yaml> --message <text> [--trace] [--wait <p>]
-reflex emit     --config <yaml> --type <Type> --payload <json> [--wait <p>]
-reflex invoke   --config <yaml> <command> [args]    [--wait <p>]
-reflex send     --config <yaml> <text>              [--wait <p>]
-reflex validate --config <yaml>
-reflex describe --config <yaml>
+reflex run         --config <yaml> --message <text> [--trace] [--wait <p>]
+reflex emit        --config <yaml> --type <Type> --payload <json> [--wait <p>]
+reflex invoke      --config <yaml> <command> [args]    [--wait <p>]
+reflex send        --config <yaml> <text>              [--wait <p>]
+reflex validate    --config <yaml>
+reflex describe    --config <yaml>
+reflex new-handler <name> --consumes <Type> [--emits ...] [--terminal ...] [--scope ...] [--language yaml|go]
 ```
 
 - `run` — execute a single user message through the bus and print the trace.
@@ -76,6 +77,12 @@ reflex describe --config <yaml>
 - `describe` — print the handler graph as a textual table: name, type,
   description, consumes, emits (terminal emissions tagged `(T)`), and the
   declared loop cap if any.
+- `new-handler` — scaffold a new handler. With `--language yaml` (default)
+  appends a handler block to `--config` (or prints to stdout). With
+  `--language go` writes a runnable handler binary at `cmd/<name>/main.go`
+  using `pkg/sdk`. Refuses to overwrite. See
+  [`docs/02-handlers-and-schemas.md`](./docs/02-handlers-and-schemas.md) →
+  "Scaffolding".
 
 ```
 reflex validate --config examples/triage.yaml

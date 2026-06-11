@@ -60,6 +60,7 @@ func newRoot() *cobra.Command {
 	root.AddCommand(newValidateCmd())
 	root.AddCommand(newDescribeCmd())
 	root.AddCommand(newDaemonCmd())
+	root.AddCommand(newNewHandlerCmd())
 	return root
 }
 

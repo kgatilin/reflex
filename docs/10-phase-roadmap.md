@@ -15,7 +15,7 @@ tracked under its own repo and cited where reflex depends on it.
 | 4a    | done       | bus daemon + remote handler SDK over a Unix socket (`c1b735c`)                                                            | 1.6                         |
 | 4b    | done       | control-plane events + live-table cycle detector + daemon completeness (multi-handler mux, projection RPCs, await frames, CheckQuiescence)  | 4a                          |
 | 4c    | done       | scope-based permission layer (`PermissionGranted`, `PermissionRevoked`, `PermissionDenied`) gated at the bus edge (`4c00c66`) | 4b                          |
-| 4d    | pending    | scaffold CLI + tag archmotif release exposing `pkg/metrics` shim → drop the `go.mod replace` directive                   | 4a, archmotif side-quest    |
+| 4d    | done       | scaffold CLI (`reflex new-handler`) + Tarjan consolidation into `pkg/cycle` + archmotif `v0.34.0` release → drop `go.mod replace`                | 4a, archmotif side-quest    |
 | 4e    | pending    | external embedder API (Go `pkg/embed` package + HTTP daemon + optional gRPC)                                             | 4a                          |
 | 5     | pending    | embeddings on declared embeddable nodes + semantic-search API                                                            | 1.6                         |
 | 6     | pending    | optimisation-as-rewrite live loop — compression passes via `LayerCollapseOp` emit subscription events within scope       | 4b, 4c                      |
@@ -146,13 +146,34 @@ Per-`request_id` scoped permissions ("user X can only mutate handlers
 tied to requests they started") are an explicit non-goal; Phase 4c is
 handler-scoped only.
 
-## Phase 4d — scaffold CLI + archmotif tag
+## Phase 4d — scaffold CLI + Tarjan consolidation + archmotif tag
 
-Goal: ship a `reflex new <project>` scaffold that creates a skeleton
-config + handler set; tag the archmotif release that exposes
-`pkg/metrics` publicly; drop the `replace` directive in `go.mod`. The
-analyzer then composes archmotif's matrix validators rather than
-re-implementing them locally.
+Three deliverables, all shipped:
+
+1. **`reflex new-handler` scaffold CLI.** Generates handler boilerplate
+   so a new subscription can be added without copy-paste. YAML mode
+   appends a new entry to the file passed via `--config` (or prints to
+   stdout); Go mode writes a runnable handler binary at
+   `cmd/<name>/main.go` using `pkg/sdk`. Name + event-type validation
+   up front; refuses to overwrite. See
+   [`02-handlers-and-schemas.md`](./02-handlers-and-schemas.md) →
+   "Scaffolding".
+2. **Tarjan consolidation.** The static (YAML pre-check) and runtime
+   (live-table) cycle detectors used to ship two separate Tarjan
+   implementations. Both now call into `pkg/cycle` via the shared
+   `Edge{From, To, Capped}` shape. The package exposes
+   `DetectUncappedCycle(edges) ([]string, bool)` for the runtime gate
+   and `FindCycles(edges) [][]string` for the static populator. See
+   [`04-static-and-runtime-analysis.md`](./04-static-and-runtime-analysis.md).
+3. **archmotif `v0.34.0` tag.** The `go.mod replace` directive pointing
+   at the local archmotif checkout has been removed; reflex now builds
+   on a clean machine. The release ships the public `pkg/metrics` shim
+   (`Encoder` / `Operation` / `Interpreter` / `MatrixValidator`) plus
+   `NodeInstance` + `archmotifimport.NewInstanceGraph` for non-code
+   graphs. Phase 6's cluster-collapse pass will compose
+   `LayerCollapseOp` directly off this surface.
+
+Phase 4d ships at commit `__COMMIT_HASH__`.
 
 ## Phase 4e — external embedder API
 

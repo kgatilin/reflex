@@ -52,6 +52,17 @@ a runtime cycle even though it appears in the static graph. This is the
 right behaviour: a graph like `A → B (terminal) → A` looks cyclic but
 the dispatcher will never traverse the second edge.
 
+The Tarjan implementation lives in `pkg/cycle` and is shared between
+the YAML pre-check (`pkg/graph`) and the live-table check
+(`pkg/bus.CheckLiveTableCycles`). Both call sites map their own data
+source onto the same `cycle.Edge{From, To, Capped}` shape and call
+either `cycle.FindCycles` (when the caller wants every SCC, e.g. to
+populate `HandlerGraph.Cycles` for `reflex describe`) or
+`cycle.DetectUncappedCycle` (when the caller just wants the first
+offending cycle, e.g. the runtime gate). Keeping the algorithm in one
+place is the reason both checks now agree on edge cases like
+self-loops, capped-cycle absolution, and sort ordering.
+
 ### Per-instance spec resolution
 
 The bulk of the cycle-detection precision comes from per-instance spec
