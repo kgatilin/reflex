@@ -1,0 +1,118 @@
+# react example: a real ReAct (reason → act → observe) loop built entirely
+# out of subject-typed events and capped cycles — no orchestrator, no agent
+# loop in code. The "loop" is just topology the dispatcher drains.
+#
+# The cycle (read it as a circle):
+#
+#   RequestReceived
+#     -> seed (echo)        emits llm.turn
+#       -> brain (llm_gemini)   folds the whole log into a transcript, calls
+#       |                       Gemini ONCE, emits the raw completion as
+#       |                       llm.completed{text}.  brain holds NO agent
+#       |                       logic — it is a pure log->completion filler.
+#       v
+#     decode (llm_decode)   parses the JSON action:
+#       |   action=tool  -> tool.calc.call{args}
+#       |   action=final -> assistant.message{text} (T) + RequestHandled (T)
+#       v
+#     calc (tool_node)      runs the calc builtin on tool.calc.call,
+#       |                   emits tool.calc.result{result} (or .failed)
+#       v
+#     pump-result (echo)    re-emits tool.calc.result as llm.turn ----+
+#                                                                     |
+#       +-------------------------- back to brain --------------------+
+#
+# So the model sees the running transcript on every turn (the new
+# tool.calc.result line is already folded in) and decides the NEXT single
+# step. It either calls the tool again or answers with action=final, which
+# terminates the request.
+#
+# The retry budget lives on ONE node: brain declares loop.max_iterations.
+# That is the only cap in the cycle — the dispatcher will fire brain at most
+# 6 times per request and then emit LoopExhausted (terminal) instead of
+# letting the reason/act loop spin forever. Every other node in the circle
+# (decode, calc, the echo pumps) is a pure forward step with no cap of its
+# own; capping brain is sufficient because brain is on the cycle.
+#
+# Run (requires Vertex AI ADC: `gcloud auth application-default login`):
+#   reflex run --config examples/react.yaml --message "what is 23*7 then +11"
+#   # expect the assistant to chain two calc calls and answer 172.
+#
+# Validate the static shape (no network) with:
+#   reflex validate --config examples/react.yaml
+#   reflex describe --config examples/react.yaml
+settings:
+  max_steps: 128
+
+handlers:
+  # Kick the loop off: turn the inbound request into the first llm.turn.
+  - name: seed
+    type: echo
+    on: RequestReceived
+    emits: [llm.turn]
+    config:
+      emit: llm.turn
+
+  # The reasoning node. Folds the request log into a transcript and calls
+  # Gemini once per turn. The tool menu shapes the prompt only; the node
+  # always emits a single llm.completed. The loop cap lives HERE.
+  - name: brain
+    type: llm_gemini
+    on: llm.turn
+    emits: [llm.completed]
+    config:
+      project: iow-uagent
+      location: global
+      model: gemini-3.5-flash
+      tools:
+        - name: calc
+          description: "evaluates exactly one binary integer arithmetic operation, e.g. '161+11'; cannot chain operations"
+    loop:
+      max_iterations: 6
+
+  # Protocol translation: one llm.completed JSON action in, one typed event
+  # out. tools is the allowlist; strict is left at its default (false).
+  - name: decode
+    type: llm_decode
+    on: llm.completed
+    emits: [tool.calc.call, assistant.message, RequestHandled]
+    config:
+      tools: [calc]
+
+  # The calc tool as a first-class subject-typed node.
+  - name: calc
+    type: tool_node
+    on: tool.calc.call
+    emits: [tool.calc.result, tool.calc.failed]
+    config:
+      tool: calc
+
+  # Observation pumps: feed a tool result / failure back to the brain as the
+  # next turn. These close the cycle.
+  - name: pump-result
+    type: echo
+    on: tool.calc.result
+    emits: [llm.turn]
+    config:
+      emit: llm.turn
+
+  - name: pump-failed
+    type: echo
+    on: tool.calc.failed
+    emits: [llm.turn]
+    config:
+      emit: llm.turn
+
+  # Final answer sink.
+  - name: out
+    type: printer
+    on: assistant.message
+    config:
+      prefix: "assistant: "
+      field: text
+
+  # Post-drain diagnostic: flags a request that quiesced without a terminal.
+  - name: watcher
+    type: unhandled_watcher
+    on: __noop__
+    emits: [RequestUnhandled]

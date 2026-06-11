@@ -188,3 +188,139 @@ func triageRulesSpec() HandlerSpec {
 		},
 	}
 }
+
+// llmGeminiSpec describes the Vertex AI reasoning node at the TYPE level.
+//
+// Consumes is "*" because the trigger event type comes from the YAML `on:`
+// field. The Emits set is the same for every instance — the configured tool
+// menu shapes the PROMPT, not the emitted events: the node always emits one
+// raw llm.completed (or llm.failed on a backend error). Deciding what the
+// completion means is the decoder's job, so this node has no per-tool edges.
+func llmGeminiSpec() HandlerSpec {
+	return HandlerSpec{
+		Type:        "llm_gemini",
+		Description: "Vertex AI Gemini reasoning node: folds the log to a transcript, calls the model once, emits the raw completion",
+		Consumes:    "*",
+		Emits: []EmittedSpec{
+			{Type: TypeLLMCompleted, Terminal: false, Optional: true},
+			{Type: TypeLLMFailed, Terminal: false, Optional: true},
+		},
+	}
+}
+
+// llmGeminiSpecResolver substitutes the configured emit type (default
+// llm.completed) so a node configured with a custom `emit:` shows the right
+// edge. llm.failed is always possible (any backend error path), so it stays.
+func llmGeminiSpecResolver(cfg config.HandlerConfig, base HandlerSpec) HandlerSpec {
+	emit := TypeLLMCompleted
+	if cfg.Config != nil {
+		if v, ok := cfg.Config["emit"].(string); ok && v != "" {
+			emit = v
+		}
+	}
+	resolved := base
+	resolved.Emits = []EmittedSpec{
+		{Type: emit, Terminal: false, Optional: true},
+		{Type: TypeLLMFailed, Terminal: false, Optional: true},
+	}
+	return resolved
+}
+
+// llmDecodeSpec describes the protocol-translation node at the TYPE level.
+//
+// Consumes is "*" (the trigger type is the YAML `on:`, normally llm.completed).
+// The per-instance llmDecodeSpecResolver narrows the emitted tool.<n>.call
+// edges to exactly the configured tools allowlist, so the static graph sees
+// one declared call edge per tool and nothing it can't route.
+func llmDecodeSpec() HandlerSpec {
+	return HandlerSpec{
+		Type:        "llm_decode",
+		Description: "decodes one llm.completed JSON action into tool.<n>.call or assistant.message + RequestHandled",
+		Consumes:    "*",
+		// Emits is dynamic — see llmDecodeSpecResolver.
+		Emits: nil,
+	}
+}
+
+// llmDecodeSpecResolver derives the per-instance emit set: one
+// tool.<tool>.call per configured tool, the terminal final-answer pair, the
+// non-terminal decode-failure, and (only when strict) the emission-rejected
+// event. This keeps the static graph honest — a decoder configured for [calc]
+// is not modelled as a possible emitter of tool.frobnicate.call.
+func llmDecodeSpecResolver(cfg config.HandlerConfig, base HandlerSpec) HandlerSpec {
+	resolved := base
+	var emits []EmittedSpec
+	strict := false
+	if cfg.Config != nil {
+		if tools, ok := cfg.Config["tools"].([]any); ok {
+			for _, t := range tools {
+				if s, ok := t.(string); ok && s != "" {
+					emits = append(emits, EmittedSpec{Type: "tool." + s + ".call", Optional: true})
+				}
+			}
+		}
+		if s, ok := cfg.Config["strict"].(bool); ok {
+			strict = s
+		}
+	}
+	emits = append(emits,
+		EmittedSpec{Type: TypeAssistantMessage, Terminal: true, Optional: true},
+		EmittedSpec{Type: projection.TypeRequestHandled, Terminal: true, Optional: true},
+		EmittedSpec{Type: TypeLLMDecodeFailed, Terminal: false, Optional: true},
+	)
+	if strict {
+		emits = append(emits, EmittedSpec{Type: TypeLLMEmissionRejected, Terminal: false, Optional: true})
+	}
+	resolved.Emits = emits
+	return resolved
+}
+
+// toolNodeSpec describes the subject-typed tool node at the TYPE level.
+//
+// Consumes is "*" (the YAML `on:` is tool.<tool>.call). The per-instance
+// toolNodeSpecResolver derives the two emit types (result + failed) from the
+// config so the static graph sees the right tool.<tool>.result / .failed
+// edges even when overridden via `emit:` / `fail:`.
+func toolNodeSpec() HandlerSpec {
+	return HandlerSpec{
+		Type:        "tool_node",
+		Description: "invokes a builtin tool on its tool.<n>.call trigger; emits tool.<n>.result or tool.<n>.failed",
+		Consumes:    "*",
+		// Emits is dynamic — see toolNodeSpecResolver.
+		Emits: nil,
+	}
+}
+
+// toolNodeSpecResolver derives the result/failure emit types from the config,
+// defaulting to tool.<tool>.result and tool.<tool>.failed. Both are
+// non-terminal: a result demands a downstream reaction; a failure demands a
+// retry/fallback or visibly orphans.
+func toolNodeSpecResolver(cfg config.HandlerConfig, base HandlerSpec) HandlerSpec {
+	resolved := base
+	tool, emit, fail := "", "", ""
+	if cfg.Config != nil {
+		if v, ok := cfg.Config["tool"].(string); ok {
+			tool = v
+		}
+		if v, ok := cfg.Config["emit"].(string); ok {
+			emit = v
+		}
+		if v, ok := cfg.Config["fail"].(string); ok {
+			fail = v
+		}
+	}
+	if emit == "" && tool != "" {
+		emit = "tool." + tool + ".result"
+	}
+	if fail == "" && tool != "" {
+		fail = "tool." + tool + ".failed"
+	}
+	if emit == "" {
+		return base
+	}
+	resolved.Emits = []EmittedSpec{
+		{Type: emit, Terminal: false, Optional: false},
+		{Type: fail, Terminal: false, Optional: true},
+	}
+	return resolved
+}

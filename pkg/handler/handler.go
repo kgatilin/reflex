@@ -224,6 +224,12 @@ func BuiltinRegistry() *Registry {
 	must(r.Register(triageRulesSpec(), newTriageRules))
 	must(r.Register(aggregatorSpec(), newAggregator, aggregatorSpecResolver))
 	must(r.Register(auditSpec(), newAudit))
+	// ReAct experiment trio: the Vertex AI reasoning node, the JSON-action
+	// decoder, and the subject-typed tool node. Together with echo pumps
+	// they form a capped reason/act cycle (see examples/react.yaml).
+	must(r.Register(llmGeminiSpec(), newLLMGemini, llmGeminiSpecResolver))
+	must(r.Register(llmDecodeSpec(), newLLMDecode, llmDecodeSpecResolver))
+	must(r.Register(toolNodeSpec(), newToolNode, toolNodeSpecResolver))
 	return r
 }
 
