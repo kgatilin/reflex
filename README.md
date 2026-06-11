@@ -2,6 +2,11 @@
 
 > event-sourcing agent PoC: no loop, no agent — events + YAML-declared subscribers + projection state.
 
+Full design documentation lives in [`docs/`](docs/README.md). Start with
+[`docs/01-mental-model.md`](docs/01-mental-model.md); for the externally-facing
+API see [`docs/09-embedding-api.md`](docs/09-embedding-api.md); for phase
+status see [`docs/10-phase-roadmap.md`](docs/10-phase-roadmap.md).
+
 ## The concept
 
 Most "agents" are a monolithic `prepare → think → act → observe` loop. reflex
