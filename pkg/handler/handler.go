@@ -224,6 +224,10 @@ func BuiltinRegistry() *Registry {
 	// decoder, and the subject-typed tool node. Together with echo pumps
 	// they form a capped reason/act cycle (see examples/react.yaml).
 	must(r.Register(llmGeminiSpec(), newLLMGemini, llmGeminiSpecResolver))
+	// The doc-22 multi-model body: native tool calls through the neutral
+	// provider interface, per-call llm.usage accounting. Supersedes the
+	// llm_gemini + llm_decode pair for new topologies (see examples/agent.yaml).
+	must(r.Register(llmSpec(), newLLM, llmSpecResolver))
 	must(r.Register(llmDecodeSpec(), newLLMDecode, llmDecodeSpecResolver))
 	must(r.Register(toolNodeSpec(), newToolNode, toolNodeSpecResolver))
 	return r
