@@ -42,6 +42,15 @@ drive reflex from another application, jump to
    HTTP daemon, optional gRPC.
 10. [`10-phase-roadmap.md`](./10-phase-roadmap.md) —
     every phase with status, scope, and dependencies.
+11. [`11-domain-model.md`](./11-domain-model.md) —
+    the distilled model: events, reactions, projections; errors-as-events,
+    state-as-convention, scopes as structured concurrency over a causal DAG.
+12. [`12-react-experiment.md`](./12-react-experiment.md) —
+    findings from a live ReAct agent built from atomic nodes: what the
+    three-concept model buys and which conventions are still missing.
+13. [`13-event-taxonomy.md`](./13-event-taxonomy.md) —
+    the wire shape: subjects (scope + kind), the trace envelope (correlation +
+    causation), session resolution, and projections as wildcard subscriptions.
 
 ## Convention
 
