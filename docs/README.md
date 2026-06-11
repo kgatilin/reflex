@@ -5,8 +5,10 @@ reflex — an event-sourced agent runtime in which every component (handlers,
 control plane, audit, analysis, permissions, human feedback) lives as a
 subscriber on a single bus, with no synchronous primitives.
 
-Start with [`01-mental-model.md`](./01-mental-model.md). If you just want to
-drive reflex from another application, jump to
+Start with [`01-mental-model.md`](./01-mental-model.md). For a one-page
+cheat sheet of the settled model (envelope, subjects, event catalog, node
+types) see [`00-reference.md`](./00-reference.md). If you just want to drive
+reflex from another application, jump to
 [`09-embedding-api.md`](./09-embedding-api.md). For phase status, see
 [`10-phase-roadmap.md`](./10-phase-roadmap.md).
 
