@@ -69,6 +69,11 @@ reflex from another application, jump to
     geometry buys back (could-result-in, loop counters, the distributed
     exchange), the obligation-count quiescence algorithm, and uprightness ⇒
     engine-stamped `caused_by`.
+18. [`18-pipeline-walkthrough.md`](./18-pipeline-walkthrough.md) *(draft)* —
+    a conventional assistant pipeline (intent → enrichment barrier →
+    reasoning loop → post-answer hooks) modeled end-to-end on scopes with
+    zero new primitives; surfaces two subject-grammar refinements (state
+    paths in the subject, typed closure kinds for named scopes).
 
 ## Convention
 
