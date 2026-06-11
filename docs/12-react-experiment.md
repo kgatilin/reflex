@@ -87,16 +87,39 @@ cone for verification could downgrade/annotate unverified claims. The
 failure is that no stock node does this; the win is that it needs no
 new mechanism.
 
-### F3. The LLM node is the one impure Reaction
+### F3. Impurity bites only in the executed-but-unrecorded window
 
-Same (event, log) in, different completion out — sampling, model
-updates. Replay of the log re-executes calls and may diverge;
-temperature 0 narrows but does not close this. The honest fix is
-record/replay semantics: `llm.completed` events ARE the recorded truth,
-and a replay mode must short-circuit the backend and re-serve them from
-the log (the completion is a *fact*, not a function value). This is the
-same discipline as cassette-style HTTP test fixtures, and the log
-already contains everything needed.
+(Corrected after review — the original framing overstated this.)
+
+Projection replay never re-executes anything: it folds *recorded*
+events, so `llm.completed` is read as a fact and the LLM's
+non-determinism is irrelevant to state reconstruction. Likewise there
+is no stored "program counter": the execution position is itself a
+projection — **the frontier**: non-terminal events with no
+descendants. Resume after a crash = recompute the frontier from the
+log and re-dispatch it. (The dispatcher's in-memory queue is a cache
+of this frontier; today it is lost on crash and not yet rebuilt.)
+
+The real exposure is the window between *executing* a reaction and
+*appending* its events. Crash there → the frontier still shows the
+trigger unreacted → re-dispatch → re-execution. At-least-once, the
+classic event-sourcing problem. Per node class:
+
+- **LLM node**: a duplicate Vertex call. The lost completion was never
+  recorded, so the log never disagrees with reality — the cost is
+  money and trajectory non-determinism, not correctness. Ironically
+  the *safest* node: its only effect is the emitted event.
+- **Side-effecting tools** (`tool.email.send`): re-execution means two
+  emails. These need an idempotency key — the trigger event's `id` is
+  the natural one; a tool that has already seen the id re-serves its
+  recorded result instead of repeating the effect.
+
+Cassette-style record/replay (`llm.completed` re-served from a
+recording) remains legitimate, but as a *testing tool*, not a
+correctness requirement: regression runs of a topology against a
+recorded trace, and the Phase 6 optimiser's behavioural-equivalence
+check over a trace corpus — re-running a rewritten graph against live
+LLM sampling would compare noise with noise.
 
 ### F4. Signal events smuggle payloads
 
