@@ -202,6 +202,90 @@ originally left open is resolved: turn scopes are named after their node
 — `scope.brain.turn.closed` — so a per-turn budget attaches at the node;
 see doc 16, rooting.)*
 
+## Variation: human-in-the-loop confirmation
+
+The suspect case: a tool needs the user's approval mid-flow. Naively this
+looks like "the cone must wait for an event with no cause inside it" — an
+external wait the quiescence geometry cannot express. The resolution is a
+reframe: **there is no missing result, there is a differently-typed
+result.**
+
+```
+tool.transfer.call → tool.transfer.confirm_required{amount, to}
+```
+
+The tool *completed* — its outcome is "a human is needed". The cone
+quiesces normally, and the consequence is the load-bearing one: **nothing
+in the system ever waits for the human.** The human's absence is a
+recorded fact plus a future ingress, never an open obligation. Waiting is
+represented as *state*, not as *suspension* — execution splits into the
+structural axis (the cone: always closes promptly) and the temporal axis
+(the session: lives arbitrarily long). The alternative — holding the cone
+open and stitching the user's reply in via `caused_by` — is expressible
+but fights deadlines, budgets, and request semantics (a multi-day OTel
+trace); close-and-reopen is the default, and it is *literally* the
+multi-turn conversation machinery that already exists.
+
+Routing on closure without burning a model call: the engine cannot fork
+the closure kind by cone content (it is payload-blind), and a payload
+filter on the subscription is deprecated routing — so the content-to-kind
+conversion is a **pure in-bus tool** (doc 15: data-fork is a tool's job):
+
+```yaml
+- name: turn-gate        # one fold, one typed emission
+  on:   scope.brain.turn.closed
+  emit: [turn.complete, user.confirm.needed]
+
+- name: brain
+  on:   [scope.intent.closed, turn.complete]     # not the raw closure
+
+- name: asker            # deterministic, no model
+  on:   user.confirm.needed
+  emit: [assistant.message, state.updated.pending.confirm, request.handled]
+```
+
+The gate is the *only* reader of cone content, and it is domain code; the
+engine stays structural. Two-request trace:
+
+```
+── Request 1 ──
+request.received{"transfer 500 to Yuri"}
+ └─ … → brain turn 1
+    ├─ tool.balance.call  → result ✓
+    ├─ tool.rate.call     → result ✓
+    └─ tool.transfer.call → tool.transfer.confirm_required{...}
+   scope.brain.turn.closed
+    └─ turn-gate → user.confirm.needed
+       └─ asker → assistant.message(T) "Confirm 500 → Yuri?"
+                  + state.updated.pending.confirm{action, args, evt}(T)
+                  + request.handled(T)
+(cone closed, nothing pending anywhere)
+
+── Request 2, same session, possibly days later ──
+app.ingress.tg.message{"yes, go ahead"}
+ └─ resolver → request.received (session S)
+    └─ … brain: session fold = pending.confirm + the fuzzy "yes"
+       └─ tool.transfer.call{args, approval: evt-id}
+          └─ transfer → result ✓ (+ pending.confirm cleared)
+       … assistant.message "Done"(T) + request.handled(T)
+```
+
+Request 2 goes through the brain deliberately: human replies are fuzzy
+("yes, but 300 not 500") — interpreting them is legitimate LLM work. A
+confirmation *timeout* is not an open scope either: a reaper reaction on
+`sys.clock.tick` checks the age of `pending.confirm` — topology again.
+
+Two notes. First, the no-gate variant is also valid: the brain consumes
+the closure, sees `confirm_required` in its fold, and phrases the question
+itself — one extra model call, zero extra nodes. The gate is that
+behaviour **crystallized** (doc 08): the trace corpus shows the brain
+always emits the same ask at this gap, so the optimiser compiles a
+deterministic node. LLM-routing first, crystallize later is the staffed
+migration path, not a workaround. Second, this variation is why
+`request.handled` matters as a kind distinct from "the cone quiesced": a
+request can end *answered but unfinished* — the pending action is session
+state, and the request boundary stays honest.
+
 ## A clarification this exercise relies on
 
 `state.updated.intent` is **terminal** (a recorded fact, doc 11) *and*
