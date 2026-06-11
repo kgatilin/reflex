@@ -130,6 +130,77 @@ from raw text — or a fallback subscriber on `llm.failed` emits
 `state.updated.intent{unknown}`. Errors-as-events, as designed (doc 11,
 12 W2).
 
+## Variation: multi-model tool loop — repair lane and error lane
+
+The loop under load: the smart model reasons but aims tools poorly; a
+cheap model should repair tool arguments before execution; failures
+should be handled separately (also by a cheap model); turns iterate.
+
+```yaml
+  - name: brain            # opus: reasons, aims poorly
+    on:   [scope.intent.closed]          # + own-turn closures
+    emit: [tool.*.draft, assistant.message, request.handled]
+
+  - name: args-repair      # haiku: fixes arguments
+    on:   tool.*.draft
+    emit: [tool.*.call]                  # same name, repaired payload
+
+  - name: tool-medic       # haiku: separate error lane
+    on:   tool.*.failed
+    emit: [tool.*.call]                  # repaired retry — a cycle, capped by budget
+```
+
+One turn, all three mechanics at once:
+
+```
+brain turn 1 (opus)
+  ├─ tool.search.draft{args≈} ┐          turn sub-scope T₁
+  └─ tool.fetch.draft{args≈}  ┘
+     ├─ args-repair (haiku) → tool.search.call{args✓}
+     │    └─ search → tool.search.result
+     └─ args-repair (haiku) → tool.fetch.call{args✓}
+          └─ fetch → tool.fetch.failed{timeout}
+               └─ tool-medic (haiku) → tool.fetch.call{retry}
+                    └─ fetch → tool.fetch.result
+  (T₁ obligations → 0 — through draft→repair→call→fail→medic→retry→result)
+scope.closed{T₁}
+  └─ brain turn 2 (opus): sees the whole story — once
+```
+
+What carries it:
+
+- **The brain reacts to its turn's closure, not to individual results.**
+  Exactly-once per fan-out, full story in the fold. This is config, not
+  dogma: a node that wants streaming reaction subscribes
+  `on: [tool.*.result]` and fires per result — at the cost of N model
+  turns per fan-out. Default is the barrier; direct subscription is a
+  deliberate per-node choice.
+- **The error lane stretches the barrier automatically.** `tool.*.failed`
+  is non-terminal *inside the turn cone*; the medic's retry is a causal
+  descendant, so the turn scope cannot close until repair settles — zero
+  config. The medic→call→failed→medic cycle is capped by the request
+  budget (`tool.fetch.call: 3`). The non-repair variant: the medic emits
+  `state.updated.diagnosis.*` and the brain decides (12 W2).
+- **The repair lane is not `relay` resurrected** (doc 15 dropped pure
+  renames): args-repair transforms the payload through a model — an
+  ordinary `llm` reaction with its own consume/emit.
+- **The causal barrier is insensitive to chain length.** A counting
+  aggregator ("N calls ⇒ await N results", the old Phase 1.6) breaks the
+  moment a repairer or medic is inserted between call and result.
+  Quiescence is a property of the graph, not arithmetic — interceptor
+  lanes can be added and removed (including by the doc-08 optimiser as a
+  rewrite) without touching any synchronization.
+- **Iterations** are the chain of turn scopes T₁→T₂→…, bounded by
+  `budget: {llm.completed: 20}` with `scope.budget_low` one turn ahead of
+  the guillotine.
+
+One wrinkle, config not primitive: the brain's tool menu is still
+projected from the consumers of `tool.*.call` (the real tools' schemas),
+while its emit kinds are draft-prefixed — one config line maps menu
+actions to the draft suffix. And the known open question from doc 16
+recurs: budgets on *anonymous* turn scopes (until resolved, the request
+budget covers the cycle caps).
+
 ## A clarification this exercise relies on
 
 `state.updated.intent` is **terminal** (a recorded fact, doc 11) *and*
