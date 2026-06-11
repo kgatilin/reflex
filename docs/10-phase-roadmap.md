@@ -173,7 +173,7 @@ Three deliverables, all shipped:
    graphs. Phase 6's cluster-collapse pass will compose
    `LayerCollapseOp` directly off this surface.
 
-Phase 4d ships at commit `__COMMIT_HASH__`.
+Phase 4d ships at commit `430769e`.
 
 ## Phase 4e — external embedder API
 
