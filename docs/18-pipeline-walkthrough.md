@@ -15,7 +15,7 @@
    state write.
 3. Subscribers on that state react: check things, load context, add memory
    facts. Only when *all* of that settles may the main reasoning start.
-4. The main LLM loops: each turn ends in tool calls or a message.
+4. The main LLM loops: each firing ends in tool calls or a message.
 5. A tool's outcome may itself be a state write besides its result.
 6. The final message has its own subscribers (delivery, memory extraction,
    trust checks) — "the answer" is not "the end".
@@ -45,7 +45,7 @@ nodes:
     emit: [state.updated.profile]
 
   - name: brain           # llm
-    on:   [scope.intent.closed]         # + own-turn closures, implicit llm semantics
+    on:   [scope.intent.closed, scope.brain.closed]   # phase barrier + own-scope loop
     emit: [tool.*.call, assistant.message, request.handled]
 
   - name: search          # tool
@@ -71,13 +71,13 @@ app.ingress.tg.message
              ├─ profile-load → state.updated.profile (T)
              └─ (intent-cone obligations → 0)
           scope.intent.closed{caused_by:[note, profile]}   ← engine
-             └─ brain, turn 1: fold = text + intent + memory + profile
+             └─ brain, firing 1: fold = text + intent + memory + profile
                 ├─ tool.search.call ┐
-                └─ tool.fetch.call  ┘──────────────── auto sub-scope T₁ (fan-out)
+                └─ tool.fetch.call  ┘──────────────── brain scope S₁ (node-rooted)
                    ├─ search → tool.search.result
                    └─ fetch  → tool.fetch.result + state.updated.cache.x (T)
-                scope.closed{T₁}                      ← engine
-                   └─ brain, turn 2: decides to answer
+                scope.brain.closed{S₁}                      ← engine
+                   └─ brain, firing 2: decides to answer
                       ├─ assistant.message (T)
                       │  ├─ reply → user sees the answer NOW
                       │  ├─ memory-extract → state.updated.memory.episodic (T)
@@ -116,7 +116,7 @@ OTel trace). No one waits for extraction; nothing is lost.
 
 **Tool outcome as state.** A tool's emit set is free to include
 `state.updated.{path}` next to its result: `fetch` emits both
-`tool.fetch.result` (for the turn fold) and `state.updated.cache.x` (a
+`tool.fetch.result` (for the brain's fold) and `state.updated.cache.x` (a
 recorded fact for later requests).
 
 **Deterministic tool chains.** edit → fmt → lint is a tool whose `on:` is
@@ -134,11 +134,11 @@ from raw text — or a fallback subscriber on `llm.failed` emits
 
 The loop under load: the smart model reasons but aims tools poorly; a
 cheap model should repair tool arguments before execution; failures
-should be handled separately (also by a cheap model); turns iterate.
+should be handled separately (also by a cheap model); firings iterate.
 
 ```yaml
   - name: brain            # opus: reasons, aims poorly
-    on:   [scope.intent.closed]          # + own-turn closures
+    on:   [scope.intent.closed, scope.brain.closed]
     emit: [tool.*.draft, assistant.message, request.handled]
 
   - name: args-repair      # haiku: fixes arguments
@@ -150,11 +150,11 @@ should be handled separately (also by a cheap model); turns iterate.
     emit: [tool.*.call]                  # repaired retry — a cycle, capped by budget
 ```
 
-One turn, all three mechanics at once:
+One firing, all three mechanics at once:
 
 ```
-brain turn 1 (opus)
-  ├─ tool.search.draft{args≈} ┐          turn sub-scope T₁
+brain firing 1 (opus)
+  ├─ tool.search.draft{args≈} ┐          brain scope S₁ (node-rooted)
   └─ tool.fetch.draft{args≈}  ┘
      ├─ args-repair (haiku) → tool.search.call{args✓}
      │    └─ search → tool.search.result
@@ -162,22 +162,22 @@ brain turn 1 (opus)
           └─ fetch → tool.fetch.failed{timeout}
                └─ tool-medic (haiku) → tool.fetch.call{retry}
                     └─ fetch → tool.fetch.result
-  (T₁ obligations → 0 — through draft→repair→call→fail→medic→retry→result)
-scope.closed{T₁}
-  └─ brain turn 2 (opus): sees the whole story — once
+  (S₁ obligations → 0 — through draft→repair→call→fail→medic→retry→result)
+scope.brain.closed{S₁}
+  └─ brain firing 2 (opus): sees the whole story — once
 ```
 
 What carries it:
 
-- **The brain reacts to its turn's closure, not to individual results.**
+- **The brain reacts to its own scope's closure, not to individual results.**
   Exactly-once per fan-out, full story in the fold. This is config, not
   dogma: a node that wants streaming reaction subscribes
   `on: [tool.*.result]` and fires per result — at the cost of N model
-  turns per fan-out. Default is the barrier; direct subscription is a
+  calls per fan-out. Default is the barrier; direct subscription is a
   deliberate per-node choice.
 - **The error lane stretches the barrier automatically.** `tool.*.failed`
-  is non-terminal *inside the turn cone*; the medic's retry is a causal
-  descendant, so the turn scope cannot close until repair settles — zero
+  is non-terminal *inside the brain's scope*; the medic's retry is a causal
+  descendant, so the brain's scope cannot close until repair settles — zero
   config. The medic→call→failed→medic cycle is capped by the request
   budget (`tool.fetch.call: 3`). The non-repair variant: the medic emits
   `state.updated.diagnosis.*` and the brain decides (12 W2).
@@ -190,17 +190,17 @@ What carries it:
   Quiescence is a property of the graph, not arithmetic — interceptor
   lanes can be added and removed (including by the doc-08 optimiser as a
   rewrite) without touching any synchronization.
-- **Iterations** are the chain of turn scopes T₁→T₂→…, bounded by
-  `budget: {llm.completed: 20}` with `scope.budget_low` one turn ahead of
+- **Iterations** are the chain of scope instances S₁→S₂→…, bounded by
+  `budget: {llm.completed: 20}` with `scope.budget_low` one firing ahead of
   the guillotine.
 
 One wrinkle, config not primitive: the brain's tool menu is still
 projected from the consumers of `tool.*.call` (the real tools' schemas),
 while its emit kinds are draft-prefixed — one config line maps menu
-actions to the draft suffix. *(The turn-budget question this section
-originally left open is resolved: turn scopes are named after their node
-— `scope.brain.turn.closed` — so a per-turn budget attaches at the node;
-see doc 16, rooting.)*
+actions to the draft suffix. *(The per-firing budget question this section
+originally left open is resolved: a node-rooted scope is a named scope
+like any other — `scope.brain.closed` — so its budget lives in the scope
+declaration; see doc 16, rooting.)*
 
 ## Variation: human-in-the-loop confirmation
 
@@ -232,12 +232,12 @@ filter on the subscription is deprecated routing — so the content-to-kind
 conversion is a **pure in-bus tool** (doc 15: data-fork is a tool's job):
 
 ```yaml
-- name: turn-gate        # one fold, one typed emission
-  on:   scope.brain.turn.closed
-  emit: [turn.complete, user.confirm.needed]
+- name: brain-gate        # one fold, one typed emission
+  on:   scope.brain.closed
+  emit: [brain.proceed, user.confirm.needed]
 
 - name: brain
-  on:   [scope.intent.closed, turn.complete]     # not the raw closure
+  on:   [scope.intent.closed, brain.proceed]     # not the raw closure
 
 - name: asker            # deterministic, no model
   on:   user.confirm.needed
@@ -250,12 +250,12 @@ engine stays structural. Two-request trace:
 ```
 ── Request 1 ──
 request.received{"transfer 500 to Yuri"}
- └─ … → brain turn 1
+ └─ … → brain firing 1
     ├─ tool.balance.call  → result ✓
     ├─ tool.rate.call     → result ✓
     └─ tool.transfer.call → tool.transfer.confirm_required{...}
-   scope.brain.turn.closed
-    └─ turn-gate → user.confirm.needed
+   scope.brain.closed
+    └─ brain-gate → user.confirm.needed
        └─ asker → assistant.message(T) "Confirm 500 → Yuri?"
                   + state.updated.pending.confirm{action, args, evt}(T)
                   + request.handled(T)
@@ -309,10 +309,12 @@ reaction".
    KV bucket. The value stays in the payload.
 2. **Named scopes get typed closure kinds:** a declared scope `name: intent`
    announces `scope.intent.closed`, so phase wiring is type-level — not
-   `scope.closed{root: ...}` plus a payload filter. Turn scopes are named
-   after their rooting node (`scope.brain.turn.closed`) — subscribable by
+   `scope.closed{root: ...}` plus a payload filter. Node-rooted scopes
+   default to their node's name (`scope.brain.closed`) — subscribable by
    the node itself (the loop) or by anyone else (handoff, judging); no
-   scope is anonymous. See doc 16, rooting.
+   scope is anonymous, and "turn" is not a vocabulary word (doc 15
+   retired `llm.turn`; the log shows only firings rooting scopes). See
+   doc 16, rooting.
 
 Both are refinements of the subject grammar in
 [13-event-taxonomy.md](./13-event-taxonomy.md); neither adds a concept.
@@ -321,6 +323,6 @@ Both are refinements of the subject grammar in
 
 The pipeline needs: two reaction bodies, declared scopes with one
 non-default nothing (all `closed_when` are the default `quiescent`),
-auto-rooted turn scopes, obligation counting, and the subject grammar.
+node-rooted scopes, obligation counting, and the subject grammar.
 **Zero new primitives.** The pressure the case applies lands entirely on
 naming — which is where it should land.

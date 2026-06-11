@@ -134,21 +134,30 @@ accounted to the nearest enclosing scope):
 - **Declared** — a `scopes:` block names root kinds
   (`root: request.received`, doc 11) and carries the scope's
   configuration: deadline, budget, closure predicate. Phases live here.
-- **Node-rooted (turn scopes)** — a node body that emits *expecting work
-  back* roots a turn scope: the `llm` roots one per turn that emits ≥1
-  tool call (N=1 included — doc 15's degenerate fan-out). Emitting a
-  message roots nothing: a message is a fact, not a demand, and lands in
-  the enclosing scope. Turn configuration (budget per turn) attaches at
-  the node.
+- **Node-rooted** — a node body that emits *expecting work back* roots a
+  scope instance: the `llm` roots one per firing that emits ≥1 tool call
+  (N=1 included — doc 15's degenerate fan-out). Emitting a message roots
+  nothing: a message is a fact, not a demand, and lands in the enclosing
+  scope.
 
-Every scope is therefore **named** — declared scopes by their `scopes:`
-entry, turn scopes by their node (`brain.turn`) — and every closure is a
-typed, subscribable kind: `scope.{name}.closed`. The rooting node
-subscribes to its own turn's closure to iterate (the doc-15 loop), but so
-can anyone else — a judge observing each of the brain's turns, a
-synthesizer taking over after it — handoff is one `on:` line, not a
-mechanism. A scope exists exactly where some subscriber could consume its
-closure; nothing is rooted speculatively.
+A node-rooted scope is **not a second scope concept** — it is the same
+named scope with a different root specifier: a declared scope is rooted by
+a *kind*, a node scope by a *node's work-emitting firing*. The name is
+domain-chosen and defaults to the node name, so the brain's closures are
+`scope.brain.closed`; instances are distinguished causally (by root
+event), never by name — exactly as a kind-rooted scope roots one instance
+per root event. Configuration (per-firing budget, deadline) lives in the
+scope declaration like any other. There is deliberately **no "turn" in
+this vocabulary**: doc 15 retired `llm.turn`, and a "turn" is narrative —
+the log only ever shows a firing rooting a scope and that scope closing.
+
+Every scope is therefore **named**, and scope names are single subject
+tokens — `scope.*.closed` is the audit wildcard over all closures. The
+rooting node subscribes to its own scope's closure to iterate (the doc-15
+loop), but so can anyone else — a judge observing each of the brain's
+steps, a synthesizer taking over after it — handoff is one `on:` line,
+not a mechanism. A scope exists exactly where some subscriber could
+consume its closure; nothing is rooted speculatively.
 
 ### Scope-qualified subscriptions
 
@@ -364,9 +373,10 @@ The anti-catalog — absences that are design decisions, not gaps:
   The errgroup idiom exists (closure algebra) but is opt-in per scope.
 - **No state store.** State is `state.updated` events plus a fold. The
   engine holds no KV that isn't a projection.
-- **No orchestrator and no agent state.** The loop is a chain of per-turn
-  sub-scopes (doc 15); the scratchpad is the cone fold; the step counter is
-  the cycle cap. No engine component holds "where the agent is".
+- **No orchestrator and no agent state.** The loop is a chain of
+  node-rooted scope instances (doc 15); the scratchpad is the cone fold;
+  the step counter is the budget. No engine component holds "where the
+  agent is".
 - **No payload inspection.** The engine reads structure only — subjects,
   terminality, `caused_by`. Closure predicates, routing, stamping: all
   structural. The first payload-reading mechanism would be the first
@@ -384,7 +394,7 @@ The anti-catalog — absences that are design decisions, not gaps:
 2. **Frontier rebuild on start.** The in-memory queue is a frontier cache
    but is not yet rebuilt from the log after a crash (12 F3); G5 is
    currently aspirational.
-3. **Node-rooted turn scopes** do not exist; today's aggregator counts
+3. **Node-rooted scopes** do not exist; today's aggregator counts
    `EventDispatched.subscriber_count` instead of consuming
    `scope.{name}.closed`. Scope-qualified subscriptions (`in:`) have no
    counterpart in the live table's filter field yet.
