@@ -59,6 +59,7 @@ func newRoot() *cobra.Command {
 	root.AddCommand(newSendCmd())
 	root.AddCommand(newValidateCmd())
 	root.AddCommand(newDescribeCmd())
+	root.AddCommand(newDaemonCmd())
 	return root
 }
 
@@ -70,6 +71,7 @@ type runOpts struct {
 	trace      bool
 	traceFile  string
 	wait       string
+	daemon     string // when set, emit to a running daemon over this Unix socket
 }
 
 func addRunFlags(cmd *cobra.Command, o *runOpts) {
@@ -77,6 +79,7 @@ func addRunFlags(cmd *cobra.Command, o *runOpts) {
 	cmd.Flags().BoolVar(&o.trace, "trace", false, "dump the full event log to stdout (one JSON object per line)")
 	cmd.Flags().StringVar(&o.traceFile, "trace-file", "", "write the full event log to a file as one JSON object per line (does not mix with stdout)")
 	cmd.Flags().StringVar(&o.wait, "wait", "", "wait-predicate after emission: drain | request_id_terminal | projection.has=<key>")
+	cmd.Flags().StringVar(&o.daemon, "daemon", "", "send the seed event to a running daemon over this Unix socket instead of running in-process")
 }
 
 func newRunCmd() *cobra.Command {
@@ -122,8 +125,8 @@ func newEmitCmd() *cobra.Command {
 		Short:        "emit a single event into the bus and drain",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if opts.configPath == "" {
-				return fmt.Errorf("--config is required")
+			if opts.configPath == "" && opts.daemon == "" {
+				return fmt.Errorf("--config or --daemon is required")
 			}
 			if eventType == "" {
 				return fmt.Errorf("--type is required")
@@ -133,6 +136,12 @@ func newEmitCmd() *cobra.Command {
 				if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
 					return fmt.Errorf("--payload: %w", err)
 				}
+			}
+			if opts.daemon != "" {
+				// Daemon owns config / drain / trace; CLI just ships the
+				// seed. Local wait-predicates can't observe daemon state
+				// in Phase 4a — see TODO in emitToDaemon.
+				return emitToDaemon(cmd.Context(), opts.daemon, eventType, payload)
 			}
 			// Apply event-config defaults (wait predicate) if the YAML
 			// declares this type.
@@ -193,6 +202,9 @@ func newInvokeCmd() *cobra.Command {
 			if opts.wait == "" && ec.CLI != nil {
 				opts.wait = ec.CLI.Wait
 			}
+			if opts.daemon != "" {
+				return emitToDaemon(cmd.Context(), opts.daemon, eventType, payload)
+			}
 			res, err := executeRunWithConfig(cmd.Context(), cfg, eventType, payload)
 			if err != nil {
 				return err
@@ -230,6 +242,9 @@ func newSendCmd() *cobra.Command {
 			payload := buildPayload(ec, []string{text})
 			if opts.wait == "" && ec.CLI != nil {
 				opts.wait = ec.CLI.Wait
+			}
+			if opts.daemon != "" {
+				return emitToDaemon(cmd.Context(), opts.daemon, eventType, payload)
 			}
 			res, err := executeRunWithConfig(cmd.Context(), cfg, eventType, payload)
 			if err != nil {

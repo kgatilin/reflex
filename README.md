@@ -216,6 +216,90 @@ events:
 So `reflex invoke triage archai#114` is sugar for
 `reflex emit --type RequestReceived --payload '{"payload":"archai#114"}' --wait projection.has=triage.verdict`.
 
+## Phase 4a: daemon mode + remote handler SDK
+
+The in-process model (`reflex run`, `reflex emit --config …`) is still the
+default. Phase 4a adds an alternative deployment shape: a long-running
+**daemon** process owns the bus, and external **handler clients** connect to
+it over a Unix domain socket. Handlers can live in any Go process — the SDK
+in `pkg/sdk/` exposes the same semantics a YAML-declared handler gets
+(consumes / emits / terminal-marking / projection access).
+
+This is the foundation for later phases: handlers running in their own
+process; cross-language handlers; bus subscribers that are not "agents" at
+all (metrics, audit, replay).
+
+### Anatomy
+
+- `reflex daemon --config <yaml> [--socket <path>]` — starts the bus, loads
+  YAML handlers, listens on a Unix socket. Default socket is
+  `${XDG_RUNTIME_DIR:-/tmp}/reflex.sock`. Graceful shutdown on
+  SIGINT/SIGTERM.
+- `pkg/sdk` — Go SDK. `sdk.Connect(sdk.Remote(socket))` opens a connection;
+  `sdk.NewHandler(...)` declares the subscription; `client.Register(handler)`
+  installs it; `client.Run(ctx)` blocks until ctx is cancelled or the daemon
+  goes away.
+- `reflex emit --type X --payload '{...}' --daemon <socket>` — sends the
+  seed event to a running daemon instead of running in-process. `invoke` and
+  `send` accept `--daemon` too.
+
+### Minimal SDK handler
+
+```go
+client, _ := sdk.Connect(sdk.Remote("/tmp/reflex.sock"))
+defer client.Close()
+
+h := sdk.NewHandler("my-handler",
+    sdk.Consumes("MessageReceived"),
+    sdk.Emits("ResponseEmitted"),
+    sdk.Terminal("ResponseEmitted"),
+).OnEvent(func(ctx sdk.Ctx, ev sdk.Event) error {
+    return ctx.Emit("ResponseEmitted", sdk.Args{"text": "hi"})
+})
+client.Register(h)
+client.Run(context.Background())   // blocks
+```
+
+The same `sdk.NewHandler(...).OnEvent(...)` works in-process via
+`sdk.Connect(sdk.InProcess(bus))`; only the transport changes.
+
+### End-to-end example
+
+`examples/distributed_triage.yaml` declares the YAML side: a `printer`, a
+`terminator`, and the `unhandled_watcher`. `cmd/reflex-sample-handler/` is a
+standalone binary that registers a handler on `RequestReceived` and emits
+`ResponseEmitted`.
+
+```
+# terminal 1 — daemon
+reflex daemon --config examples/distributed_triage.yaml --socket /tmp/reflex-demo.sock
+
+# terminal 2 — sample handler
+go run ./cmd/reflex-sample-handler --socket /tmp/reflex-demo.sock
+
+# terminal 3 — seed event
+reflex emit --type RequestReceived --payload '{"payload":"hello"}' \
+    --daemon /tmp/reflex-demo.sock
+```
+
+Daemon terminal prints `response: echo: HELLO` (the SDK handler uppercases
+the payload; the printer prefixes "response: ").
+
+### Wire protocol
+
+Newline-delimited JSON over a Unix domain socket. One handler per
+connection. Message types: `hello` / `welcome` (handshake), `deliver` /
+`ack` / `nack` (event delivery + completion), `emit` (handler emits — tied
+to a `delivery_id` if mid-delivery, otherwise treated as a fresh seed),
+`goodbye`, `error`. See `pkg/sdk/protocol.go` for the full spec.
+
+### Out of scope here (later sub-phases)
+
+- Subscription as a first-class event on the bus (4b).
+- Permission/scope checks on register (4c).
+- Scaffold CLI for new handlers (4d).
+- HTTP / Go-embed external API (4e).
+
 ## Loops
 
 Cycles are sometimes the right shape — a reviewer LLM loop, a polling
@@ -248,15 +332,17 @@ demonstrating `reflex validate` refusing to start.
 ## Repo layout
 
 ```
-cmd/reflex/         CLI entry point (run / validate / describe subcommands)
-pkg/event/          Event type + in-memory append-only store
-pkg/bus/            dispatcher (drain function, not goroutine pool) + Subscriber interface + loop cap enforcement
-pkg/projection/     SessionProjection — pure fold of events for one request
-pkg/handler/        built-in handler factories + HandlerSpec self-description + Introspect registry projection
-pkg/graph/          static handler graph compiler + Tarjan SCC cycle detection
-pkg/config/         YAML loader + validation (including `loop:` grammar)
-internal/runtime/   glue: build a bus from a config, run a single user message
-examples/           calc / stall / triage / aggregate (working) + loop (capped cycle) + bad_loop / cycle (validate negatives)
+cmd/reflex/                  CLI entry point (run / emit / invoke / send / validate / describe / daemon)
+cmd/reflex-sample-handler/   Phase 4a end-to-end example: SDK handler in its own process
+pkg/event/                   Event type + in-memory append-only store
+pkg/bus/                     dispatcher (drain function, not goroutine pool) + Subscriber interface + loop cap enforcement
+pkg/projection/              SessionProjection — pure fold of events for one request
+pkg/handler/                 built-in handler factories + HandlerSpec self-description + Introspect registry projection
+pkg/graph/                   static handler graph compiler + Tarjan SCC cycle detection
+pkg/config/                  YAML loader + validation (including `loop:` grammar)
+pkg/sdk/                     Phase 4a: handler-client SDK (in-process + Unix-socket transports), daemon, wire protocol
+internal/runtime/            glue: build a bus from a config, run a single user message
+examples/                    calc / stall / triage / aggregate / distributed_triage (Phase 4a) + loop (capped cycle) + bad_loop / cycle (validate negatives)
 ```
 
 ## YAML handler grammar

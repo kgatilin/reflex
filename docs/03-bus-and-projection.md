@@ -309,3 +309,72 @@ as a subscriber. The runtime graph it maintains is a projection over
 the control-plane and meta-event streams. The compression cycle it
 drives is an ordinary chain of emit / receive on the same bus. See
 [`07-archmotif-as-live-subscriber.md`](./07-archmotif-as-live-subscriber.md).
+
+## Phase 4a — bus as a daemon, handlers over a socket
+
+Phase 4a moves the bus into a long-running process that exposes the same
+pub/sub semantics over a Unix domain socket. The wire protocol is
+newline-delimited JSON with one connection per handler.
+
+The shape:
+
+```
+reflex daemon --config examples/distributed_triage.yaml \
+    --socket /tmp/reflex-demo.sock
+# (terminal stays attached; SIGINT/SIGTERM cleanly drain + close)
+```
+
+YAML-declared handlers are loaded into the daemon's bus at startup, exactly
+the way `reflex run` would. Additional handlers can connect from external
+processes via the SDK:
+
+```go
+client, _ := sdk.Connect(sdk.Remote("/tmp/reflex-demo.sock"))
+h := sdk.NewHandler("my-handler",
+    sdk.Consumes("MessageReceived"),
+    sdk.Emits("ResponseEmitted"),
+    sdk.Terminal("ResponseEmitted"),
+).OnEvent(func(ctx sdk.Ctx, ev sdk.Event) error {
+    return ctx.Emit("ResponseEmitted", sdk.Args{"text": "hi"})
+})
+client.Register(h)
+client.Run(context.Background())   // blocks
+```
+
+Seed events arrive either from another connected client, or from the
+existing CLI commands with `--daemon`:
+
+```
+reflex emit --type RequestReceived --payload '{"payload":"hi"}' \
+    --daemon /tmp/reflex-demo.sock
+```
+
+Semantic guarantees: an SDK-registered handler is observationally
+indistinguishable from a YAML-declared one. Same consumes/emits
+declaration, same Terminal-painting (declared `Terminal` on the spec
+auto-paints emitted events), same drain ordering. The only thing the
+remote transport currently lacks vs in-process is projection read/write
+RPCs — those are TODO(phase-4b).
+
+Wire-protocol kinds:
+
+- `hello { version, handler{name, consumes, emits} }` (client→daemon).
+- `welcome { handler_name, version }` (daemon→client).
+- `deliver { delivery_id, event }` (daemon→client).
+- `emit { delivery_id?, event }` (client→daemon — with `delivery_id` the
+  emit is buffered onto the in-flight delivery; without one it's a fresh
+  seed).
+- `ack { delivery_id }` / `nack { delivery_id, error }` (client→daemon).
+- `goodbye` (either side).
+- `error { error }` (daemon→client, fatal-for-connection).
+
+Anti-goal: this is not a new sync primitive. Handlers still emit and
+return. "Wait for reply" is still a projection-predicate property of the
+post-drain state. The daemon does not yet broker `--wait` predicates
+across the socket — for now, when `--daemon` is set the CLI does not
+evaluate wait-predicates locally (the daemon's drain owns them). A round
+trip that returns drain status on the socket is TODO(phase-4b).
+
+What 4a deliberately leaves to 4b/4c/4d/4e: subscription-as-event,
+permission checks on register, scaffold CLI for new handlers, the
+external HTTP / Go-embed embedder API.

@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,7 +57,11 @@ const (
 // next event is processed. That gives reflex deterministic event ordering
 // without an explicit scheduler.
 type Bus struct {
-	store       *event.Store
+	store *event.Store
+	// subsMu protects subscribers against concurrent Register from
+	// multiple connections in daemon mode. Pre-Phase-4a use was strictly
+	// single-threaded, so this lock is uncontended in the common path.
+	subsMu      sync.RWMutex
 	subscribers []Subscriber
 	source      string
 	maxSteps    int
@@ -135,16 +140,30 @@ func New(store *event.Store, opts ...Option) *Bus {
 }
 
 // Register adds sub to the bus. Subscribers fire in registration order when
-// multiple match a single event.
+// multiple match a single event. Safe to call concurrently — Phase 4a
+// daemon mode invokes this from each accepted connection.
 func (b *Bus) Register(sub Subscriber) {
+	b.subsMu.Lock()
+	defer b.subsMu.Unlock()
 	b.subscribers = append(b.subscribers, sub)
 }
 
-// Subscribers returns the registered list in registration order.
+// Subscribers returns the registered list in registration order. Safe to
+// call concurrently with Register.
 func (b *Bus) Subscribers() []Subscriber {
+	b.subsMu.RLock()
+	defer b.subsMu.RUnlock()
 	out := make([]Subscriber, len(b.subscribers))
 	copy(out, b.subscribers)
 	return out
+}
+
+// snapshotSubscribers takes a copy of the current subscriber list for the
+// dispatcher. The drain loop iterates this snapshot — late-arriving
+// Registers are picked up on the NEXT drain iteration, not mid-loop, so
+// fan-out ordering remains deterministic for any given event.
+func (b *Bus) snapshotSubscribers() []Subscriber {
+	return b.Subscribers()
 }
 
 // Store returns the underlying event store.
@@ -170,7 +189,7 @@ func (b *Bus) WireProjection() {
 	if b.proj == nil {
 		return
 	}
-	for _, s := range b.subscribers {
+	for _, s := range b.Subscribers() {
 		if pa, ok := s.(ProjectionAware); ok {
 			pa.SetProjection(b.proj)
 		}
@@ -255,7 +274,10 @@ func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 
 		subscriberCount := 0
 
-		for _, sub := range b.subscribers {
+		// Snapshot once per dispatch step so concurrent Register from
+		// remote-handler connections doesn't race with the fan-out loop.
+		subsSnap := b.snapshotSubscribers()
+		for _, sub := range subsSnap {
 			if !sub.Match(ev) {
 				continue
 			}

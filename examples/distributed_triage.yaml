@@ -1,0 +1,45 @@
+# distributed_triage example: same shape as triage.yaml, but classification
+# is done by an SDK-registered handler running in a SEPARATE process
+# (cmd/reflex-sample-handler/).
+#
+# Run:
+#   # terminal 1 — daemon
+#   reflex daemon --config examples/distributed_triage.yaml --socket /tmp/reflex-demo.sock
+#
+#   # terminal 2 — sample handler connects, registers, waits for events
+#   ./reflex-sample-handler --socket /tmp/reflex-demo.sock
+#
+#   # terminal 3 — emit a request
+#   reflex emit --type RequestReceived --payload '{"payload":"hello"}' \
+#       --daemon /tmp/reflex-demo.sock
+#
+# The handler-from-the-other-process reacts to RequestReceived and emits
+# ResponseEmitted (terminal), which the printer in this YAML announces.
+# Observationally identical to a YAML-declared handler.
+settings:
+  max_steps: 64
+
+events:
+  - name: RequestReceived
+    args: { payload: string }
+    cli:
+      command: invoke distributed-echo
+      wait: drain
+
+handlers:
+  - name: out
+    type: printer
+    on: ResponseEmitted
+    config:
+      prefix: "response: "
+      field: text
+
+  - name: finalize
+    type: terminator
+    on: ResponseEmitted
+    emits: [RequestHandled]
+
+  - name: watcher
+    type: unhandled_watcher
+    on: __noop__
+    emits: [RequestUnhandled, EventOrphaned]
