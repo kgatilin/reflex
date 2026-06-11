@@ -1,11 +1,16 @@
 # 00 — Reference: the agreed model at a glance
 
 A cheat sheet for the decisions that are settled — event envelope, subject
-taxonomy, naming, the event catalog, and the builtin node types. Each section
-is the *what*; the design docs are the *why* ([11](./11-domain-model.md) model,
-[12](./12-react-experiment.md) experiment, [13](./13-event-taxonomy.md)
-taxonomy, [14](./14-target-coding-agent.md) coding-agent target). Where a name
-is mid-migration the legacy form is noted as `(was X)`.
+taxonomy, the node vocabulary (each node by what it consumes and emits), and
+naming. Each section is the *what*; the design docs are the *why*
+([11](./11-domain-model.md) model, [12](./12-react-experiment.md) experiment,
+[13](./13-event-taxonomy.md) taxonomy, [14](./14-target-coding-agent.md)
+coding-agent target). Where a name is mid-migration the legacy form is noted as
+`(was X)`.
+
+Events do not float free: every kind is the **emit of some node and the consume
+of another** — the graph is the subscription table. So the catalog is organised
+by node, not as a flat list.
 
 ## Event envelope
 
@@ -46,99 +51,66 @@ agree, **empty** when they span requests (→ session-scoped). An event carries 
 `request_id` ⇔ it is request-scoped. Recomputable from `caused_by`; never
 hand-written.
 
-## Event catalog
+## Nodes — consumes → emits
 
-Kind suffixes only (scope prefix omitted). `T` = terminal.
-
-### Lifecycle
-
-| Kind | T | Meaning |
-|---|---|---|
-| `request.received` | | a resolved request enters its session scope `(was RequestReceived)` |
-| `request.handled` | T | the request produced its answer `(was RequestHandled)` |
-| `request.unhandled` | T | quiesced with no answer — visibly, not silently `(was RequestUnhandled)` |
-
-### Reasoning
-
-| Kind | T | Meaning |
-|---|---|---|
-| `llm.turn` | | signal: take the next reasoning step (empty payload) |
-| `llm.completed` | | the raw model completion |
-| `llm.failed` | | model/transport error (non-terminal) |
-| `llm.decode_failed` | | completion did not parse into an action |
-| `llm.emission_rejected` | | decoded action not in the allowlist |
-
-### Tools (per tool `{name}`)
-
-| Kind | T | Meaning |
-|---|---|---|
-| `tool.{name}.call` | | invoke the tool with structured args |
-| `tool.{name}.result` | | success payload |
-| `tool.{name}.failed` | | tool error (non-terminal — retry/fallback is topology) |
-
-### Conversation & state
-
-| Kind | T | Meaning |
-|---|---|---|
-| `assistant.message` | T* | a message to the user (terminal when final) `(was AssistantMessageProposed)` |
-| `state.updated` | T | a `{path, value}` delta; the state projection folds these |
-
-### Progress & scope
-
-| Kind | T | Meaning |
-|---|---|---|
-| `scope.opened` | | a cut point opened a scope |
-| `scope.closed` | | the scope's cone quiesced `(was DrainQuiesced)` |
-| `scope.deadline_reached` | | scope deadline hit |
-| `scope.budget_low` | | one step before a loop cap — lets the model wrap up (F1) |
-| `loop.exhausted` | T | a capped cycle hit its limit `(was LoopExhausted)` |
-| `event.orphaned` | T | a non-terminal event reached quiescence with no reaction `(was EventOrphaned)` |
-
-### Control plane (`sys.`)
-
-| Kind | Meaning |
-|---|---|
-| `sys.handler.registered` / `.deregistered` | a handler joined/left `(was HandlerRegistered/...)` |
-| `sys.subscribed` / `.unsubscribed` | a subscription opened/closed `(was Subscribed/...)` |
-| `sys.subscription.rejected` | a subscription denied by permission |
-| `sys.state.updated` | the global session registry (thread→session bindings) |
-| `sys.clock.tick` | runtime-injected time |
-
-**Retired:** `ToolCallProposed`, `ToolResultObserved` (payload-routed RPC →
-subject-typed `tool.*`). Domain-example kinds (`TriageDecided`, `GhQueryResult`,
-`TargetParsed`, `ClassificationsAggregated`, …) are *not* core — they belong to
-their example graphs.
-
-## Builtin node types
-
-`type:` is the reaction archetype the YAML instantiates. The default vocabulary
-is small and **domain-blind**; everything else is a plugin or `sys` machinery.
+`type:` is the reaction archetype the YAML instantiates. `T` marks a terminal
+emit. `{configured}` means the kind is set per-instance in YAML (`on:` / `emit:`),
+not fixed by the type. The default vocabulary is small and **domain-blind**;
+everything else is a tool plugin or `sys` machinery.
 
 ### User-declared (YAML)
 
-| `type` | Role | Consumes → Emits |
+| `type` | Role | Consumes | Emits |
+|---|---|---|---|
+| `llm` | reason | `llm.turn` | `llm.completed` · `llm.failed` |
+| `decode` | translate | `llm.completed` | `tool.{name}.call` · `assistant.message` (T) · `request.handled` (T) · `llm.decode_failed` · `llm.emission_rejected` |
+| `signal` | glue | `{configured X}` | `{configured Y}`, **empty** payload (the pump) |
+| `forward` | glue | `{configured X}` | `{configured Y}`, **carrying** payload |
+| `router` | route | `{configured X}` | one of `{Y₁…Yₙ}` by a predicate over payload/state |
+| `aggregate` | join | `scope.closed` of a sub-scope | `{configured Y}`, folded from the sub-scope's cone |
+| `sink` | surface | `{configured terminal kind}` | — (side effect to a surface: stdout, reply) |
+| `tool_node` | act (peripheral) | `tool.{name}.call` | `tool.{name}.result` · `tool.{name}.failed` |
+
+`assistant.message` is terminal only when it is the final answer; a mid-stream
+message is non-terminal. `*.failed` emits are **non-terminal** (retry/fallback
+is topology); `request.handled` / `assistant.message`(final) are **terminal**.
+
+### Tool plugins (out-of-process)
+
+Real tools are not builtin types — they are external binaries over SDK Remote
+(`reflex daemon` + Unix socket), rooted to a workspace, under `plugins/` (doc
+14). Each obeys the same contract as `tool_node`:
+
+| Plugin | Consumes | Emits |
 |---|---|---|
-| `llm` | reason | `llm.turn` → `llm.completed` (backend pluggable: gemini/stub/…) |
-| `decode` | translate | `llm.completed` → `tool.*.call` \| `assistant.message` \| `request.handled` (action allowlist) |
-| `signal` | glue | X → Y, **empty** payload (the pump) |
-| `forward` | glue | X → Y, **carrying** payload |
-| `router` | route | X → one of N kinds by a predicate over payload/state |
-| `aggregate` | join | `scope.closed` of a sub-scope → one folded event |
-| `sink` | surface | a terminal kind → an external surface (stdout, reply) |
-| `tool_node` | act (peripheral) | `tool.{n}.call` → `.result`/`.failed` for trivial **in-bus** pure fns |
+| `fs` | `tool.fs.read.call` · `tool.fs.edit.call` · `tool.fs.write.call` · `tool.fs.search.call` | matching `tool.fs.*.result` · `tool.fs.*.failed` |
+| `fmt` | `tool.fmt.run.call` | `tool.fmt.run.result` · `tool.fmt.run.failed` |
+| `lint` | `tool.lint.run.call` | `tool.lint.run.result` · `tool.lint.run.failed` |
 
-### Runtime machinery (not hand-wired)
+The LLM tool menu is the projection of the consumers of `tool.*.call` — register
+a plugin, the model gains the tool, zero config.
 
-`session-resolver` (`app.ingress.* → request.received`, reads the `sys` registry),
-the scope/budget/orphan projections (emit `scope.*`, `event.orphaned`,
-`request.unhandled`), `audit`, and the dispatcher itself. Declared once by the
-runtime, emitted as `sys.*` / scope events.
+### `sys` machinery (runtime, not hand-wired)
 
-### Tools are plugins
+The control-plane and lifecycle events all have a producer here — this is where
+`sys.*`, `scope.*`, and the lifecycle terminals come from. Declared once by the
+runtime, never wired per-graph.
 
-Real tools (`fs`, `fmt`, `lint`, …) are **out-of-process plugins** over SDK
-Remote (`reflex daemon` + Unix socket), rooted to a workspace, under `plugins/`
-— not builtin types. See [14](./14-target-coding-agent.md).
+| Node | Consumes | Emits |
+|---|---|---|
+| `session-resolver` | `app.ingress.*` | `request.received` (under resolved session) · `sys.state.updated` (new thread→session binding) |
+| `scope-projection` | the progress projection over a cone | `scope.opened` · `scope.closed` `(was DrainQuiesced)` · `scope.deadline_reached` · `scope.budget_low` (F1) |
+| `watcher` | post-quiescence of a scope | `event.orphaned` (T) `(was EventOrphaned)` · `request.unhandled` (T) |
+| `audit` | `*` (or `sys.*`) | control-plane summaries / compression events |
+| `clock` | runtime timer | `sys.clock.tick` |
+| `dispatcher` (bus core) | `*` (it is the router) | `sys.handler.registered` / `.deregistered` · `sys.subscribed` / `.unsubscribed` · `sys.subscription.rejected` · `sys.event.dispatched` · `{node}.failed` (handler errored) · `loop.exhausted` (T) `(was LoopExhausted)` — and stamps `trace.request_id` |
+
+### Where the request kinds come from
+
+`request.received` is emitted by the `session-resolver`; `request.handled` by
+`decode` (final action); `request.unhandled` by the `watcher`. So a request's
+whole lifecycle is three different producers — none of it is special-cased
+control flow, all of it is node emits.
 
 ### Retired node types
 
@@ -146,6 +118,8 @@ Remote (`reflex daemon` + Unix socket), rooted to a workspace, under `plugins/`
 payload). `terminator` → dropped (terminality is a flag any reaction sets).
 `tool_call` → dropped (payload routing). `parse_target` / `triage_rules` /
 `gh_query` → not defaults (fold into `router` or become plugins).
+`ToolCallProposed` / `ToolResultObserved` kinds retire into subject-typed
+`tool.*`.
 
 ## Naming conventions
 
