@@ -57,10 +57,37 @@ func Build(cfg *config.File, reg *handler.Registry) (*bus.Bus, error) {
 		opts = append(opts, bus.WithLoopCaps(caps))
 	}
 	b := bus.New(store, opts...)
+
+	// Phase 4c: seed boot-time grants BEFORE any handlers register. The
+	// permission table must be hot by the time control-plane events start
+	// flowing so the audit handler sees grants and registrations in the
+	// expected order.
+	applyBootPermissions(b, cfg)
+
 	for _, h := range cfg.Handlers {
 		sub, err := reg.Build(h)
 		if err != nil {
 			return nil, fmt.Errorf("runtime: build %q: %w", h.Name, err)
+		}
+		scope := h.Scope
+		if scope == "" {
+			scope = "default." + h.Name
+		}
+		// Inline `permissions:` blocks are syntactic sugar for a
+		// top-level entry referring to this handler — emit the grant
+		// before the handler registers so the table is consistent
+		// regardless of which form was used.
+		if h.Permissions != nil {
+			b.ApplyBootGrant(h.Name, permSpecFromConfig(*h.Permissions))
+		}
+		// Default implicit grant for scope-less handlers: they own
+		// default.<name> and can mutate within default.*. Keeps the
+		// Phase 1-4b examples working without YAML changes.
+		if h.Scope == "" && h.Permissions == nil {
+			b.ApplyBootGrant(h.Name, bus.PermSpec{
+				Mutate: []string{"default.*"},
+				Read:   []string{"*"},
+			})
 		}
 		// If the handler self-describes (e.g. the audit handler with its
 		// custom multi-consume set), prefer its descriptor.
@@ -68,6 +95,9 @@ func Build(cfg *config.File, reg *handler.Registry) (*bus.Bus, error) {
 			desc := d.Descriptor()
 			if desc.Name == "" {
 				desc.Name = h.Name
+			}
+			if desc.Scope == "" {
+				desc.Scope = scope
 			}
 			b.Register(describedSubFor(sub, desc))
 			continue
@@ -79,6 +109,7 @@ func Build(cfg *config.File, reg *handler.Registry) (*bus.Bus, error) {
 			continue
 		}
 		desc := descriptorFromSpec(h.Name, spec)
+		desc.Scope = scope
 		b.Register(describedSubFor(sub, desc))
 	}
 	b.WireProjection()
@@ -90,6 +121,25 @@ func Build(cfg *config.File, reg *handler.Registry) (*bus.Bus, error) {
 		return nil, fmt.Errorf("bus: live-table cycle detected: %v (no cap declared)", scc)
 	}
 	return b, nil
+}
+
+// applyBootPermissions emits a PermissionGranted control-plane event
+// per top-level permissions entry. The bus's ApplyBootGrant fold-and-
+// emit pair populates the runtime table at the same time the event
+// lands on the log — so the boot stream and the table never disagree.
+func applyBootPermissions(b *bus.Bus, cfg *config.File) {
+	for _, p := range cfg.Permissions {
+		b.ApplyBootGrant(p.Principal, permSpecFromConfig(p.Grants))
+	}
+}
+
+func permSpecFromConfig(g config.GrantsConfig) bus.PermSpec {
+	return bus.PermSpec{
+		Mutate:    append([]string(nil), g.Mutate...),
+		Read:      append([]string(nil), g.Read...),
+		Forbidden: append([]string(nil), g.Forbidden...),
+		MetaGrant: append([]string(nil), g.MetaGrant...),
+	}
 }
 
 // descriptorFromSpec converts a handler.HandlerSpec into a

@@ -1,0 +1,93 @@
+# scoped_compression — Phase 4c worked example.
+#
+# Three handlers + a top-level permissions block demonstrate the scope-
+# based permission layer end-to-end:
+#
+#   triage-target       (scope: triage.classify) — a stand-in for a
+#                       triage-pipeline handler. Just echoes
+#                       AssistantMessageProposed for completeness.
+#
+#   analytics-stub      (scope: analytics.archmotif) — holds
+#                       mutate:[triage.*]. At runtime it could publish
+#                       a Subscribed control-plane event targeting
+#                       triage-target's scope (e.g. a compression
+#                       rewrite). The check accepts; the audit log
+#                       records the mutation.
+#
+#   feedback-saboteur   (scope: analytics.saboteur) — holds NO grants
+#                       on feedback.*. Any attempt to mutate
+#                       feedback.* trips the reserved-zone default-deny
+#                       and produces a PermissionDenied with
+#                       reason="forbidden".
+#
+# Boot sequence:
+#   1. PermissionGranted events seed the table (mutate/read/meta.grant).
+#   2. HandlerRegistered + Subscribed for each of the four handlers,
+#      including audit which subscribes to every control-plane event
+#      including the three permission types.
+#   3. RequestReceived (the domain seed) drains the dispatcher.
+#
+# Run:
+#   reflex emit --config examples/scoped_compression.yaml \
+#       --type RequestReceived --payload '{"payload":"hi"}'
+#
+# Then inspect /tmp/reflex-scoped-audit.jsonl — every grant, every
+# subscription, every denial appears as a single JSON line.
+
+settings:
+  max_steps: 256
+
+permissions:
+  # Bootstrap root grants. The YAML loader publishes these as
+  # PermissionGranted events BEFORE any HandlerRegistered fires, so the
+  # table is populated when the bus starts gating runtime mutations.
+
+  - principal: analytics-stub
+    grants:
+      mutate: [triage.*, analytics.*]
+      read: ["*"]
+      meta.grant: []
+
+  - principal: feedback-saboteur
+    grants:
+      mutate: [analytics.*]
+      read: ["*"]
+      # No feedback.* grant — the saboteur lacks authority to touch
+      # the reserved zone. Default-deny does the rest.
+
+handlers:
+  - name: audit
+    type: audit
+    on: HandlerRegistered
+    scope: system.audit
+    permissions:
+      # The audit handler is a read-only observer; it doesn't mutate.
+      read: ["*"]
+    config:
+      sink: file:///tmp/reflex-scoped-audit.jsonl
+
+  - name: triage-target
+    type: llm_stub
+    on: RequestReceived
+    scope: triage.classify
+    emits: [AssistantMessageProposed, RequestHandled]
+    config:
+      fallback:
+        action: reply_and_handle
+        reply: "triage classified"
+
+  - name: analytics-stub
+    type: printer
+    on: AssistantMessageProposed
+    scope: analytics.archmotif
+    config:
+      prefix: "[analytics] "
+      field: text
+
+  - name: feedback-saboteur
+    type: printer
+    on: RequestHandled
+    scope: analytics.saboteur
+    config:
+      prefix: "[saboteur] "
+      field: text

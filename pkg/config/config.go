@@ -24,11 +24,45 @@ import (
 
 // File is the top-level YAML document. Settings is optional; Handlers is the
 // list of declared subscribers. Events is the optional Phase 1.6 section
-// that declares known event types and their CLI bindings.
+// that declares known event types and their CLI bindings. Permissions is
+// the optional Phase 4c top-level block that seeds boot-time grants into
+// the bus permission table before any handler registers.
 type File struct {
-	Settings Settings        `yaml:"settings"`
-	Handlers []HandlerConfig `yaml:"handlers"`
-	Events   []EventConfig   `yaml:"events"`
+	Settings    Settings           `yaml:"settings"`
+	Handlers    []HandlerConfig    `yaml:"handlers"`
+	Events      []EventConfig      `yaml:"events"`
+	Permissions []PermissionConfig `yaml:"permissions"`
+}
+
+// PermissionConfig is one top-level permissions entry. The loader emits
+// one PermissionGranted control-plane event per entry at boot, BEFORE
+// any HandlerRegistered events fire — so the permission table is hot
+// when the bus starts gating runtime mutations.
+//
+// Field names mirror the four axes of the permission model:
+//
+//	mutate:      list of scope globs the principal may publish
+//	             control-plane events targeting
+//	read:        list of scope globs the principal may receive from
+//	forbidden:   explicit deny list; overrides mutate / read
+//	meta_grant:  list of scope globs the principal may delegate further
+//	             (i.e. publish PermissionGranted events for)
+//
+// The YAML key for meta-grant is `meta.grant` (matches the docs); the
+// loader rewrites it to MetaGrant on the Go side.
+type PermissionConfig struct {
+	Principal string       `yaml:"principal"`
+	Grants    GrantsConfig `yaml:"grants"`
+}
+
+// GrantsConfig carries the four-axis permission grants for one principal.
+type GrantsConfig struct {
+	Mutate    []string `yaml:"mutate"`
+	Read      []string `yaml:"read"`
+	Forbidden []string `yaml:"forbidden"`
+	// MetaGrant maps to the YAML key `meta.grant` (dot in the literal
+	// string is preserved by yaml.v3 when quoted in the field tag).
+	MetaGrant []string `yaml:"meta.grant"`
 }
 
 // EventConfig declares a known event type so the CLI can emit it directly
@@ -74,12 +108,14 @@ type Settings struct {
 // request_id (emitting LoopExhausted{loop_name, request_id} instead). An
 // optional Name lets multiple disjoint loops coexist in the same config.
 type HandlerConfig struct {
-	Name   string         `yaml:"name"`
-	Type   string         `yaml:"type"`
-	On     string         `yaml:"on"`
-	Emits  []string       `yaml:"emits"`
-	Config map[string]any `yaml:"config"`
-	Loop   *LoopConfig    `yaml:"loop,omitempty"`
+	Name        string         `yaml:"name"`
+	Type        string         `yaml:"type"`
+	On          string         `yaml:"on"`
+	Emits       []string       `yaml:"emits"`
+	Config      map[string]any `yaml:"config"`
+	Loop        *LoopConfig    `yaml:"loop,omitempty"`
+	Scope       string         `yaml:"scope,omitempty"`
+	Permissions *GrantsConfig  `yaml:"permissions,omitempty"`
 }
 
 // LoopConfig declares this handler as a cycle-closing node with a hard cap.

@@ -4,8 +4,11 @@ Phase 4b status: shipped. Subscriptions are managed via events on the
 bus. The YAML config is a seeded stream of control-plane events. The
 handler graph IS the live subscription table; the parsed-YAML model is
 retained only as a fast pre-flight check. Audit logging is an ordinary
-handler subscribed to control-plane events. Permission enforcement (4c)
-and compression (Phase 6) will use the same primitives.
+handler subscribed to control-plane events. Phase 4c (shipped) gates
+every handler-issued control-plane mutation through a synchronous
+permission check (`SubscribeAs`/`UnsubscribeAs`/`HandlerDeregisterAs`
+on `*bus.Bus`); the four boot-time paths (`Register` and friends) keep
+the bus-authoritative semantics they had in 4b.
 
 ## The shift
 
@@ -207,27 +210,28 @@ deployment that doesn't want audit doesn't declare one. A deployment
 that wants multiple audit destinations (file + S3 + syslog) declares
 three.
 
-## Permission enforcement as a handler
+## Permission enforcement at the bus edge
 
-The permission enforcer is also a subscriber. It reacts to every event
-that mutates state and checks the principal against the scope grants:
+Phase 4c gates every handler-issued control-plane mutation through a
+synchronous check at the bus edge. Handlers don't go through
+`Register`/`SubscribeWithCheck` directly — they use the
+principal-attributed APIs `SubscribeAs(principal, …)`,
+`UnsubscribeAs(principal, …)`, `HandlerDeregisterAs(principal, …)`,
+`PublishPermissionGranted(principal, …)`,
+`PublishPermissionRevoked(principal, …)`.
 
-- On `Subscribed{handler, event_type}`: is the principal allowed to
-  bind `handler` to `event_type`? If not, emit
-  `PermissionDenied{principal, op: "subscribe", scope, reason}`.
-- On `Unsubscribed`: same check for `op: "unsubscribe"`.
-- On `HandlerRegistered`: is the principal allowed to register a
-  handler in the declared `scope`?
-- On `PermissionGranted`: was the granter allowed to grant under
-  `meta.grant: [scope]`?
+On a refused operation the bus emits
+`PermissionDenied{principal, op, target_scope, reason}` and leaves the
+live table untouched. The audit handler (now subscribed to the three
+new permission types as well) records the denial on the same log as
+every successful mutation.
 
-The enforcer is a handler with the broadest possible subscription set —
-but it has no special bus access. It reads the same log every handler
-reads. Its denials are events on that log, observable by other handlers
-(the offending handler can react and back off; the audit logger
-records the denial; a dashboard subscriber tallies them).
-
-See [`06-permissions-and-scopes.md`](./06-permissions-and-scopes.md).
+Boot-time YAML loading uses the older bus-authoritative paths
+(`Register` + `SubscribeWithCheck`) and is exempt from the permission
+check — the loader IS the root authority. See
+[`06-permissions-and-scopes.md`](./06-permissions-and-scopes.md) for
+the full grammar, matching semantics, default-protected zones, and
+recursive `meta.grant` rule.
 
 ## Boot sequence
 

@@ -32,6 +32,21 @@ type Handler struct {
 	consumes string
 	emits    []EmittedSpec
 	fn       HandlerFunc
+
+	// Phase 4c: scope + per-handler permission declarations. Empty
+	// scope defaults to "default.<name>" on the bus side; empty perms
+	// inherit the implicit default-zone grant.
+	scope string
+	perms *PermSpec
+}
+
+// PermSpec is the SDK mirror of bus.PermSpec — the per-handler permission
+// declaration. Use sdk.WithPermissions to attach it to a handler.
+type PermSpec struct {
+	Mutate    []string
+	Read      []string
+	Forbidden []string
+	MetaGrant []string
 }
 
 // NewHandler constructs a Handler. The Option arguments declare what the
@@ -95,6 +110,36 @@ func Terminal(eventType string) Option {
 		h.emits = append(h.emits, EmittedSpec{Type: eventType, Terminal: true})
 	}
 }
+
+// WithScope declares the dotted scope this handler owns (e.g.
+// "triage.classify"). Defaults to "default.<name>" when omitted.
+func WithScope(scope string) Option {
+	return func(h *Handler) { h.scope = scope }
+}
+
+// WithPermissions attaches an inline permission grant to the handler.
+// The grant fires at registration time on the bus, before the handler's
+// HandlerRegistered control-plane event — equivalent to declaring a
+// top-level `permissions:` block referring to this handler in YAML.
+func WithPermissions(p PermSpec) Option {
+	return func(h *Handler) {
+		// Copy slices so caller mutations don't leak in.
+		cp := PermSpec{
+			Mutate:    append([]string(nil), p.Mutate...),
+			Read:      append([]string(nil), p.Read...),
+			Forbidden: append([]string(nil), p.Forbidden...),
+			MetaGrant: append([]string(nil), p.MetaGrant...),
+		}
+		h.perms = &cp
+	}
+}
+
+// Scope returns the declared scope (or empty when unset).
+func (h *Handler) Scope() string { return h.scope }
+
+// Permissions returns a pointer to the declared permission spec, or nil
+// when no inline permissions were attached.
+func (h *Handler) Permissions() *PermSpec { return h.perms }
 
 // Optional marks the given outbound event type as not guaranteed.
 func Optional(eventType string) Option {

@@ -81,6 +81,11 @@ type HandlerDescriptor struct {
 	MultiConsumes []string
 	Emits         []EmittedDescriptor
 	Description   string
+	// Scope is the dotted scope this handler "owns" — the target a
+	// HandlerRegistered or runtime mutation against this handler
+	// resolves to for Phase 4c permission checks. Empty string means
+	// the bus will assign "default.<name>".
+	Scope string
 }
 
 // EmittedDescriptor mirrors handler.EmittedSpec on the wire of the
@@ -137,6 +142,18 @@ type Bus struct {
 	// any Run. Subsequent Runs prepend them to the dispatch queue so
 	// subscribers (notably the audit handler) get a chance to react.
 	pendingControl []event.Event
+
+	// Phase 4c: per-handler declared scope (the scope this handler
+	// "owns" — the target a HandlerRegistered with this principal points
+	// at). Set at boot time via SetHandlerScope or inline via
+	// HandlerDescriptor.Scope. Defaults to "default.<name>".
+	scopes map[string]string
+
+	// Phase 4c runtime permission table. Boot grants are applied via
+	// ApplyBootGrant; handler-issued PermissionGranted /
+	// PermissionRevoked events go through PublishPermissionGranted /
+	// PublishPermissionRevoked which check meta.grant authority first.
+	perms *PermissionTable
 }
 
 // Option customises a Bus.
@@ -195,11 +212,58 @@ func New(store *event.Store, opts ...Option) *Bus {
 		maxSteps:    256,
 		clock:       func() time.Time { return time.Now().UTC() },
 		descriptors: map[string]HandlerDescriptor{},
+		scopes:      map[string]string{},
+		perms:       NewPermissionTable(),
 	}
 	for _, o := range opts {
 		o(b)
 	}
 	return b
+}
+
+// Permissions returns the bus's permission table. Tests and audit tooling
+// use it to inspect the current grant state; the bus itself reaches it
+// internally for every control-plane mutation check.
+func (b *Bus) Permissions() *PermissionTable { return b.perms }
+
+// ScopeOf returns the registered scope of handlerName, falling back to
+// the default scope when no explicit scope was set.
+func (b *Bus) ScopeOf(handlerName string) string {
+	b.subsMu.RLock()
+	defer b.subsMu.RUnlock()
+	if s, ok := b.scopes[handlerName]; ok && s != "" {
+		return s
+	}
+	return defaultScopeOf(handlerName)
+}
+
+// SetHandlerScope records the declared scope for handlerName. Called by
+// the loader before Register so the per-handler descriptor (and the
+// scope-aware permission checks) line up with the YAML stanza. Subsequent
+// re-registration with a different scope overwrites the previous value.
+func (b *Bus) SetHandlerScope(handlerName, scope string) {
+	b.subsMu.Lock()
+	defer b.subsMu.Unlock()
+	if scope == "" {
+		scope = defaultScopeOf(handlerName)
+	}
+	b.scopes[handlerName] = scope
+}
+
+// ApplyBootGrant seeds the permission table with principal's grant. The
+// loader calls it once per YAML permissions entry, BEFORE any handlers
+// register. It also emits a PermissionGranted event into the
+// control-plane stream so the audit handler sees the seed exactly as it
+// would see a runtime grant.
+//
+// Boot grants do NOT go through the meta.grant check — the bootstrap
+// IS the root authority.
+func (b *Bus) ApplyBootGrant(principal string, spec PermSpec) {
+	if spec.IsEmpty() {
+		return
+	}
+	b.perms.Grant(principal, spec)
+	b.emitPermissionGranted(principal, spec, "boot")
 }
 
 // Register adds sub to the bus. Subscribers fire in registration order when
@@ -225,6 +289,14 @@ func (b *Bus) Register(sub Subscriber) {
 				EventType:     et,
 				MaxIterations: cap,
 			})
+		}
+		// Phase 4c: capture the descriptor's declared scope if present.
+		// Otherwise fall back to whatever the loader pre-set (or
+		// default-of-name).
+		if desc.Scope != "" {
+			b.scopes[desc.Name] = desc.Scope
+		} else if _, ok := b.scopes[desc.Name]; !ok {
+			b.scopes[desc.Name] = defaultScopeOf(desc.Name)
 		}
 	}
 	b.subsMu.Unlock()
@@ -508,14 +580,15 @@ func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 
 // isMetaEventType reports whether typ is one of the bus's own meta-events.
 // Used to break the recursion: the bus never emits a meta-event about
-// another meta-event. Includes the Phase 4b control-plane events so a
-// HandlerRegistered emission doesn't spawn an EventDispatched-of-control
-// loop.
+// another meta-event. Includes the Phase 4b control-plane events and the
+// Phase 4c permission events so a HandlerRegistered or PermissionGranted
+// emission doesn't spawn an EventDispatched-of-control loop.
 func isMetaEventType(typ string) bool {
 	switch typ {
 	case EventDispatchedType, DrainQuiescedType, HandlerFailedType, LoopExhaustedType,
 		HandlerRegisteredType, SubscribedType, UnsubscribedType,
-		HandlerDeregisteredType, SubscriptionRejectedType:
+		HandlerDeregisteredType, SubscriptionRejectedType,
+		PermissionGrantedType, PermissionRevokedType, PermissionDeniedType:
 		return true
 	}
 	return false
@@ -737,11 +810,16 @@ func (b *Bus) emitHandlerRegistered(d HandlerDescriptor) {
 		}
 		emits = append(emits, em)
 	}
+	scope := d.Scope
+	if scope == "" {
+		scope = defaultScopeOf(d.Name)
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"name":        d.Name,
 		"consumes":    d.Consumes,
 		"emits":       emits,
 		"description": d.Description,
+		"scope":       scope,
 	})
 	b.queueControl(event.Event{
 		ID:       uuid.NewString(),
@@ -792,6 +870,162 @@ func (b *Bus) emitHandlerDeregistered(handler string) {
 	b.queueControl(event.Event{
 		ID:       uuid.NewString(),
 		Type:     HandlerDeregisteredType,
+		TS:       b.clock(),
+		Source:   "bus",
+		Terminal: true,
+		Payload:  payload,
+	})
+}
+
+// SubscribeAs is the principal-attributed counterpart of
+// SubscribeWithCheck. It runs the Phase 4c permission check first: if
+// principal lacks an authorising mutate grant for the target handler's
+// scope, the binding is NOT recorded, a PermissionDenied control-plane
+// event is emitted, and the call returns a non-nil error. Otherwise
+// the call delegates to SubscribeWithCheck and the usual cycle /
+// existence checks apply.
+//
+// Boot-time wiring should use Register / SubscribeWithCheck directly,
+// which bypass the permission layer (the loader IS the root).
+func (b *Bus) SubscribeAs(principal, handlerName, eventType string, maxIterations int) error {
+	target := b.ScopeOf(handlerName)
+	if d := b.perms.CheckMutate(principal, target); !d.Allowed {
+		b.emitPermissionDenied(principal, "subscribe", target, d.Reason)
+		return errPermDenied(principal, target, d.Reason)
+	}
+	return b.SubscribeWithCheck(handlerName, eventType, maxIterations)
+}
+
+// UnsubscribeAs is the principal-attributed Unsubscribe. Same permission
+// shape as SubscribeAs.
+func (b *Bus) UnsubscribeAs(principal, handlerName, eventType string) error {
+	target := b.ScopeOf(handlerName)
+	if d := b.perms.CheckMutate(principal, target); !d.Allowed {
+		b.emitPermissionDenied(principal, "unsubscribe", target, d.Reason)
+		return errPermDenied(principal, target, d.Reason)
+	}
+	b.Unsubscribe(handlerName, eventType)
+	return nil
+}
+
+// HandlerDeregisterAs is the principal-attributed HandlerDeregister.
+func (b *Bus) HandlerDeregisterAs(principal, handlerName string) error {
+	target := b.ScopeOf(handlerName)
+	if d := b.perms.CheckMutate(principal, target); !d.Allowed {
+		b.emitPermissionDenied(principal, "deregister", target, d.Reason)
+		return errPermDenied(principal, target, d.Reason)
+	}
+	b.HandlerDeregister(handlerName)
+	return nil
+}
+
+// PublishPermissionGranted is the principal-attributed grant publisher.
+// principal must hold a meta.grant covering targetScope; otherwise the
+// bus rejects the grant with PermissionDenied{reason: "no meta-grant
+// authority"} and returns an error.
+//
+// On accept, the runtime permission table is updated and a
+// PermissionGranted control-plane event is emitted so the audit handler
+// records the policy mutation.
+func (b *Bus) PublishPermissionGranted(principal, targetPrincipal string, spec PermSpec) error {
+	if spec.IsEmpty() {
+		return nil
+	}
+	// Every pattern across every axis must be authorised by the
+	// principal's meta.grant. We check the union of axes — the grant is
+	// indivisible from a policy standpoint.
+	for _, p := range allPatterns(spec) {
+		if d := b.perms.CheckMetaGrant(principal, p); !d.Allowed {
+			b.emitPermissionDenied(principal, OpMetaGrant, p, d.Reason)
+			return errPermDenied(principal, p, d.Reason)
+		}
+	}
+	b.perms.Grant(targetPrincipal, spec)
+	b.emitPermissionGranted(targetPrincipal, spec, principal)
+	return nil
+}
+
+// PublishPermissionRevoked is the principal-attributed revoke
+// publisher. Same authority shape as PublishPermissionGranted.
+func (b *Bus) PublishPermissionRevoked(principal, targetPrincipal string, spec PermSpec) error {
+	if spec.IsEmpty() {
+		return nil
+	}
+	for _, p := range allPatterns(spec) {
+		if d := b.perms.CheckMetaGrant(principal, p); !d.Allowed {
+			b.emitPermissionDenied(principal, OpMetaGrant, p, d.Reason)
+			return errPermDenied(principal, p, d.Reason)
+		}
+	}
+	b.perms.Revoke(targetPrincipal, spec)
+	b.emitPermissionRevoked(targetPrincipal, spec, principal)
+	return nil
+}
+
+// allPatterns returns the union of every pattern across every axis of
+// spec. Order is mutate, read, forbidden, meta.grant.
+func allPatterns(spec PermSpec) []string {
+	out := make([]string, 0, len(spec.Mutate)+len(spec.Read)+len(spec.Forbidden)+len(spec.MetaGrant))
+	out = append(out, spec.Mutate...)
+	out = append(out, spec.Read...)
+	out = append(out, spec.Forbidden...)
+	out = append(out, spec.MetaGrant...)
+	return out
+}
+
+func errPermDenied(principal, target, reason string) error {
+	return fmt.Errorf("bus: permission denied: principal=%q target=%q reason=%q",
+		principal, target, reason)
+}
+
+func (b *Bus) emitPermissionGranted(targetPrincipal string, spec PermSpec, granter string) {
+	payload, _ := json.Marshal(map[string]any{
+		"principal":  targetPrincipal,
+		"mutate":     spec.Mutate,
+		"read":       spec.Read,
+		"forbidden":  spec.Forbidden,
+		"meta_grant": spec.MetaGrant,
+		"granter":    granter,
+	})
+	b.queueControl(event.Event{
+		ID:       uuid.NewString(),
+		Type:     PermissionGrantedType,
+		TS:       b.clock(),
+		Source:   "bus",
+		Terminal: true,
+		Payload:  payload,
+	})
+}
+
+func (b *Bus) emitPermissionRevoked(targetPrincipal string, spec PermSpec, revoker string) {
+	payload, _ := json.Marshal(map[string]any{
+		"principal":  targetPrincipal,
+		"mutate":     spec.Mutate,
+		"read":       spec.Read,
+		"forbidden":  spec.Forbidden,
+		"meta_grant": spec.MetaGrant,
+		"revoker":    revoker,
+	})
+	b.queueControl(event.Event{
+		ID:       uuid.NewString(),
+		Type:     PermissionRevokedType,
+		TS:       b.clock(),
+		Source:   "bus",
+		Terminal: true,
+		Payload:  payload,
+	})
+}
+
+func (b *Bus) emitPermissionDenied(principal, op, targetScope, reason string) {
+	payload, _ := json.Marshal(map[string]any{
+		"principal":    principal,
+		"op":           op,
+		"target_scope": targetScope,
+		"reason":       reason,
+	})
+	b.queueControl(event.Event{
+		ID:       uuid.NewString(),
+		Type:     PermissionDeniedType,
 		TS:       b.clock(),
 		Source:   "bus",
 		Terminal: true,

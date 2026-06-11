@@ -33,6 +33,24 @@ type inProcessTransport struct {
 
 func (t *inProcessTransport) run(ctx context.Context, handlers []*Handler) error {
 	for _, h := range handlers {
+		// Phase 4c: apply inline permission grants before Register so
+		// the table is populated when the bus emits HandlerRegistered
+		// for this handler.
+		if h.perms != nil {
+			t.bus.ApplyBootGrant(h.name, bus.PermSpec{
+				Mutate:    h.perms.Mutate,
+				Read:      h.perms.Read,
+				Forbidden: h.perms.Forbidden,
+				MetaGrant: h.perms.MetaGrant,
+			})
+		} else if h.scope == "" {
+			// Implicit default-zone grant for un-scoped handlers,
+			// matching the YAML loader's behaviour.
+			t.bus.ApplyBootGrant(h.name, bus.PermSpec{
+				Mutate: []string{"default.*"},
+				Read:   []string{"*"},
+			})
+		}
 		t.bus.Register(newInProcessSub(h, t.bus))
 	}
 	// Wire the projection into anything that wants it (including our subs).
@@ -69,7 +87,7 @@ func (s *inProcessSub) Match(ev event.Event) bool {
 // Subscribed control-plane events when an SDK handler joins the
 // in-process bus.
 func (s *inProcessSub) Descriptor() bus.HandlerDescriptor {
-	d := bus.HandlerDescriptor{Name: s.h.name, Consumes: s.h.consumes}
+	d := bus.HandlerDescriptor{Name: s.h.name, Consumes: s.h.consumes, Scope: s.h.scope}
 	for _, e := range s.h.emits {
 		d.Emits = append(d.Emits, bus.EmittedDescriptor{
 			Type:     e.Type,

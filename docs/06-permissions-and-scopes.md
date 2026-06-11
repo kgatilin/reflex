@@ -1,274 +1,265 @@
 # 06 — Permissions and scopes
 
-Phase 4c. Each handler declares a scope. The permission enforcer is a
-handler subscribed to control-plane events that emits `PermissionDenied`
-when an operation falls outside the principal's grants. Scope hierarchy
-is recursive — granting itself is governed by `meta.grant`. Rogue
-handlers are contained by observation, not by termination.
+Phase 4c. Shipped. Every handler declares a scope. The bus runs a
+synchronous permission check before recording any handler-issued
+control-plane mutation (`HandlerRegistered`, `Subscribed`,
+`Unsubscribed`, `HandlerDeregistered`, `PermissionGranted`,
+`PermissionRevoked`). On refusal the bus emits `PermissionDenied` and
+leaves the live table unchanged. Boot-time YAML loading is the
+bootstrap stream and is exempt from the check — the loader IS the root
+authority.
 
-## The shape
+This page is the contract. Cross-reference
+[`05-control-plane-as-events.md`](./05-control-plane-as-events.md) for
+the control-plane primitives the layer composes on top of.
 
-Every handler declares its `scope` in the same YAML stanza that registers
-it:
+## YAML grammar
+
+Two new pieces of syntax: a per-handler `scope:` + `permissions:` and a
+top-level `permissions:` block.
 
 ```yaml
-- name: archmotif_analyzer
-  type: archmotif_subscriber
-  on: [EventDispatched, HandlerRegistered, Subscribed, Unsubscribed,
-       HandlerFailed]
-  scope:
-    mutate:    [analytics.*, triage.*]
-    read:      [*]
-    forbidden: [core.*, system.*]
-    meta:
-      grant:   [analytics.*]
+permissions:
+  # Top-level grants. Each entry produces one PermissionGranted event
+  # at boot, BEFORE any HandlerRegistered fires.
+  - principal: analytics-tool
+    grants:
+      mutate:     [triage.*, chat.*]
+      read:       ["*"]
+      forbidden:  [core.*, system.*]
+      meta.grant: [analytics.*]
+
+handlers:
+  - name: triage-tool
+    type: llm_stub
+    on: RequestReceived
+    scope: triage.classify           # the scope this handler "owns"
+    permissions:                     # sugar — equivalent to a separate
+      mutate: [triage.*]             # top-level entry naming this handler
+      read:   ["*"]
+    emits: [Triaged]
 ```
 
-`scope` has four axes:
+Field semantics:
 
-- `mutate` — list of scope globs the handler is allowed to publish
-  control-plane events for (`HandlerRegistered`, `Subscribed`,
-  `Unsubscribed`, `HandlerDeregistered`) when those events target
-  resources in the listed scopes.
-- `read` — list of scope globs the handler is allowed to receive events
-  from. Receivers that don't match are filtered before delivery.
-- `forbidden` — explicit deny list; overrides `mutate` / `read` /
-  `meta.grant`. Used to keep handlers out of `core.*` / `system.*` even
-  when a broader glob like `*` would otherwise admit them.
-- `meta.grant` — list of scope globs the handler is allowed to issue
-  `PermissionGranted` events for. Default: empty (cannot grant).
+- `scope:` — the dotted scope the handler owns. Used as the target of
+  `HandlerRegistered`/`Subscribed`/`Unsubscribed` events when another
+  principal mutates this handler. Defaults to `default.<name>` when
+  omitted.
+- `mutate:` — list of scope patterns the principal may publish
+  control-plane events targeting.
+- `read:` — list of scope patterns the principal may receive events
+  from. (Phase 4c does not enforce read filtering at dispatch; the field
+  is captured in the table for forward compatibility with the Phase 6
+  filter primitive.)
+- `forbidden:` — explicit deny list. Wins over `mutate` and `read`.
+- `meta.grant:` — list of scope patterns the principal may delegate
+  further (i.e. publish `PermissionGranted` events for). Default: empty.
 
-The grant axis is what makes the permission model recursive. A handler
-that has `meta.grant: [analytics.*]` can mint a `PermissionGranted` for
-another handler under `analytics.*` — but not under `core.*`. Root
-configuration (the bus bootstrap) has `meta.grant: [*]` and is the only
-principal that can hand out broad scopes.
+Inline `permissions:` under a handler is syntactic sugar for a
+top-level entry whose `principal:` equals the handler's name. The
+loader applies both forms identically; tests assert equivalence (see
+`TestInlinePermissionsEquivalentToTopLevel`).
 
-## Scope namespace convention
+## Scope matching
 
-Scopes are dotted strings: `triage.classifier`, `chat.responder`,
-`analytics.metrics`, `core.dispatcher`, `system.bus`,
-`feedback.guidance`. Three top-level zones are reserved by the
-framework:
+Scopes are dotted strings (`triage.classify`, `system.bus`,
+`analytics.archmotif`). Patterns are exact strings or end with `.*`
+(a "prefix match" wildcard). Special case: bare `*` matches any
+non-empty scope.
 
-- `core.*` — built-in handlers that wire the basic event flow (printer,
-  terminator, unhandled_watcher, the canonical chat / triage pipeline).
-  Modifiable only with explicit root grant.
-- `system.*` — bus internals (`system.bus`, `system.dispatcher`,
-  `system.audit`). Modification requires a root grant and is intended
-  to be exceptional.
-- `feedback.*` — human-owned rules. Reserved for human-added handlers;
-  the optimiser cannot touch them without an explicit
-  `SuggestedRewrite` + human-gate event chain (see
-  [`08-optimization-as-rewrite.md`](./08-optimization-as-rewrite.md)).
+Matching is **conservative**: `triage.*` matches `triage.classify`
+and `triage.classify.intent` but NOT bare `triage`. `*` matches any
+target with one or more components — never the empty string and
+never "zero components". Exact patterns (no trailing `.*`) require
+full equality, not prefix promotion.
 
-User-defined scopes use any other namespace. Glob matching is
-left-to-right: `triage.*` matches `triage.classifier`,
-`triage.aggregator`, but not `analytics.metrics`.
+```
+matchScope("triage.*", "triage.classify")        = true
+matchScope("triage.*", "triage.classify.intent") = true
+matchScope("triage.*", "triage")                 = false   (conservative)
+matchScope("triage", "triage")                   = true    (exact)
+matchScope("triage", "triage.classify")          = false   (exact)
+matchScope("*", "triage")                        = true
+matchScope("*", "")                              = false
+```
+
+This semantics was chosen for two reasons. First, the conservative
+wildcard makes it impossible to silently grant authority over a parent
+zone by writing the child pattern (`triage.classify.*` does NOT
+authorise `triage.classify` itself). Second, exact-match patterns let
+deployment YAML pin a single handler scope without an inadvertent
+prefix overshoot.
 
 ## Permission events
 
-```
-PermissionGranted{principal, scope, ops}
-```
-
-Issued by a handler whose own `meta.grant` admits `scope`. `principal`
-is the handler name receiving the grant; `scope` is the scope glob
-granted; `ops` is the subset of `{mutate, read, forbidden, meta.grant}`
-being granted.
+Three event types — all terminal, all in the `system.permissions.*`
+class, all emitted by the bus with `source: "bus"`.
 
 ```
-PermissionRevoked{principal, scope, ops}
+PermissionGranted{principal, mutate, read, forbidden, meta_grant, granter}
+```
+
+Issued at boot (granter `"boot"`) or by a principal P that holds a
+`meta.grant` matching every pattern in the grant (granter is P's
+name). Updates the runtime permission table.
+
+```
+PermissionRevoked{principal, mutate, read, forbidden, meta_grant, revoker}
 ```
 
 Reverses a previous grant. Same authority check as
-`PermissionGranted`.
+`PermissionGranted` (the principal performing the revoke must hold
+`meta.grant` over every pattern being removed).
 
 ```
-PermissionDenied{principal, op, scope, reason, event_id}
+PermissionDenied{principal, op, target_scope, reason}
 ```
 
-Emitted by the enforcer when a check fails. `event_id` references the
-event that triggered the check (typically a `Subscribed`,
-`Unsubscribed`, or `HandlerRegistered`) so the offending handler can
-correlate the denial with its attempt. The denial does not undo the
-attempted operation — by the time the enforcer fires, the event is
-already on the log. The enforcer's job is to observe and signal, not to
-roll back.
+Emitted by the bus when a control-plane mutation is refused. `reason`
+is one of:
 
-All three are terminal. They describe a policy state, not a unit of
-domain work.
+- `"forbidden"` — the principal's forbidden list matched, or the
+  target was a reserved zone (`core.*` / `system.*` / `feedback.*`)
+  and the principal had no explicit mutate grant naming the zone.
+- `"out_of_scope"` — the target did not match any of the principal's
+  mutate patterns.
+- `"no meta-grant authority"` — emitted only on
+  `PublishPermissionGranted`/`PublishPermissionRevoked`; the principal
+  lacks a `meta.grant` pattern covering the target.
 
-## The enforcer
+All three permission types are excluded from `EventDispatched`
+recursion (see `isMetaEventType` in `pkg/bus/bus.go`).
 
-The enforcer is a handler subscribed to every control-plane event:
+## Bus enforcement layer
+
+Every handler-issued control-plane operation goes through one of four
+principal-attributed APIs on `*bus.Bus`:
+
+- `SubscribeAs(principal, handler, eventType, maxIterations)` — checks
+  `principal` against the target handler's scope, then delegates to
+  `SubscribeWithCheck`.
+- `UnsubscribeAs(principal, handler, eventType)` — same check, then
+  delegates to `Unsubscribe`.
+- `HandlerDeregisterAs(principal, handler)` — same check, then
+  delegates to `HandlerDeregister`.
+- `PublishPermissionGranted(principal, targetPrincipal, spec)` and
+  `PublishPermissionRevoked(...)` — recursive meta.grant check.
+
+A failed check emits `PermissionDenied` with the appropriate reason,
+returns a non-nil error, and leaves the live table / permission table
+untouched.
+
+Boot-time registration uses the older `Register` / `Unsubscribe` /
+`HandlerDeregister` / `SubscribeWithCheck` paths directly; they
+bypass the permission layer. The YAML loader is the only caller of
+those — runtime handlers MUST go through the `*As` family.
+
+## Default-protected zones
+
+`core.*`, `system.*`, and `feedback.*` are reserved. The
+`*PermissionTable` seeds them with a default-deny posture: a runtime
+mutation targeting any of them is refused with `reason: "forbidden"`
+unless the principal holds an **explicit** mutate pattern naming the
+reserved prefix. A bare `mutate: [*]` is NOT enough — wildcards do not
+authorise reserved zones, so a sloppy "give it everything" grant
+cannot stumble into the framework's own machinery.
 
 ```yaml
-- name: enforcer
-  type: permission_enforcer
-  on: [HandlerRegistered, Subscribed, Unsubscribed, HandlerDeregistered,
-       PermissionGranted, PermissionRevoked]
-  scope:
-    mutate: [system.permissions]
-    read:   [*]
-    meta:
-      grant: []      # enforcer cannot grant; it only checks
+permissions:
+  - principal: archmotif-internal
+    grants:
+      mutate: ["*", "core.dispatcher"]   # only core.dispatcher is
+                                         # reachable, not the rest of core.*
 ```
 
-On each control-plane event, the enforcer:
+This rule produced the four-line `matchExplicitReserved` helper in
+`pkg/bus/permissions.go`; it is the only place in the engine where the
+matcher consults the reserved-zone list.
 
-1. Identifies the principal (the `source` of the event, typically the
-   handler that emitted it).
-2. Identifies the target scope of the operation (e.g. for
-   `Subscribed{handler, event_type}`, the scope of the handler being
-   subscribed and the scope of the event type).
-3. Computes the grant set for the principal from the
-   `PermissionGranted` / `PermissionRevoked` history.
-4. Checks (target scope) against the grant set, with `forbidden`
-   overriding everything.
-5. If the check fails, emits `PermissionDenied{principal, op, scope,
-   reason, event_id: <triggering event>}`.
+## Recursive meta.grant
 
-The enforcer is a normal handler. It reads the same log everyone reads.
-Its outputs are events on the same log. There is no privileged
-"interceptor" hook; the bus dispatches every event uniformly and the
-enforcer runs after the fact.
-
-## Containing rogue handlers
-
-Because the enforcer observes rather than intercepts, the rogue handler
-gets to *do* the thing it attempted — the `Subscribed` event is on the
-log; the live table updates. The denial fires afterwards.
-
-This is intentional. Three properties fall out of it:
-
-1. **The audit log is complete.** Every attempt — successful or denied —
-   is on the log. There is no "secret history" of attempts the enforcer
-   blocked.
-2. **The offender can react.** A handler that subscribes too broadly
-   sees `PermissionDenied{event_id: <its Subscribed>}` and can emit an
-   `Unsubscribed` to back off.
-3. **No crash mode.** A denial doesn't terminate the run. The system
-   keeps going; the offender's next attempt produces another denial.
-
-A persistent offender is a policy problem, not a bus problem. A
-follow-up handler (e.g. a "rogue tally" subscriber to `PermissionDenied`)
-can take action — emit `HandlerDeregistered` for the offender, or
-escalate to a human-gate event for review.
-
-## Recursive grant
-
-`PermissionGranted` is itself a control-plane event. The enforcer
-treats it as such:
-
-- The principal of a `PermissionGranted` is the handler issuing the
-  grant.
-- The target scope is the scope being granted.
-- The check: is the principal's `meta.grant` set a superset of the
-  granted scope?
-
-A handler with `meta.grant: [triage.*]` can issue
-`PermissionGranted{principal: archmotif_analyzer, scope: triage.*,
-ops: [mutate]}` — but not `scope: analytics.*`. The enforcer catches the
-latter and emits `PermissionDenied`.
-
-Root configuration (the bus bootstrap) is the only principal with
-`meta.grant: [*]`. Every other principal's grant set is a subset of
-what root handed it. The grant tree is finite, observable, and
-auditable.
-
-## Scope hierarchy diagram
+`PermissionGranted` itself is a control-plane event. The bus checks
+the granter's `meta.grant` set against every pattern across every axis
+in the grant. If any pattern is outside the granter's authority, the
+grant is rejected and `PermissionDenied{op: "meta.grant"}` fires.
 
 ```
-                          ┌─────────────────┐
-                          │   root (boot)   │
-                          │ meta.grant: [*] │
-                          └─────────┬───────┘
-                                    │ PermissionGranted
-              ┌─────────────────────┼─────────────────────┐
-              ▼                     ▼                     ▼
-        ┌──────────┐          ┌──────────┐          ┌──────────┐
-        │ enforcer │          │  audit   │          │ archmotif│
-        │mutate:   │          │read: [*] │          │mutate:   │
-        │ system.* │          │meta.grant│          │ analytics│
-        │meta.grant│          │ : []     │          │  .*      │
-        │ : []     │          └──────────┘          │meta.grant│
-        └──────────┘                                │ : [analy │
-                                                    │  tics.*] │
-                                                    └────┬─────┘
-                                                         │
-                                                         ▼
-                                                    PermissionGranted
-                                                    (to sub-handlers
-                                                     under analytics.*)
+P holds meta.grant: [triage.*]
+P publishes PermissionGranted{principal: Q, mutate: [triage.x]}     OK
+P publishes PermissionGranted{principal: Q, mutate: [analytics.*]}  DENIED
+P publishes PermissionGranted{principal: Q, mutate: [triage.x, analytics.x]}
+                                                                    DENIED  (any one out of scope = deny)
 ```
 
-The enforcer can mutate `system.*` (where its own state lives) but
-cannot grant anything to anyone. The audit logger reads everything but
-cannot mutate or grant. The archmotif analyzer can mutate `analytics.*`
-and grant sub-handlers under `analytics.*` — recursive scope, bounded
-by `meta.grant`.
+Boot grants do NOT pass through the check — the YAML loader is treated
+as implicitly holding `meta.grant: [*]`. This is what makes the grant
+tree rooted: every non-root grant derives from a chain of `meta.grant`
+authority terminating in the boot stream.
 
-## Default protected zones
+## Default scope + implicit grant
 
-A canonical bootstrap config establishes:
+A handler with no `scope:` and no `permissions:` block gets:
 
-```yaml
-# core.* — the basic event flow, hands-off by default
-- PermissionGranted{principal: __all__, scope: core.*, ops: [forbidden]}
+- scope `default.<name>` (so its identity in the table is unambiguous);
+- an implicit `PermissionGranted{principal: <name>, mutate: [default.*], read: ["*"]}`
+  at boot, so it can mutate within the open `default.*` namespace.
 
-# system.* — bus internals
-- PermissionGranted{principal: __all__, scope: system.*, ops: [forbidden]}
-- PermissionGranted{principal: enforcer, scope: system.permissions, ops: [mutate]}
-- PermissionGranted{principal: audit, scope: system.audit, ops: [mutate]}
+This keeps Phase 1–4b YAML files working with no edits. Existing
+examples (`calc.yaml`, `triage.yaml`, etc.) operate in `default.*` and
+never touch reserved zones; their runtime semantics are unchanged.
 
-# feedback.* — human-owned, optimiser can read but not mutate without
-# an explicit human-gate
-- PermissionGranted{principal: __all__, scope: feedback.*, ops: [read]}
-- PermissionGranted{principal: __all__, scope: feedback.*, ops: [forbidden]}
-   # forbidden mutates; read is granted explicitly above
+## Worked example
+
+`examples/scoped_compression.yaml` ships a four-handler graph:
+
+- `audit` (scope `system.audit`, read-only) — captures every
+  control-plane event to a JSONL file.
+- `triage-target` (scope `triage.classify`) — domain handler.
+- `analytics-stub` (scope `analytics.archmotif`, mutate `[triage.*]`)
+  — succeeds when it `SubscribeAs("analytics-stub", "triage-target", …)`.
+- `feedback-saboteur` (scope `analytics.saboteur`, no feedback grants)
+  — fails with `PermissionDenied{reason: "forbidden"}` on any
+  `feedback.*` target.
+
+The `TestScopedCompressionExample` runtime test exercises both paths
+and asserts the audit log captured both the grant stream and the
+denial.
+
+## Non-goals
+
+The Phase 4c layer is **handler-scoped**. Per-request permission
+checks ("user X can only mutate handlers tied to requests X started")
+are explicitly out of scope. A `request_id`-aware permission axis can
+be layered on top later without changing the grant-event vocabulary
+— the dispatcher would consult a request-scoped table in addition to
+the handler-scoped one. None of that lives in Phase 4c.
+
+Also out of scope:
+
+- Read-side filter delivery (Phase 6 compresses subscriptions through
+  the same plane and gets the filter primitive then).
+- Compression / optimisation passes that USE permissions (Phase 6).
+- archmotif as a live subscriber (Phase 7).
+
+## Wire format additions
+
+Phase 4c adds one field to the `HandlerRegistered` event payload:
+
+```json
+{
+  "name": "triage-tool",
+  "consumes": "RequestReceived",
+  "emits": [...],
+  "description": "...",
+  "scope": "triage.classify"
+}
 ```
 
-`__all__` is shorthand for "the default unless a more specific grant
-overrides it". The enforcer reads grants in order: the most specific
-match wins; `forbidden` overrides all others at the same specificity.
-
-## Filter delivery
-
-Phase 4c extends `Subscribed` with an optional `filter`:
-
-```
-Subscribed{handler: T, event_type: X, filter: "payload.user_id == self"}
-```
-
-Filters are predicate strings the bus evaluates before delivery. A
-handler whose `scope.read` does not admit the source of an event sees
-nothing — the event is filtered at the dispatcher edge.
-
-Filters also enable scope-aware routing for control-plane events: the
-audit logger receives every event, but a handler with `read:
-[analytics.*]` receives only events whose `source` falls in
-`analytics.*`. This is the same primitive that makes the enforcer
-viable — its `read: [*]` is what lets it see everything.
-
-## Why permissions are a handler, not a primitive
-
-A bus that enforces permissions at dispatch time has two costs:
-
-1. **Coupling.** Permission rules live inside the dispatcher; rules
-   change requires bus changes.
-2. **Opacity.** Denials are dispatcher-internal; nothing on the log
-   records them.
-
-Reflex's approach inverts both. Permission rules live in the
-`PermissionGranted` / `PermissionRevoked` event stream — addable,
-removable, auditable at runtime. Denials are events on the log —
-visible to handlers, surfaceable in the trace, queryable by the
-analyzer.
-
-The dispatcher does not know about permissions. The bus accepts every
-event, fans it out per the live table, and lets the enforcer decide
-afterwards what was a violation. The cost is that the offending event
-is briefly on the log; the benefit is that the system can observe its
-own policy state and reason about it the same way it reasons about
-domain state.
+The SDK protocol (`pkg/sdk/protocol.go`) does NOT change in Phase 4c.
+Scope + inline permissions land on the in-process bus via
+`sdk.WithScope`/`sdk.WithPermissions` options on the handler builder;
+the remote SDK path inherits the default-zone implicit grant and is
+free to mutate `default.*` only — TODO(phase-4d) extends the remote
+hello frame with scope/permission fields once a multi-host story
+exists.

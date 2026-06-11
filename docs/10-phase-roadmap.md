@@ -14,7 +14,7 @@ tracked under its own repo and cited where reflex depends on it.
 | 1.6   | done       | events-only model: bus meta-events, projection store, generic aggregator, CLI wait-predicates (`c545df4`)                | 1.5                         |
 | 4a    | done       | bus daemon + remote handler SDK over a Unix socket (`c1b735c`)                                                            | 1.6                         |
 | 4b    | done       | control-plane events + live-table cycle detector + daemon completeness (multi-handler mux, projection RPCs, await frames, CheckQuiescence)  | 4a                          |
-| 4c    | pending    | scope-based permission layer (`PermissionGranted`, `PermissionRevoked`, `PermissionDenied` + enforcer handler)            | 4b                          |
+| 4c    | done       | scope-based permission layer (`PermissionGranted`, `PermissionRevoked`, `PermissionDenied`) gated at the bus edge          | 4b                          |
 | 4d    | pending    | scaffold CLI + tag archmotif release exposing `pkg/metrics` shim → drop the `go.mod replace` directive                   | 4a, archmotif side-quest    |
 | 4e    | pending    | external embedder API (Go `pkg/embed` package + HTTP daemon + optional gRPC)                                             | 4a                          |
 | 5     | pending    | embeddings on declared embeddable nodes + semantic-search API                                                            | 1.6                         |
@@ -128,11 +128,23 @@ and [`03-bus-and-projection.md`](./03-bus-and-projection.md).
 
 ## Phase 4c — scope-based permission layer
 
-Goal: handlers declare `scope` (mutate / read / forbidden / meta.grant).
-`PermissionGranted` / `PermissionRevoked` / `PermissionDenied`
-events on the bus. The enforcer is itself a handler. Default protected
-zones: `core.*` / `system.*` / `feedback.*`. See
+Done. Every handler declares a `scope:` (default `default.<name>`)
+plus an optional `permissions:` block (`mutate` / `read` / `forbidden` /
+`meta.grant`). The bus gates every handler-issued control-plane
+mutation through a synchronous permission check at four
+principal-attributed APIs (`SubscribeAs`, `UnsubscribeAs`,
+`HandlerDeregisterAs`, `PublishPermissionGranted`/`Revoked`). On
+refusal, the bus emits `PermissionDenied{principal, op, target_scope,
+reason}` with reason `forbidden` / `out_of_scope` / `no meta-grant
+authority`. Reserved zones `core.*` / `system.*` / `feedback.*` are
+default-deny — even `mutate: [*]` does not authorise them; an explicit
+pattern naming the reserved prefix is required. Recursive `meta.grant`
+makes the grant tree rooted in the boot stream. See
 [`06-permissions-and-scopes.md`](./06-permissions-and-scopes.md).
+
+Per-`request_id` scoped permissions ("user X can only mutate handlers
+tied to requests they started") are an explicit non-goal; Phase 4c is
+handler-scoped only.
 
 ## Phase 4d — scaffold CLI + archmotif tag
 

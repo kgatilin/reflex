@@ -42,7 +42,9 @@ type auditSub struct {
 }
 
 // auditedTypes returns the set of control-plane event types the audit
-// handler reacts to. Exposed for tests.
+// handler reacts to. Exposed for tests. Phase 4c adds the three
+// permission event types — grant / revoke / deny — so policy mutations
+// land in the same audit stream as topology mutations.
 func auditedTypes() []string {
 	return []string{
 		bus.HandlerRegisteredType,
@@ -50,6 +52,9 @@ func auditedTypes() []string {
 		bus.UnsubscribedType,
 		bus.HandlerDeregisteredType,
 		bus.SubscriptionRejectedType,
+		bus.PermissionGrantedType,
+		bus.PermissionRevokedType,
+		bus.PermissionDeniedType,
 	}
 }
 
