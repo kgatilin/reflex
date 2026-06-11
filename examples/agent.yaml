@@ -1,0 +1,263 @@
+# agent.yaml — the stage-0 coding agent (doc 22).
+#
+# This is the bootstrap topology: a coding agent running ON reflex whose job
+# is to build the rest of the reflex roadmap IN reflex. The shape is the
+# 12-era legacy loop used as a knowing crutch — seed + pumps + a capped brain
+# — wired to the doc-14 out-of-process plugins. The agent removes the
+# scaffolding with its own hands as it lands docs 16/17/19/20 (see
+# docs/23-bootstrap-roadmap.md for the task queue).
+#
+# Run (requires Vertex AI ADC: `gcloud auth application-default login`):
+#
+#   # terminal 1 — daemon owns the bus
+#   reflex daemon --config examples/agent.yaml --socket /tmp/reflex-agent.sock
+#
+#   # terminal 2 — file tools, rooted at the reflex repo
+#   go run ./plugins/fs --socket /tmp/reflex-agent.sock --root .
+#
+#   # terminal 3 — go validators, rooted at the reflex repo
+#   go run ./plugins/gotool --socket /tmp/reflex-agent.sock --root .
+#
+#   # terminal 4 — send a task (one request = one task at stage 0)
+#   reflex emit --daemon /tmp/reflex-agent.sock \
+#       --type RequestReceived \
+#       --payload '{"payload":"In pkg/foo/bar.go, Parse returns nil on empty input; make it return an error. Validate with go.build and go.test before answering."}' \
+#       --wait request_id_terminal
+#
+#   # afterwards — what did that cost?
+#   reflex costs --log /tmp/reflex-agent-usage.jsonl --by-request
+#
+# Safety stance (doc 22): no bash tool — the agent's whole action surface is
+# the named plugins below, each rooted and single-purpose. No self-wiring —
+# the agent writes code; only the operator edits this file. Committing is the
+# operator's job, after reviewing the fold and the diff.
+#
+# Stage-0 crutches, by design, each retired by a roadmap task:
+#   - seed + per-result pumps re-emitting llm.turn (dies with node-rooted
+#     scopes, docs 16/17 — task #2)
+#   - one tool call per firing (parallel calls become possible with
+#     obligation counting — task #2)
+#   - the fs plugin's in-process sha guard (replaced by the fs.seen
+#     projection, doc 19 — task #3)
+#   - loop cap on the brain instead of a request-scope budget (doc 16)
+
+settings:
+  max_steps: 512
+
+handlers:
+  # ── kickoff ────────────────────────────────────────────────────────────
+  - name: seed
+    type: echo
+    on: RequestReceived
+    emits: [llm.turn]
+    config:
+      emit: llm.turn
+
+  # ── the brain: multi-model llm body, native tool calls ────────────────
+  # Stage-0 model choice per doc 22: a strong brain from day one — the
+  # bottleneck is task success rate, not cost. Swapping the model is this
+  # one line; the cost report (reflex costs) is what justifies moving any
+  # lane to a cheaper model later.
+  - name: brain
+    type: llm
+    on: llm.turn
+    config:
+      model: vertex:anthropic/claude-opus-4-8
+      project: iow-uagent
+      location: us-east5
+      max_tokens: 16384
+      system: |
+        You are the stage-0 reflex bootstrap agent. You make small, real,
+        verified code changes in the reflex repository (Go). Your tools are
+        the only way to touch the world: file tools (fs.*) rooted at the
+        repo, and validators (go.*). There is no shell.
+
+        Discipline:
+        - search/read before you edit; the edit tool refuses edits to files
+          your context has not seen at their current version.
+        - after any code change, run go.build and go.test (go.vet for new
+          code) and read the verdicts; never claim success without an
+          ok:true verdict in the log.
+        - keep changes minimal and surgical; one task per request.
+        - when the task is done and validated, answer with a short summary
+          of what changed and which verdicts prove it.
+      tools:
+        - name: fs.read
+          description: >-
+            Read a window of a file, line-numbered. Returns sha (needed
+            implicitly for later edits), lines {from,to,total} and a
+            truncated flag; ask again with offset/limit for more.
+          input_schema:
+            type: object
+            properties:
+              path: { type: string, description: "repo-relative path" }
+              offset: { type: integer, description: "1-based first line, default 1" }
+              limit: { type: integer, description: "lines to read, default 200, max 1000" }
+            required: [path]
+        - name: fs.edit
+          description: >-
+            Exact in-place replacement: old -> new. old must match exactly
+            once (extend it to be unique, or set replace_all). Requires a
+            prior fs.read of the file's current version.
+          input_schema:
+            type: object
+            properties:
+              path: { type: string }
+              old: { type: string, description: "exact existing text, unique unless replace_all" }
+              new: { type: string }
+              replace_all: { type: boolean }
+            required: [path, old, new]
+        - name: fs.write
+          description: >-
+            Create a new file (directories are created). Not the way to
+            change an existing file - use fs.edit. Overwriting an existing
+            file requires having read its current version.
+          input_schema:
+            type: object
+            properties:
+              path: { type: string }
+              content: { type: string }
+            required: [path, content]
+        - name: fs.search
+          description: >-
+            Find where something lives: literal substring by default,
+            regex with regex:true, optional glob filter (base name, or
+            path glob with /). Capped by max with an explicit truncated flag.
+          input_schema:
+            type: object
+            properties:
+              query: { type: string }
+              glob: { type: string }
+              regex: { type: boolean }
+              max: { type: integer }
+            required: [query]
+        - name: go.build
+          description: >-
+            go build, rooted at the repo. package is a relative pattern
+            like ./... (default) or ./pkg/handler. Verdict: ok + output.
+          input_schema:
+            type: object
+            properties:
+              package: { type: string }
+        - name: go.test
+          description: >-
+            go test, rooted at the repo. Optional run is a test-name regex.
+            Verdict: ok + output (failures appear in output).
+          input_schema:
+            type: object
+            properties:
+              package: { type: string }
+              run: { type: string, description: "-run regex" }
+        - name: go.vet
+          description: "go vet, rooted at the repo. Verdict: ok + output."
+          input_schema:
+            type: object
+            properties:
+              package: { type: string }
+    loop:
+      max_iterations: 48   # stage-0 budget: the only cap on the reason/act cycle
+
+  # ── observation pumps: tool verdicts re-enter the brain as turns ──────
+  # One echo per result/failed kind — verbose on purpose: zero new code,
+  # honest about being the doc-22 crutch. All of these die with task #2.
+  - name: pump-fs-read
+    type: echo
+    on: tool.fs.read.result
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+  - name: pump-fs-read-failed
+    type: echo
+    on: tool.fs.read.failed
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+  - name: pump-fs-edit
+    type: echo
+    on: tool.fs.edit.result
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+  - name: pump-fs-edit-failed
+    type: echo
+    on: tool.fs.edit.failed
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+  - name: pump-fs-write
+    type: echo
+    on: tool.fs.write.result
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+  - name: pump-fs-write-failed
+    type: echo
+    on: tool.fs.write.failed
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+  - name: pump-fs-search
+    type: echo
+    on: tool.fs.search.result
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+  - name: pump-fs-search-failed
+    type: echo
+    on: tool.fs.search.failed
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+  - name: pump-go-build
+    type: echo
+    on: tool.go.build.result
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+  - name: pump-go-build-failed
+    type: echo
+    on: tool.go.build.failed
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+  - name: pump-go-test
+    type: echo
+    on: tool.go.test.result
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+  - name: pump-go-test-failed
+    type: echo
+    on: tool.go.test.failed
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+  - name: pump-go-vet
+    type: echo
+    on: tool.go.vet.result
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+  - name: pump-go-vet-failed
+    type: echo
+    on: tool.go.vet.failed
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+
+  # ── error lane, minimal: a model/transport failure re-enters the brain ─
+  # llm.failed carries the error text; the brain sees it in the transcript
+  # and retries or wraps up. The loop cap bounds pathological retry storms.
+  - name: pump-llm-failed
+    type: echo
+    on: llm.failed
+    emits: [llm.turn]
+    config: { emit: llm.turn }
+
+  # ── cost tracking: every completion's tokens land in a JSONL sink ─────
+  # `reflex costs --log /tmp/reflex-agent-usage.jsonl --by-request` prices it.
+  - name: usage-meter
+    type: audit
+    on: llm.usage
+    config:
+      sink: file:///tmp/reflex-agent-usage.jsonl
+      types: [llm.usage]
+
+  # ── operator surface ───────────────────────────────────────────────────
+  - name: out
+    type: printer
+    on: assistant.message
+    config:
+      prefix: "agent: "
+      field: text
+
+  - name: watcher
+    type: unhandled_watcher
+    on: __noop__
+    emits: [RequestUnhandled]

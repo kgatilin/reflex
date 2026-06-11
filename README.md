@@ -62,6 +62,7 @@ reflex send        --config <yaml> <text>              [--wait <p>]
 reflex validate    --config <yaml>
 reflex describe    --config <yaml>
 reflex new-handler <name> --consumes <Type> [--emits ...] [--terminal ...] [--scope ...] [--language yaml|go]
+reflex costs       --log <jsonl> [--prices <json>] [--by-request]
 ```
 
 - `run` — execute a single user message through the bus and print the trace.
@@ -77,6 +78,9 @@ reflex new-handler <name> --consumes <Type> [--emits ...] [--terminal ...] [--sc
 - `describe` — print the handler graph as a textual table: name, type,
   description, consumes, emits (terminal emissions tagged `(T)`), and the
   declared loop cap if any.
+- `costs` — fold `llm.usage` events out of a JSONL log (trace output or an
+  audit sink with `types: [llm.usage]`) into a per-model / per-request /
+  total spend report. See `docs/23-bootstrap-roadmap.md` for the protocol.
 - `new-handler` — scaffold a new handler. With `--language yaml` (default)
   appends a handler block to `--config` (or prints to stdout). With
   `--language go` writes a runnable handler binary at `cmd/<name>/main.go`
@@ -370,9 +374,22 @@ pkg/handler/                 built-in handler factories + HandlerSpec self-descr
 pkg/graph/                   static handler graph compiler + Tarjan SCC cycle detection
 pkg/config/                  YAML loader + validation (including `loop:` grammar)
 pkg/sdk/                     Phase 4a: handler-client SDK (in-process + Unix-socket transports), daemon, wire protocol
+pkg/provider/                doc 22: neutral completion interface + Vertex-Anthropic adapter (model bindings, native tool calls, usage)
+pkg/cost/                    doc 23: llm.usage fold — per-model price table, per-request/total spend report
+plugins/fs/                  doc 14: rooted file tools (read/edit/write/search) as an out-of-process SDK plugin
+plugins/gotool/              doc 14: go build/test/vet validators as an out-of-process SDK plugin
 internal/runtime/            glue: build a bus from a config, run a single user message
-examples/                    calc / stall / aggregate / react + loop (capped cycle) + bad_loop / cycle (validate negatives) + control_plane_audit / scoped_compression (Phase 4b/4c)
+examples/                    calc / stall / aggregate / react + loop (capped cycle) + bad_loop / cycle (validate negatives) + control_plane_audit / scoped_compression (Phase 4b/4c) + agent (the doc-22 stage-0 coding agent)
 ```
+
+## The stage-0 bootstrap agent
+
+`examples/agent.yaml` is the doc-22 coding agent: a multi-model `llm` brain
+(native tool calls via `pkg/provider`) wired to the rooted `plugins/fs` and
+`plugins/gotool` binaries over the daemon socket, with every completion's
+token usage sunk to a JSONL file for `reflex costs`. Run instructions are in
+the file header; the operating loop, task queue, and cost protocol live in
+`docs/23-bootstrap-roadmap.md`.
 
 ## YAML handler grammar
 

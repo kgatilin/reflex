@@ -97,6 +97,12 @@ reflex from another application, jump to
     build/test/vet plugins) and the self-build order by which reflex
     implements its own roadmap; safety stance — no bash tool, no
     self-wiring, operator-held commit and changeset rights.
+23. [`23-bootstrap-roadmap.md`](./23-bootstrap-roadmap.md) *(live)* —
+    the operational bootstrap document: what shipped of the stage-0
+    kernel, the per-task operating loop, the task queue (calibration
+    adapters → scopes/obligations → projections → changesets → onward),
+    and the cost tracking/optimisation protocol (`llm.usage` →
+    `reflex costs`, the lever order, the per-task cost log).
 
 ## Convention
 
