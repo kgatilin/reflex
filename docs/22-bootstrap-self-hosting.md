@@ -34,6 +34,31 @@ body:
   model and diff the folds. Prompt-cache optimisation is deliberately
   deferred; a neutral log does not obstruct it.
 
+### Model–role fit (operating observations)
+
+Capability differences are a *placement* concern, and the topology can
+express them precisely — a node's emit set says whether tool-calling
+competence matters at all:
+
+| Model | Profile | Natural nodes |
+|---|---|---|
+| `vertex:anthropic/claude-*` | strong reasoning + reliable tool calls | the brain (stage 0 and after) |
+| `vertex:gemini-3.5-flash` | not top-tier, cheap and fast | repair lanes, medic, explore subagent, model-backed gates |
+| `vertex:deepseek-r1` | strong cheap thinking, **poor tool calling** | nodes that emit *no* `tool.*.call`: planner (plan as a `state.updated.plan` fact), reviewer-judge on `scope.brain.closed`, architecture critic |
+
+Two notes the R1 row earns:
+
+- A judge or planner consumes a fold and emits facts — its emit set
+  contains no tool calls, so R1's weakness is structurally irrelevant
+  there. "Thinking model in a no-tools seat" is a topology decision, and
+  a doc-20 lint can even guard it (an R1-bound node with `tool.*.call`
+  in its emit set is a warning).
+- **R1 as a stress-test brain.** A model that aims tools poorly is
+  exactly what the doc-18 repair lane exists for (draft → args-repair →
+  call). Periodically running the agent with an R1 brain is a live test
+  that the lanes, medic, and failure topology actually carry a weak
+  tool-caller — robustness validated by substitution, one config line.
+
 ## The frame: stage 0 is the last hand-written code
 
 This is a compiler-style bootstrap. The deliberate choice is **not** to
