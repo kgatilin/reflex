@@ -100,19 +100,25 @@ descendants. Resume after a crash = recompute the frontier from the
 log and re-dispatch it. (The dispatcher's in-memory queue is a cache
 of this frontier; today it is lost on crash and not yet rebuilt.)
 
-The real exposure is the window between *executing* a reaction and
-*appending* its events. Crash there → the frontier still shows the
-trigger unreacted → re-dispatch → re-execution. At-least-once, the
-classic event-sourcing problem. Per node class:
+A crash between *executing* a reaction and *appending* its events
+leaves the trigger on the frontier → re-dispatch → re-execution.
+This is at-least-once delivery, and for the LLM node it is not a
+problem at all — it is the **retry mechanism**: an unrecorded
+completion never existed, the system replays the turn, exactly one
+answer gets recorded. Crash recovery and retry are the *same
+operation* (recompute frontier, dispatch) — no separate retry
+machinery exists or is needed. "A different answer on replay" is not
+an anomaly; reality is what got appended.
 
-- **LLM node**: a duplicate Vertex call. The lost completion was never
-  recorded, so the log never disagrees with reality — the cost is
-  money and trajectory non-determinism, not correctness. Ironically
-  the *safest* node: its only effect is the emitted event.
-- **Side-effecting tools** (`tool.email.send`): re-execution means two
-  emails. These need an idempotency key — the trigger event's `id` is
-  the natural one; a tool that has already seen the id re-serves its
-  recorded result instead of repeating the effect.
+What remains is the universal rule of effectful operations under
+at-least-once: **external side effects need idempotency keys**
+(`tool.email.send` re-executed = two emails). The log provides the
+standard outbox/WAL pattern for free: the tool first emits an intent
+event (`tool.email.attempt{key: <event-id>}`) — appended *before* the
+effect — performs the effect passing the key as the provider-side
+idempotency key, then emits the result. A crash at any point
+re-dispatches safely; the provider deduplicates on the key. The
+intent event is the write-ahead record.
 
 Cassette-style record/replay (`llm.completed` re-served from a
 recording) remains legitimate, but as a *testing tool*, not a
