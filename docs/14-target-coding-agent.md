@@ -28,9 +28,9 @@ app.session.S.request.received{ text: "...make Parse return an error..." }
   brain   -> tool.fs.search.call{ query: "func Parse" }
   search  -> tool.fs.search.result{ matches: [{ path: "pkg/foo/bar.go", line: 12 }] }
   brain   -> tool.fs.read.call{ path: "pkg/foo/bar.go" }
-  read    -> tool.fs.read.result{ content: "...", sha: "ab12" }
-  brain   -> tool.fs.edit.call{ path: "pkg/foo/bar.go", old: "return nil", new: "return errEmpty" }
-  edit    -> tool.fs.edit.result{ sha: "cd34" }
+  read    -> tool.fs.read.result{ content: "...", sha: "ab12", lines: { from: 1, to: 40, total: 40 } }
+  brain   -> tool.fs.edit.call{ path: "pkg/foo/bar.go", old: "return nil", new: "return errEmpty", base_sha: "ab12" }
+  edit    -> tool.fs.edit.result{ sha: "cd34", replaced: 1 }
   brain   -> tool.fmt.run.call{ path: "pkg/foo/bar.go" }
   fmt     -> tool.fmt.run.result{ changed: ["pkg/foo/bar.go"] }
   brain   -> tool.lint.run.call{ path: "pkg/foo/bar.go" }
@@ -84,18 +84,35 @@ Each tool does exactly one thing; none parse shell.
 
 | Kind | Call payload | Result payload | Fails when |
 |---|---|---|---|
-| `tool.fs.read` | `{ path }` | `{ path, content, sha }` | missing, outside scope, too large |
-| `tool.fs.edit` | `{ path, old, new, base_sha? }` | `{ path, sha }` | `old` absent or **non-unique**, sha mismatch |
+| `tool.fs.read` | `{ path, offset?, limit? }` | `{ path, content, sha, lines: { from, to, total }, truncated }` | missing, outside scope |
+| `tool.fs.edit` | `{ path, old, new, replace_all?, base_sha? }` | `{ path, sha, replaced }` | `old` absent / non-unique, sha mismatch, no prior read |
 | `tool.fs.write` | `{ path, content }` | `{ path, sha }` | outside scope |
 | `tool.fs.search` | `{ query, glob?, regex?, max? }` | `{ matches: [{ path, line, text }], truncated }` | — |
 
-- `edit` is the primary code-change tool: an **exact, unique** old→new
-  replacement (the surgical-edit shape). Non-unique `old` fails rather than
-  guessing — determinism over cleverness.
-- `write` is create / full overwrite, for new files only.
-- `sha` is the content hash; `base_sha` on `edit` is an optional optimistic-
-  concurrency precondition — load-bearing once sessions run in parallel and a
-  cached/late write could clobber (13-event-taxonomy.md concurrency notes).
+The three file tools are a deliberate division of labour — **read a window,
+edit in place, write only to create**:
+
+- `read` returns a **window**, not the whole file: `offset`/`limit` (by line,
+  with sane defaults) so the model pulls only the slice it needs. Content is
+  **line-numbered**, and `lines.total` + `truncated` tell the model there is
+  more — never a silent cut. The line numbers are what `edit` targets against.
+- `edit` is the **update primitive** and the primary code-change tool: an
+  **exact** `old`→`new` replacement, in place, never a rewrite. `old` must be
+  **unique** or the call fails (no guessing); `replace_all` is the explicit
+  opt-in for a deliberate multi-site change. `replaced` reports the count.
+- `write` is create / full overwrite **only** — for new files. It is *not* the
+  way to change an existing file; to update, `edit`. (A `write` over an
+  existing path is allowed but is the wholesale-rewrite escape hatch, not the
+  default path.)
+- **Read-before-edit** is enforced as a projection, not a lock: `edit` requires
+  a prior `tool.fs.read.result` for the same `path` in the cone, and `base_sha`
+  must match it — so the model edits content it has actually seen, at the
+  version it saw. No read of this path before the edit ⇒ fail. The guard is a
+  fold over the cone (who read this path, at what sha), in the same spirit as
+  the verification check of 12-react-experiment.md — no stored flag.
+- `sha` is the content hash; `base_sha` is the optimistic-concurrency
+  precondition — load-bearing once sessions run in parallel and a cached/late
+  write could clobber (13-event-taxonomy.md concurrency notes).
 - `search` is the minimal "find where X is": literal by default, opt-in
   `regex`, optional `glob` filter, `max`-capped with a `truncated` flag (no
   silent truncation).
