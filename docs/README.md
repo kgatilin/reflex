@@ -56,6 +56,9 @@ reflex from another application, jump to
 14. [`14-target-coding-agent.md`](./14-target-coding-agent.md) —
     the first end-to-end target: a minimal coding agent (read/edit/write/search
     + fmt/lint) built from out-of-process tool plugins, scoped to its workspace.
+15. [`15-primitive-reduction.md`](./15-primitive-reduction.md) *(draft)* —
+    collapsing the node vocabulary to two primitives (`llm` + `tool`); fan-out
+    synchronization as the `scope.closed` projection, not a node.
 
 ## Convention
 

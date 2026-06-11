@@ -83,6 +83,12 @@ emit. `{configured}` means the kind is set per-instance in YAML (`on:` / `emit:`
 not fixed by the type. The default vocabulary is small and **domain-blind**;
 everything else is a tool plugin or `sys` machinery.
 
+> ⚠ **Draft evolution:** [15-primitive-reduction.md](./15-primitive-reduction.md)
+> proposes collapsing this eight-node vocabulary to **two primitives** (`llm` +
+> `tool`) — `decode`/`signal`/`forward`/`router`/`aggregate`/`sink`/`tool_node`
+> fold into direct subscription, a tool, or `sys` machinery. Read it before
+> relying on the set below.
+
 ### User-declared (YAML)
 
 | `type` | Role | Consumes | Emits |
