@@ -91,6 +91,12 @@ reflex from another application, jump to
     crystallisation), and the ranked gaps it surfaces — context
     budget/view compaction, log payload weight, the mid-flight steering
     rule, `sys.node.updated`, streaming as a sink concern, eval forking.
+22. [`22-bootstrap-self-hosting.md`](./22-bootstrap-self-hosting.md) *(draft)* —
+    the self-hosting plan: a stage-0 hand-built kernel (multi-model llm
+    body over Vertex AI, rooted fs plugin with a crutch guard,
+    build/test/vet plugins) and the self-build order by which reflex
+    implements its own roadmap; safety stance — no bash tool, no
+    self-wiring, operator-held commit and changeset rights.
 
 ## Convention
 
