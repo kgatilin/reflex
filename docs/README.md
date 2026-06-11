@@ -79,6 +79,12 @@ reflex from another application, jump to
     (kv/log shapes, `in:` as walk boundary), `reads:` access positioned
     at the trigger, control-plane registration, sessions as causal
     chains; carries doc 14's read-before-edit guard end to end.
+20. [`20-topology-management.md`](./20-topology-management.md) *(draft)* —
+    doc 05 re-founded on the converged model: changeset pipeline
+    (requested → facts | rejected, engine-only fact writes),
+    resulting-graph validation with reject/lint severities, scopes and
+    projections as managed objects, pin-at-root declarations with
+    per-instance intervention events, and the daemon CLI surface.
 
 ## Convention
 
