@@ -55,7 +55,7 @@ and is deprecated thinking. Consequences:
 ## Errors are events, not control flow
 
 A handler failure must not abort the drain. The dispatcher emits
-`<node>.failed{error}` into the cone and keeps going. Failed branches
+`{node}.failed{error}` into the cone and keeps going. Failed branches
 are just branches containing a failure event.
 
 Error events are **non-terminal**. This is load-bearing: a terminal
@@ -150,7 +150,7 @@ One less concept.
    have N causes; the causal structure is a DAG, not a tree. Cheap
    now, expensive after the Phase 4a wire format calcifies.
 2. The bus stops treating handler errors as fatal: emit
-   `<node>.failed` (non-terminal) and continue the drain.
+   `{node}.failed` (non-terminal) and continue the drain.
 3. Per-scope incremental quiescence detection — `DrainQuiesced` is
    currently computed once at full drain end; sub-scope barriers need
    it per cut point, online.

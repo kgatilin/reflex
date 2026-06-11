@@ -13,7 +13,7 @@ Every event on the log has four parts, each with one home:
 
 | Part | Shape | Carries |
 |---|---|---|
-| `subject` | `<class>.<scope...>.<kind...>` | routing + projection scope |
+| `subject` | `{class}.{scope...}.{kind...}` | routing + projection scope |
 | `trace` | `{ request_id?, caused_by[] }` | correlation + causation |
 | `terminal` | `bool` | leaf of the causal DAG (no descendant expected) |
 | `payload` | `{ ...data, source }` | data + origin metadata |
@@ -26,12 +26,12 @@ NATS grammar: `.`-delimited tokens, `*` = one token (any position), `>` = one+
 tokens (tail only). Routing lives entirely in the subject.
 
 ```
-sys.<kind...>                    machinery + global registry (session-less)
-app.session.<id>.<kind...>       domain events, scoped by session
-app.ingress.<surface>.<event>    inbound traffic before session resolution
+sys.{kind...}                    machinery + global registry (session-less)
+app.session.{id}.{kind...}       domain events, scoped by session
+app.ingress.{surface}.{event}    inbound traffic before session resolution
 ```
 
-- **Class first:** belongs to a session → `app.session.<id>.`; global machinery
+- **Class first:** belongs to a session → `app.session.{id}.`; global machinery
   → `sys.`.
 - **Session is the only subject scope.** Request membership is *not* a token —
   it lives in `trace.request_id`.
@@ -68,13 +68,13 @@ Kind suffixes only (scope prefix omitted). `T` = terminal.
 | `llm.decode_failed` | | completion did not parse into an action |
 | `llm.emission_rejected` | | decoded action not in the allowlist |
 
-### Tools (per tool `<name>`)
+### Tools (per tool `{name}`)
 
 | Kind | T | Meaning |
 |---|---|---|
-| `tool.<name>.call` | | invoke the tool with structured args |
-| `tool.<name>.result` | | success payload |
-| `tool.<name>.failed` | | tool error (non-terminal — retry/fallback is topology) |
+| `tool.{name}.call` | | invoke the tool with structured args |
+| `tool.{name}.result` | | success payload |
+| `tool.{name}.failed` | | tool error (non-terminal — retry/fallback is topology) |
 
 ### Conversation & state
 
@@ -125,7 +125,7 @@ is small and **domain-blind**; everything else is a plugin or `sys` machinery.
 | `router` | route | X → one of N kinds by a predicate over payload/state |
 | `aggregate` | join | `scope.closed` of a sub-scope → one folded event |
 | `sink` | surface | a terminal kind → an external surface (stdout, reply) |
-| `tool_node` | act (peripheral) | `tool.<n>.call` → `.result`/`.failed` for trivial **in-bus** pure fns |
+| `tool_node` | act (peripheral) | `tool.{n}.call` → `.result`/`.failed` for trivial **in-bus** pure fns |
 
 ### Runtime machinery (not hand-wired)
 
@@ -155,4 +155,4 @@ payload). `terminator` → dropped (terminality is a flag any reaction sets).
   **origin** (`source`) in the payload — one axis, one home.
 - Errors are `*.failed`, **non-terminal**. Recorded facts (`state.updated`,
   `request.handled`) are **terminal**.
-- A tool's three kinds are always `tool.<name>.call|result|failed`.
+- A tool's three kinds are always `tool.{name}.call|result|failed`.

@@ -10,7 +10,7 @@ normative; the deltas it implies for current code close it.
 ## The envelope
 
 ```
-subject   app.session.<id>.<kind...>     scope (routing + projection bucket)
+subject   app.session.{id}.{kind...}     scope (routing + projection bucket)
 trace     { request_id?, caused_by[] }   correlation + causation
 terminal  bool                           leaf of the causal DAG (see 02/11)
 payload   { ...data, source }            data + origin metadata
@@ -26,24 +26,24 @@ hierarchy and no shared invariant.
 Subjects are `.`-delimited tokens with NATS wildcard semantics: `*` matches
 exactly one token in any position; `>` matches one or more tokens, tail only.
 Routing lives entirely in the subject; subscription matching is the router
-(11-domain-model.md). A subject is `<class>.<scope...>.<kind...>`:
+(11-domain-model.md). A subject is `{class}.{scope...}.{kind...}`:
 
 ```
-sys.<kind...>                    control plane + global registry
-app.session.<id>.<kind...>       domain events, scoped by session
-app.ingress.<surface>.<event>    inbound traffic before session resolution
+sys.{kind...}                    control plane + global registry
+app.session.{id}.{kind...}       domain events, scoped by session
+app.ingress.{surface}.{event}    inbound traffic before session resolution
 ```
 
 ### Class — machinery vs conversation
 
 The first token is a logical class, and the rule for placing an event is:
-**belongs to a session → `app.session.<id>.`; global machinery → `sys.`.**
+**belongs to a session → `app.session.{id}.`; global machinery → `sys.`.**
 
 - `sys.*` — `handler.registered`, `subscribed`, `clock.tick`, and the global
   session registry (thread→session bindings). Session-less infrastructure.
 - `app.*` — the domain: requests, llm turns, tool calls, state, scope
   lifecycle. A `scope.closed` for a specific cone is
-  `app.session.<id>.scope.closed` — it is about that session.
+  `app.session.{id}.scope.closed` — it is about that session.
 
 A monitor watches `app.>` to see all domain activity without machinery noise,
 or `sys.>` for the runtime itself.
@@ -51,7 +51,7 @@ or `sys.>` for the runtime itself.
 ### Scope is a named axis, not part of the id
 
 The literal `session` token labels the scope axis, leaving room for sibling
-scopes under `app.` (`ingress`, and later e.g. `batch.<id>`, `cron.<id>`)
+scopes under `app.` (`ingress`, and later e.g. `batch.{id}`, `cron.{id}`)
 without breaking any wildcard. **Session is the only correlation scope in the
 subject.** Request membership is *not* a subject token — it rides in the trace
 (below), because a session contains many requests and request id is a
@@ -65,7 +65,7 @@ kind across all sessions:
 ```
 request.received / request.handled / request.unhandled
 llm.turn / llm.completed
-tool.<name>.call / tool.<name>.result / tool.<name>.failed
+tool.{name}.call / tool.{name}.result / tool.{name}.failed
 state.updated
 scope.opened / scope.closed / scope.deadline_reached
 ```
@@ -128,7 +128,7 @@ for a denormalised field to drift from — no handler ever writes it.
 
 "Request-scoped" vs "session-scoped" is read off the trace, not stored as a
 flag: an event carries a `request_id` ⇔ it is request-scoped. Projections read
-both kinds uniformly — `app.session.<id>.>` is the session, an optional
+both kinds uniformly — `app.session.{id}.>` is the session, an optional
 `request_id == R` filter narrows to one request, and session-scoped events
 (aggregates, thread summaries) simply pass the "no request" filter.
 
@@ -216,7 +216,7 @@ compacted while the current turn keeps its full tool trace.
 
 ## Deltas this implies in current code
 
-1. `Type` → `subject` (`<class>.<scope...>.<kind...>`); PascalCase types
+1. `Type` → `subject` (`{class}.{scope...}.{kind...}`); PascalCase types
    retire; the matcher gains NATS `*`/`>` semantics; handler `on:` desugars to
    a scope-wildcarded subscription. Current matching is exact-only
    (`pkg/handler/handler.go`, `ev.Type == g.on`).
@@ -224,7 +224,7 @@ compacted while the current turn keeps its full tool trace.
    `trace.request_id` (dispatcher-stamped, derivable), origin into
    `payload.source`.
 3. `CausedBy` scalar → `caused_by[]` list (also delta #1 of 11).
-4. A session resolver and the `app.ingress.<surface>` zone are new; the
+4. A session resolver and the `app.ingress.{surface}` zone are new; the
    session registry is a `sys.state.updated` projection, no new mechanism.
 
 ## Open question
