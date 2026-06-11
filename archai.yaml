@@ -1,0 +1,69 @@
+# Reflex architecture overlay for Archai.
+#
+# The source model is intentionally small: immutable event/config primitives,
+# runtime graph/bus/handler mechanics, and CLI/embedding adapters.
+
+module: github.com/kgatilin/reflex
+
+layers:
+  domain:
+    - pkg/event
+    - pkg/config
+    - pkg/cycle
+    - pkg/projection
+
+  runtime:
+    - pkg/bus
+    - pkg/handler
+    - pkg/graph
+    - pkg/analyzer
+    - internal/runtime
+
+  adapters:
+    - cmd/...
+    - pkg/sdk
+
+layer_rules:
+  domain: []
+  runtime: [domain]
+  adapters: [domain, runtime]
+
+aggregates:
+  event:
+    root: github.com/kgatilin/reflex/pkg/event.Event
+  config:
+    root: github.com/kgatilin/reflex/pkg/config.File
+  cycle:
+    root: github.com/kgatilin/reflex/pkg/cycle.Edge
+  projection:
+    root: github.com/kgatilin/reflex/pkg/projection.Store
+  bus:
+    root: github.com/kgatilin/reflex/pkg/bus.Bus
+  handler:
+    root: github.com/kgatilin/reflex/pkg/handler.Handler
+  graph:
+    root: github.com/kgatilin/reflex/pkg/graph.HandlerGraph
+  runtime:
+    root: github.com/kgatilin/reflex/internal/runtime.Result
+  sdk:
+    root: github.com/kgatilin/reflex/pkg/sdk.Handler
+
+bounded_contexts:
+  domain:
+    name: Domain
+    description: Event envelope, YAML configuration, and cycle primitives.
+    aggregates: [event, config, cycle]
+    downstream: [runtime, adapters]
+    relationship: shared-kernel
+  runtime:
+    name: Runtime
+    description: Event bus, subscription graph, handlers, projections, and drain execution.
+    aggregates: [bus, handler, graph, runtime, projection]
+    upstream: [domain]
+    relationship: shared-kernel
+  adapters:
+    name: Adapters
+    description: CLI commands and embeddable SDK entrypoints into the event runtime.
+    aggregates: [sdk]
+    upstream: [runtime, domain]
+    relationship: open-host

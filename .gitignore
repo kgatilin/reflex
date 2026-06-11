@@ -2,3 +2,7 @@
 /dist/
 *.test
 *.out
+
+# archmotif scratch (graph cache, worktree state)
+/.arch/
+/.archai/
