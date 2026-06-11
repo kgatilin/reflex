@@ -127,22 +127,56 @@ handler can place an event in a scope of its choosing. Membership is a
 fact of the log, not a sender decision — which is what keeps every scope
 property derivable.
 
-How a scope gets rooted is the main open fork (also flagged in doc 15):
+Rooting has exactly two sources, both intentional — there is **no fan-out
+heuristic** (an event with N subscribers roots nothing; its obligations are
+accounted to the nearest enclosing scope):
 
 - **Declared** — a `scopes:` block names root kinds
-  (`root: request.received`, doc 11). Explicit, statically analyzable,
-  more config.
-- **Auto-rooted** — the engine roots a sub-scope at every fan-out point (an
-  event with more than one child). Zero config — an `llm` turn that emits N
-  tool calls roots a scope without anyone declaring it — but the scope set
-  is only known at runtime.
+  (`root: request.received`, doc 11) and carries the scope's
+  configuration: deadline, budget, closure predicate. Phases live here.
+- **Node-rooted (turn scopes)** — a node body that emits *expecting work
+  back* roots a turn scope: the `llm` roots one per turn that emits ≥1
+  tool call (N=1 included — doc 15's degenerate fan-out). Emitting a
+  message roots nothing: a message is a fact, not a demand, and lands in
+  the enclosing scope. Turn configuration (budget per turn) attaches at
+  the node.
 
-Leaning: **both, layered** — auto-root at fan-out gives the barrier
-behaviour of doc 15 with no config (N=1 degenerates correctly: one child,
-one result, one `scope.closed`); a `scopes:` block *additionally* roots
-scopes that need a deadline, a budget, or a non-default closure predicate.
-Declared scopes are the only ones that carry configuration; auto-rooted
-scopes exist purely to emit `scope.closed`.
+Every scope is therefore **named** — declared scopes by their `scopes:`
+entry, turn scopes by their node (`brain.turn`) — and every closure is a
+typed, subscribable kind: `scope.{name}.closed`. The rooting node
+subscribes to its own turn's closure to iterate (the doc-15 loop), but so
+can anyone else — a judge observing each of the brain's turns, a
+synthesizer taking over after it — handoff is one `on:` line, not a
+mechanism. A scope exists exactly where some subscriber could consume its
+closure; nothing is rooted speculatively.
+
+### Scope-qualified subscriptions
+
+Subscriptions may bind the causal axis as well as the kind:
+
+```yaml
+- name: research-medic
+  on:   tool.*.failed
+  in:   research            # only failures inside the «research» scope
+```
+
+This is a delivery-time filter, not a new primitive: the live table's
+subscription filter field (doc 05) holds a scope name, and the dispatcher
+already walks the event's ancestor scope chain at every delivery (for
+obligation counters and G9 refusal) — matching a name on that walk is the
+same O(nesting depth) pass. Static analysis survives intact: scope names
+are static, and a cycle through a scope-qualified subscription is still a
+cycle under a budget.
+
+This completes the symmetry of doc 13 — handlers bind kind and wildcard
+scope; projections bind scope and wildcard kind; a scope-qualified
+subscription binds both. The subscription grammar is the full lattice
+{kind pattern} × {scope pattern}.
+
+Note the asymmetry that keeps this sound: rooting and listening are
+configurable, **membership is not** — events land in scopes by causality
+alone (engine-stamped `caused_by`), so a scope-qualified subscription
+filters on a fact of the log, never on a sender's claim.
 
 ### The closure algebra — synchronization as predicates
 
@@ -350,9 +384,10 @@ The anti-catalog — absences that are design decisions, not gaps:
 2. **Frontier rebuild on start.** The in-memory queue is a frontier cache
    but is not yet rebuilt from the log after a crash (12 F3); G5 is
    currently aspirational.
-3. **Auto-rooting at fan-out points** does not exist; today's aggregator
-   counts `EventDispatched.subscriber_count` instead of consuming
-   `scope.closed`.
+3. **Node-rooted turn scopes** do not exist; today's aggregator counts
+   `EventDispatched.subscriber_count` instead of consuming
+   `scope.{name}.closed`. Scope-qualified subscriptions (`in:`) have no
+   counterpart in the live table's filter field yet.
 4. **Cancellation/deadline delivery refusal** is not implemented; scopes
    today have no deadline mechanism at the dispatcher.
 5. **`closed_when` algebra**: only implicit `quiescent` exists, and only at
@@ -360,10 +395,9 @@ The anti-catalog — absences that are design decisions, not gaps:
 
 ## Open / unresolved
 
-- **Auto-root vs declared scopes** — the leaning above (auto-root for
-  barriers, declared for configured scopes) needs validation against the
-  static analyzer: can doc-04 analysis still bound behaviour when part of
-  the scope set is runtime-emergent?
+- ~~Auto-root vs declared scopes~~ — **resolved** (design session): rooting
+  is declared-or-node-rooted, no fan-out heuristic; every scope is named;
+  turn budgets attach at the node. See the rooting section above.
 - **Refused-delivery representation.** A cancelled cone's refused dispatches
   must be reconstructable (G9): is refusal a recorded `sys` event per
   refusal, or derivable from cancellation + subscription table with no

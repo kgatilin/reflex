@@ -197,9 +197,10 @@ What carries it:
 One wrinkle, config not primitive: the brain's tool menu is still
 projected from the consumers of `tool.*.call` (the real tools' schemas),
 while its emit kinds are draft-prefixed — one config line maps menu
-actions to the draft suffix. And the known open question from doc 16
-recurs: budgets on *anonymous* turn scopes (until resolved, the request
-budget covers the cycle caps).
+actions to the draft suffix. *(The turn-budget question this section
+originally left open is resolved: turn scopes are named after their node
+— `scope.brain.turn.closed` — so a per-turn budget attaches at the node;
+see doc 16, rooting.)*
 
 ## A clarification this exercise relies on
 
@@ -224,9 +225,10 @@ reaction".
    KV bucket. The value stays in the payload.
 2. **Named scopes get typed closure kinds:** a declared scope `name: intent`
    announces `scope.intent.closed`, so phase wiring is type-level — not
-   `scope.closed{root: ...}` plus a payload filter. Auto-rooted scopes
-   (turns) are anonymous; their closure is delivered to the rooting node
-   implicitly (the llm's own-turn subscription, doc 15).
+   `scope.closed{root: ...}` plus a payload filter. Turn scopes are named
+   after their rooting node (`scope.brain.turn.closed`) — subscribable by
+   the node itself (the loop) or by anyone else (handoff, judging); no
+   scope is anonymous. See doc 16, rooting.
 
 Both are refinements of the subject grammar in
 [13-event-taxonomy.md](./13-event-taxonomy.md); neither adds a concept.
