@@ -14,8 +14,8 @@ import (
 // TestScopedCompressionExample drives the worked example end-to-end:
 //
 //   - boot grants land before HandlerRegistered events;
-//   - analytics-stub (mutate:[triage.*]) succeeds when it asks the bus
-//     to subscribe a fictional new binding under triage-target's scope;
+//   - analytics-stub (mutate:[tools.*]) succeeds when it asks the bus
+//     to subscribe a fictional new binding under reply-target's scope;
 //   - feedback-saboteur (no feedback.* grant) is denied with reason
 //     "forbidden" when it tries to touch feedback.*.
 //
@@ -37,11 +37,11 @@ func TestScopedCompressionExample(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	// analytics-stub asks the bus to add a triage-target binding to
-	// "OtherEvent". triage-target's scope is triage.classify;
-	// analytics-stub's mutate grants admit triage.*. The call accepts;
+	// analytics-stub asks the bus to add a reply-target binding to
+	// "OtherEvent". reply-target's scope is tools.fs.read;
+	// analytics-stub's mutate grants admit tools.*. The call accepts;
 	// the binding is recorded; no PermissionDenied fires.
-	if err := b.SubscribeAs("analytics-stub", "triage-target", "OtherEvent", 0); err != nil {
+	if err := b.SubscribeAs("analytics-stub", "reply-target", "OtherEvent", 0); err != nil {
 		t.Fatalf("analytics-stub legit subscribe rejected: %v", err)
 	}
 

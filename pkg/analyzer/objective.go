@@ -23,7 +23,7 @@ import "math"
 // average. If we ever batch many traces, we can swap in a different
 // reducer here without touching the rest of the pipeline.
 //
-// Why 1000 specifically: trace depths for the triage pipeline are in
+// Why 1000 specifically: trace depths for typical reflex graphs are in
 // the 3–5 range; one violation should dominate ~200 perfectly-shaped
 // traces. 1000 is "round number, comfortably larger than any plausible
 // depth on a small reflex graph". A future phase that runs the optimiser

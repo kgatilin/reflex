@@ -53,20 +53,20 @@ func TestEmitDrainWaitPredicate(t *testing.T) {
 }
 
 // TestFindEventByCommand verifies the YAML cli.command binding lookup —
-// the engine that lets `reflex invoke triage` map to RequestReceived.
+// the engine that lets `reflex invoke classify` map to ClassifyRequested.
 func TestFindEventByCommand(t *testing.T) {
-	cfg, err := loadConfig(examplePath(t, "triage.yaml"))
+	cfg, err := loadConfig(examplePath(t, "aggregate.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ec, name := findEventByCommand(cfg, "invoke triage")
+	ec, name := findEventByCommand(cfg, "invoke classify")
 	if ec == nil {
-		t.Fatal("expected to find event bound to `invoke triage`")
+		t.Fatal("expected to find event bound to `invoke classify`")
 	}
-	if name != "RequestReceived" {
-		t.Fatalf("name = %q, want RequestReceived", name)
+	if name != "ClassifyRequested" {
+		t.Fatalf("name = %q, want ClassifyRequested", name)
 	}
-	if ec.CLI == nil || ec.CLI.Wait != "projection.has=triage.verdict" {
+	if ec.CLI == nil || ec.CLI.Wait != "drain" {
 		t.Fatalf("CLI.Wait = %+v", ec.CLI)
 	}
 }

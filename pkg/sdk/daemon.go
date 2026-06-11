@@ -597,7 +597,7 @@ func (s *remoteSub) SetProjection(_ *projection.Store) {}
 //   - "drain": DrainQuiesced for requestID has fired.
 //   - "request_id_terminal": a user-domain terminal event for requestID has
 //     fired (RequestHandled / RequestUnhandled / EventOrphaned /
-//     LoopExhausted / TriagePending — domain terminals; meta terminals
+//     LoopExhausted — domain terminals; meta terminals
 //     EventDispatched/DrainQuiesced/HandlerFailed don't count).
 //   - "projection.has=<key>": projection store has key for requestID.
 func evalDaemonPredicate(predicate, requestID string, store *event.Store, proj *projection.Store) (bool, string) {

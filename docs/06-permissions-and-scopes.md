@@ -24,20 +24,20 @@ permissions:
   # at boot, BEFORE any HandlerRegistered fires.
   - principal: analytics-tool
     grants:
-      mutate:     [triage.*, chat.*]
+      mutate:     [tools.*, chat.*]
       read:       ["*"]
       forbidden:  [core.*, system.*]
       meta.grant: [analytics.*]
 
 handlers:
-  - name: triage-tool
+  - name: fs-tool
     type: llm_stub
     on: RequestReceived
-    scope: triage.classify           # the scope this handler "owns"
+    scope: tools.fs.read             # the scope this handler "owns"
     permissions:                     # sugar — equivalent to a separate
-      mutate: [triage.*]             # top-level entry naming this handler
+      mutate: [tools.*]              # top-level entry naming this handler
       read:   ["*"]
-    emits: [Triaged]
+    emits: [Done]
 ```
 
 Field semantics:
@@ -63,31 +63,31 @@ loader applies both forms identically; tests assert equivalence (see
 
 ## Scope matching
 
-Scopes are dotted strings (`triage.classify`, `system.bus`,
+Scopes are dotted strings (`tools.fs.read`, `system.bus`,
 `analytics.archmotif`). Patterns are exact strings or end with `.*`
 (a "prefix match" wildcard). Special case: bare `*` matches any
 non-empty scope.
 
-Matching is **conservative**: `triage.*` matches `triage.classify`
-and `triage.classify.intent` but NOT bare `triage`. `*` matches any
+Matching is **conservative**: `tools.*` matches `tools.fs.read`
+and `tools.fs.read.line` but NOT bare `tools`. `*` matches any
 target with one or more components — never the empty string and
 never "zero components". Exact patterns (no trailing `.*`) require
 full equality, not prefix promotion.
 
 ```
-matchScope("triage.*", "triage.classify")        = true
-matchScope("triage.*", "triage.classify.intent") = true
-matchScope("triage.*", "triage")                 = false   (conservative)
-matchScope("triage", "triage")                   = true    (exact)
-matchScope("triage", "triage.classify")          = false   (exact)
-matchScope("*", "triage")                        = true
+matchScope("tools.*", "tools.fs.read")           = true
+matchScope("tools.*", "tools.fs.read.line")      = true
+matchScope("tools.*", "tools")                   = false   (conservative)
+matchScope("tools", "tools")                     = true    (exact)
+matchScope("tools", "tools.fs.read")             = false   (exact)
+matchScope("*", "tools")                         = true
 matchScope("*", "")                              = false
 ```
 
 This semantics was chosen for two reasons. First, the conservative
 wildcard makes it impossible to silently grant authority over a parent
-zone by writing the child pattern (`triage.classify.*` does NOT
-authorise `triage.classify` itself). Second, exact-match patterns let
+zone by writing the child pattern (`tools.fs.read.*` does NOT
+authorise `tools.fs.read` itself). Second, exact-match patterns let
 deployment YAML pin a single handler scope without an inadvertent
 prefix overshoot.
 
@@ -185,10 +185,10 @@ in the grant. If any pattern is outside the granter's authority, the
 grant is rejected and `PermissionDenied{op: "meta.grant"}` fires.
 
 ```
-P holds meta.grant: [triage.*]
-P publishes PermissionGranted{principal: Q, mutate: [triage.x]}     OK
+P holds meta.grant: [tools.*]
+P publishes PermissionGranted{principal: Q, mutate: [tools.x]}      OK
 P publishes PermissionGranted{principal: Q, mutate: [analytics.*]}  DENIED
-P publishes PermissionGranted{principal: Q, mutate: [triage.x, analytics.x]}
+P publishes PermissionGranted{principal: Q, mutate: [tools.x, analytics.x]}
                                                                     DENIED  (any one out of scope = deny)
 ```
 
@@ -206,7 +206,7 @@ A handler with no `scope:` and no `permissions:` block gets:
   at boot, so it can mutate within the open `default.*` namespace.
 
 This keeps Phase 1–4b YAML files working with no edits. Existing
-examples (`calc.yaml`, `triage.yaml`, etc.) operate in `default.*` and
+examples (`calc.yaml`, `react.yaml`, etc.) operate in `default.*` and
 never touch reserved zones; their runtime semantics are unchanged.
 
 ## Worked example
@@ -215,9 +215,9 @@ never touch reserved zones; their runtime semantics are unchanged.
 
 - `audit` (scope `system.audit`, read-only) — captures every
   control-plane event to a JSONL file.
-- `triage-target` (scope `triage.classify`) — domain handler.
-- `analytics-stub` (scope `analytics.archmotif`, mutate `[triage.*]`)
-  — succeeds when it `SubscribeAs("analytics-stub", "triage-target", …)`.
+- `reply-target` (scope `tools.fs.read`) — domain handler.
+- `analytics-stub` (scope `analytics.archmotif`, mutate `[tools.*]`)
+  — succeeds when it `SubscribeAs("analytics-stub", "reply-target", …)`.
 - `feedback-saboteur` (scope `analytics.saboteur`, no feedback grants)
   — fails with `PermissionDenied{reason: "forbidden"}` on any
   `feedback.*` target.
@@ -248,11 +248,11 @@ Phase 4c adds one field to the `HandlerRegistered` event payload:
 
 ```json
 {
-  "name": "triage-tool",
+  "name": "fs-tool",
   "consumes": "RequestReceived",
   "emits": [...],
   "description": "...",
-  "scope": "triage.classify"
+  "scope": "tools.fs.read"
 }
 ```
 

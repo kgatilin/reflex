@@ -66,7 +66,7 @@ func (a *Agent) Close() error
 Usage:
 
 ```go
-agent, err := embed.New(embed.Config{ConfigPath: "triage.yaml"})
+agent, err := embed.New(embed.Config{ConfigPath: "calc.yaml"})
 if err != nil { return err }
 defer agent.Close()
 
@@ -75,9 +75,9 @@ _ = agent.Emit(ctx, "MessageReceived", embed.Args{"text": "hi"})
 
 // invoke-and-await: result is whatever the YAML-declared wait
 // predicate resolves on (typically a projection slice)
-result, err := agent.Invoke(ctx, "triage", embed.Args{"issue": "archai#114"})
+result, err := agent.Invoke(ctx, "classify", embed.Args{"item": "foo"})
 if err != nil { return err }
-verdict := result.Projection["triage.verdict"]
+verdict := result.Projection["calc.verdict"]
 
 // stream consumer
 stream, _ := agent.Subscribe(ctx, embed.SubscribeOpts{EventType: "ResponseEmitted"})
@@ -191,7 +191,7 @@ The wire shape mirrors `pkg/event/event.go` exactly:
 ```jsonc
 {
   "id": "<uuid>",
-  "type": "TriageDecided",
+  "type": "ClassificationResult",
   "request_id": "<uuid>",
   "ts": "2026-06-10T20:00:00Z",
   "source": "classify",

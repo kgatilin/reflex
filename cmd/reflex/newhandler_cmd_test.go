@@ -55,7 +55,7 @@ func TestScaffoldYAMLStdoutBlock(t *testing.T) {
 		Consumes: "Classification",
 		Emits:    []string{"ClassificationResult", "RequestHandled"},
 		Terminal: []string{"RequestHandled"},
-		Scope:    "triage.classifiers",
+		Scope:    "tools.classifiers",
 		Language: "yaml",
 	}
 	out, err := runScaffold(opts)
@@ -66,7 +66,7 @@ func TestScaffoldYAMLStdoutBlock(t *testing.T) {
 		"name: my-classifier",
 		"on: Classification",
 		"emits: [ClassificationResult, RequestHandled]",
-		"scope: triage.classifiers",
+		"scope: tools.classifiers",
 		"NOTE: terminal emits — RequestHandled",
 	} {
 		if !strings.Contains(out, want) {

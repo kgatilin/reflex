@@ -75,11 +75,11 @@ func TestEndToEnd_SyntheticJSONL(t *testing.T) {
 }
 
 // TestReadTraceTolerantOfStdoutMixing exercises the reader's tolerance
-// for the printer handler's "triage: ..." lines mixed in with JSONL.
+// for the printer handler's human-readable lines mixed in with JSONL.
 // Required when humans pipe `reflex run --trace ... | analyzer`.
 func TestReadTraceTolerantOfStdoutMixing(t *testing.T) {
 	input := strings.Join([]string{
-		`triage: label_age=267h, kira=0 → STUCK`,
+		`result: answer=42 → DONE`,
 		`{"id":"A","type":"RequestReceived","request_id":"r1","ts":"2026-01-01T00:00:00Z","source":"cli","terminal":false}`,
 		``,
 		`some other human line`,

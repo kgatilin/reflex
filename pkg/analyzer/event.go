@@ -88,8 +88,8 @@ func ReadTraceFile(path string) (*Trace, error) {
 // the mixed-input tolerance rule.
 func ReadTrace(r io.Reader) (*Trace, error) {
 	scanner := bufio.NewScanner(r)
-	// Trace lines can be wide (some GhQueryResult payloads inline the full
-	// JSON body of a GitHub timeline response). Lift the buffer ceiling.
+	// Trace lines can be wide (some payloads inline a full JSON response
+	// body). Lift the buffer ceiling.
 	const maxLine = 16 * 1024 * 1024 // 16 MiB
 	scanner.Buffer(make([]byte, 64*1024), maxLine)
 	tr := &Trace{}
@@ -98,7 +98,7 @@ func ReadTrace(r io.Reader) (*Trace, error) {
 		lineNo++
 		b := scanner.Bytes()
 		// Skip blank lines and obvious non-JSON (the printer handler's
-		// "triage: ..." line, etc).
+		// human-readable output line, etc).
 		trimmed := skipLeadingSpace(b)
 		if len(trimmed) == 0 || trimmed[0] != '{' {
 			continue

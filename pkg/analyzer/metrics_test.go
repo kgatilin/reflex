@@ -8,23 +8,23 @@ import (
 )
 
 // buildSyntheticTrace returns a deterministic 7-event trace shaped like
-// the triage pipeline. It is the workhorse fixture for every metric
+// a fan-out/fan-in pipeline. It is the workhorse fixture for every metric
 // test in this file — we keep it in one place so each test asserts
 // against the same ground truth.
 //
 // Shape:
 //
 //	R0 RequestReceived (req=r1, source=cli)
-//	 └─ R1 TargetParsed (source=parse)
-//	     ├─ R2 GhQueryResult (source=fetch_comments)
-//	     │   └─ R4 TriageDecided (source=classify, non-terminal)
+//	 └─ R1 StepParsed (source=parse)
+//	     ├─ R2 StepFetched (source=fetch_a)
+//	     │   └─ R4 StepDecided (source=classify, non-terminal)
 //	     │       └─ R6 RequestHandled (source=finalize, terminal)
-//	     └─ R3 GhQueryResult (source=fetch_timeline)
-//	         └─ R5 TriagePending (source=classify, terminal)
+//	     └─ R3 StepFetched (source=fetch_b)
+//	         └─ R5 StepPending (source=classify, terminal leaf)
 //
-// Width: max fan-out = 2 (TargetParsed).
+// Width: max fan-out = 2 (StepParsed).
 // Depth: longest path = R0 → R1 → R2 → R4 → R6 = 4 edges.
-// Terminals: RequestHandled + TriagePending.
+// Terminals: RequestHandled (request closer) + StepPending (non-closing leaf).
 func buildSyntheticTrace() *Trace {
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	mk := func(id, typ, src, caused string, terminal bool, dt time.Duration) TraceEvent {
@@ -41,19 +41,19 @@ func buildSyntheticTrace() *Trace {
 	return &Trace{
 		Events: []TraceEvent{
 			mk("R0", "RequestReceived", "cli", "", false, 0),
-			mk("R1", "TargetParsed", "parse", "R0", false, 10*time.Millisecond),
-			mk("R2", "GhQueryResult", "fetch_comments", "R1", false, 100*time.Millisecond),
-			mk("R3", "GhQueryResult", "fetch_timeline", "R1", false, 200*time.Millisecond),
-			mk("R4", "TriageDecided", "classify", "R2", false, 250*time.Millisecond),
-			mk("R5", "TriagePending", "classify", "R3", true, 260*time.Millisecond),
+			mk("R1", "StepParsed", "parse", "R0", false, 10*time.Millisecond),
+			mk("R2", "StepFetched", "fetch_a", "R1", false, 100*time.Millisecond),
+			mk("R3", "StepFetched", "fetch_b", "R1", false, 200*time.Millisecond),
+			mk("R4", "StepDecided", "classify", "R2", false, 250*time.Millisecond),
+			mk("R5", "StepPending", "classify", "R3", true, 260*time.Millisecond),
 			mk("R6", "RequestHandled", "finalize", "R4", true, 270*time.Millisecond),
 		},
 	}
 }
 
 // TestCausalWidth verifies the width metric: the highest in-request
-// fan-out across all events. TargetParsed (R1) fans out to two
-// GhQueryResults (R2, R3), and that 2 should be the reported width.
+// fan-out across all events. StepParsed (R1) fans out to two
+// StepFetched events (R2, R3), and that 2 should be the reported width.
 func TestCausalWidth(t *testing.T) {
 	tr := buildSyntheticTrace()
 	m := Compute(tr)
@@ -106,9 +106,9 @@ func TestOrphanDetection(t *testing.T) {
 }
 
 // TestTerminationCorrectness verifies the per-request termination
-// invariant. The synthetic trace has both RequestHandled and
-// TriagePending — both are accepted closers, so the request should
-// report correct. Removing both should flip the flag.
+// invariant. The synthetic trace has a RequestHandled closer (plus a
+// non-closing StepPending leaf), so the request should report correct.
+// Removing all terminals should flip the flag.
 func TestTerminationCorrectness(t *testing.T) {
 	tr := buildSyntheticTrace()
 	m := Compute(tr)
@@ -132,18 +132,18 @@ func TestTerminationCorrectness(t *testing.T) {
 }
 
 // TestHandlerUtilization verifies the events-per-source histogram. The
-// synthetic trace has classify firing twice (TriageDecided + TriagePending)
+// synthetic trace has classify firing twice (StepDecided + StepPending)
 // and every other handler firing once.
 func TestHandlerUtilization(t *testing.T) {
 	tr := buildSyntheticTrace()
 	m := Compute(tr)
 	want := map[string]int{
-		"cli":            1,
-		"parse":          1,
-		"fetch_comments": 1,
-		"fetch_timeline": 1,
-		"classify":       2,
-		"finalize":       1,
+		"cli":      1,
+		"parse":    1,
+		"fetch_a":  1,
+		"fetch_b":  1,
+		"classify": 2,
+		"finalize": 1,
 	}
 	if !reflect.DeepEqual(m.HandlerUtilization, want) {
 		t.Errorf("utilization mismatch:\ngot:  %#v\nwant: %#v", m.HandlerUtilization, want)

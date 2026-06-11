@@ -47,7 +47,7 @@ of stdout).
     CompressionRejected,
   ]
   scope:
-    mutate:    [analytics.*, triage.*]
+    mutate:    [analytics.*, tools.*]
     read:      [*]
     forbidden: [core.*, system.*, feedback.*]
     meta:
@@ -101,7 +101,7 @@ relevant metrics over the window, check against thresholds, emit a
 ```jsonc
 // CompressionRequested
 {
-  "target":   ["triage.classifier", "triage.aggregator"],
+  "target":   ["tools.classifier", "tools.aggregator"],
   "reason":   "causal_depth=6 > target=4; pass-through compression candidate",
   "evidence": {
     "trace_window": 1000,
@@ -150,12 +150,12 @@ plus an acceptance handler.
 
    CompressionProposed{
      patches: [
-       {op: "Subscribed",   handler: "triage.merged", event_type: "..."},
-       {op: "Unsubscribed", handler: "triage.classifier", event_type: "..."},
-       {op: "Unsubscribed", handler: "triage.aggregator", event_type: "..."},
-       {op: "HandlerRegistered", name: "triage.merged", consumes: "...", emits: [...]},
-       {op: "HandlerDeregistered", name: "triage.classifier"},
-       {op: "HandlerDeregistered", name: "triage.aggregator"},
+       {op: "Subscribed",   handler: "tools.merged", event_type: "..."},
+       {op: "Unsubscribed", handler: "tools.classifier", event_type: "..."},
+       {op: "Unsubscribed", handler: "tools.aggregator", event_type: "..."},
+       {op: "HandlerRegistered", name: "tools.merged", consumes: "...", emits: [...]},
+       {op: "HandlerDeregistered", name: "tools.classifier"},
+       {op: "HandlerDeregistered", name: "tools.aggregator"},
      ],
      confidence: 0.82,
      objective_delta: -3.0
@@ -197,7 +197,7 @@ a normal event chain:
   line of YAML.
 
 archmotif sits in the bus with declared scope (`mutate: [analytics.*,
-triage.*]`). Its patches that target handlers outside its scope are
+tools.*]`). Its patches that target handlers outside its scope are
 caught by the enforcer and surfaced as `PermissionDenied` — archmotif
 sees the denial and re-plans (or escalates).
 

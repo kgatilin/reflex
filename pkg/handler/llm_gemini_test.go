@@ -11,8 +11,8 @@ import (
 	"github.com/kgatilin/reflex/pkg/event"
 )
 
-// fakeGeminiBackend records the last invocation and returns canned data, the
-// llm_gemini analogue of gh_query's fakeRunner. No network is ever touched.
+// fakeGeminiBackend records the last invocation and returns canned data. No
+// network is ever touched.
 type fakeGeminiBackend struct {
 	reply  string
 	err    error

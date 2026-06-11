@@ -82,14 +82,14 @@ func (s PermSpec) IsEmpty() bool {
 // "*". Matching is conservative: "*" only matches one or more
 // components, never zero.
 //
-//	matchScope("triage.*", "triage.classify")           = true
-//	matchScope("triage.*", "triage.classify.intent")    = true
-//	matchScope("triage.*", "triage")                    = false
-//	matchScope("triage.*", "analytics.foo")             = false
-//	matchScope("*", "triage")                           = true
+//	matchScope("tools.*", "tools.fs.read")              = true
+//	matchScope("tools.*", "tools.fs.read.line")         = true
+//	matchScope("tools.*", "tools")                      = false
+//	matchScope("tools.*", "analytics.foo")              = false
+//	matchScope("*", "tools")                            = true
 //	matchScope("*", "")                                 = false
-//	matchScope("triage", "triage")                      = true (exact)
-//	matchScope("triage", "triage.classify")             = false (exact requires equality)
+//	matchScope("tools", "tools")                        = true (exact)
+//	matchScope("tools", "tools.fs.read")                = false (exact requires equality)
 func matchScope(pattern, target string) bool {
 	if target == "" {
 		return false

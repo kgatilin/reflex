@@ -3,7 +3,7 @@
 // SessionProjection is a fold of the event log; it cannot be written to from
 // inside a handler (the log is reality). Some patterns nonetheless want a
 // place to stash a structured intermediate result that downstream handlers
-// can pick up by key — a triage verdict, an extracted entity, a parsed plan.
+// can pick up by key — a classifier verdict, an extracted entity, a parsed plan.
 //
 // The Store provides that channel. It lives in the runtime, is in-memory,
 // per `reflex run`, and is keyed by request_id then by user-chosen key.

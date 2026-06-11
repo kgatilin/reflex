@@ -53,16 +53,6 @@ const (
 	TypeRequestUnhandled         = "RequestUnhandled"
 	TypeEventOrphaned            = "EventOrphaned"
 
-	// Triage-pipeline event types (Phase 2). Kept in this package so the
-	// projection — and any handler that needs to filter by type — sees a
-	// single source of truth.
-	TypeTargetParsed  = "TargetParsed"
-	TypeParseFailed   = "ParseFailed"
-	TypeGhQueryResult = "GhQueryResult"
-	TypeGhQueryFailed = "GhQueryFailed"
-	TypeTriagePending = "TriagePending"
-	TypeTriageDecided = "TriageDecided"
-
 	// TypeLoopExhausted is the Phase 1.5 diagnostic emitted by the
 	// dispatcher when a declared loop hits its max_iterations cap. It is
 	// terminal: it closes the causal branch for the request_id rather

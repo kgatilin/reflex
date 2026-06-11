@@ -83,8 +83,8 @@ The graph is also the data source for `reflex describe`:
 
 ```
 NAME       TYPE          DESCRIPTION              CONSUMES         EMITS                            LOOP
-parse      parse_target  ...                      RequestReceived  TargetParsed, ParseFailed(T)     -
-classify   triage_rules  ...                      GhQueryResult    TriageDecided, TriagePending(T)  -
+collect    aggregator    ...                      Classification   ClassificationsAggregated(T)     -
+announce   printer       ...                      StepDecided      (sink)                           -
 bouncer    echo          ...                      PongEvent        PingEvent                        ping_pong(max=2)
 ...
 
@@ -144,11 +144,9 @@ type RequestMetrics struct {
 ### Termination correctness
 
 Phase 1 invariant: every request must have at least one terminal that
-closes the request (`RequestHandled`, `RequestUnhandled`, or
-`TriagePending` — the last one is included because `triage_rules`
-emits it as a legal "still waiting" closer). Other terminal events
-(`GhQueryFailed`, `ParseFailed`, `EventOrphaned`, `LoopExhausted`) are
-legal leaves but do not by themselves close the request.
+closes the request (`RequestHandled` or `RequestUnhandled`). Other
+terminal events (`EventOrphaned`, `LoopExhausted`) are legal leaves but
+do not by themselves close the request.
 
 `TerminationCorrect = false` when no closing terminal appears.
 `TerminationViolation` carries the diagnostic.
@@ -230,10 +228,10 @@ round-trip them.
 
 Why max-depth and not mean-depth: reflex requests are independent; the
 user-visible "how slow was the worst path" matters more than the
-average. Why 1000 specifically: trace depths for the triage pipeline
-are in the 3–5 range; one violation should dominate ~200
-perfectly-shaped traces. A future phase running the optimiser over a
-real workload should re-tune this constant.
+average. Why 1000 specifically: trace depths for a fan-out/fan-in
+pipeline like `aggregate.yaml` are in the 3–5 range; one violation
+should dominate ~200 perfectly-shaped traces. A future phase running
+the optimiser over a real workload should re-tune this constant.
 
 ### Output and watch mode
 
@@ -254,7 +252,7 @@ per-request:
 
 handler utilisation / latency:
   bus            events=6  median_latency_ms=0.20
-  fetch_comments events=1  median_latency_ms=1.43
+  fetch_a        events=1  median_latency_ms=1.43
   ...
 ```
 

@@ -158,7 +158,6 @@ func TestBuiltinRegistryHasExpectedTypes(t *testing.T) {
 	want := []string{
 		"llm_stub", "tool_call", "printer", "terminator",
 		"unhandled_watcher", "echo",
-		"parse_target", "gh_query", "triage_rules",
 	}
 	got := r.Types()
 	for _, w := range want {

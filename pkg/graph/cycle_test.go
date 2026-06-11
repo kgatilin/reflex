@@ -15,10 +15,10 @@ handlers:
   - name: a
     type: echo
     on: RequestReceived
-    config: { emit: TargetParsed }
+    config: { emit: StepDone }
   - name: b
     type: terminator
-    on: TargetParsed
+    on: StepDone
 `
 	reg := handler.BuiltinRegistry()
 	cfg, err := config.Parse([]byte(yamlSrc), reg.Types())

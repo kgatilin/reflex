@@ -67,7 +67,7 @@ func newPrinter(cfg config.HandlerConfig) (bus.Subscriber, error) {
 		on:      on,
 		run: func(_ context.Context, ev event.Event, _ []event.Event) ([]event.Event, error) {
 			// Decode into a permissive map so the printer can read mixed
-			// payload shapes (TriageDecided has ints + strings; the calc
+			// payload shapes (some payloads have ints + strings; the calc
 			// AssistantMessageProposed has only strings).
 			var p map[string]any
 			if err := ev.PayloadAs(&p); err != nil {

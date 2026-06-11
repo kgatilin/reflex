@@ -54,8 +54,8 @@ const TypeLLMFailed = "llm.failed"
 // implementation wraps the official google.golang.org/genai client and picks
 // up Application Default Credentials automatically — no tokens are ever
 // threaded through reflex. Unit tests inject a fake via SetGeminiBackend so
-// the handler is exercised without touching the network. Mirrors the
-// CmdRunner pattern in gh_query.go.
+// the handler is exercised without touching the network using a
+// dependency-injected backend interface.
 type GeminiBackend interface {
 	// Generate calls the model ONCE with the rendered system prompt and the
 	// folded transcript, returning the raw completion text.

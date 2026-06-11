@@ -9,8 +9,8 @@ import (
 
 // Describe writes a textual table of the graph to w:
 //
-//	NAME        TYPE          DESCRIPTION                  CONSUMES         EMITS
-//	parse       parse_target  ...                           RequestReceived  TargetParsed, ParseFailed(T)
+//	NAME        TYPE          DESCRIPTION                  CONSUMES          EMITS
+//	calc        tool_call     ...                          ToolCallProposed  ToolResultObserved
 //	...
 //
 // Terminal emissions are tagged with `(T)`. The intended consumer is

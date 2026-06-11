@@ -208,9 +208,8 @@ type Introspect interface {
 var _ Introspect = (*Registry)(nil)
 
 // BuiltinRegistry returns a Registry populated with reflex's stock handler
-// types: llm_stub, tool_call, printer, terminator, unhandled_watcher, echo,
-// plus the triage-pipeline trio (parse_target, gh_query, triage_rules).
-// These cover the calc, stall, triage, and loop examples.
+// types: llm_stub, tool_call, printer, terminator, unhandled_watcher, echo.
+// These cover the calc, stall, and loop examples.
 func BuiltinRegistry() *Registry {
 	r := NewRegistry()
 	must(r.Register(llmStubSpec(), newLLMStub, llmStubSpecResolver))
@@ -219,9 +218,6 @@ func BuiltinRegistry() *Registry {
 	must(r.Register(terminatorSpec(), newTerminator))
 	must(r.Register(unhandledWatcherSpec(), newUnhandledWatcher))
 	must(r.Register(echoSpec(), newEcho, echoSpecResolver))
-	must(r.Register(parseTargetSpec(), newParseTarget))
-	must(r.Register(ghQuerySpec(), newGhQuery))
-	must(r.Register(triageRulesSpec(), newTriageRules))
 	must(r.Register(aggregatorSpec(), newAggregator, aggregatorSpecResolver))
 	must(r.Register(auditSpec(), newAudit))
 	// ReAct experiment trio: the Vertex AI reasoning node, the JSON-action

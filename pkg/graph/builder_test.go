@@ -9,38 +9,43 @@ import (
 	"github.com/kgatilin/reflex/pkg/handler"
 )
 
-// triageYAML mirrors examples/triage.yaml (minus the unhandled watcher's
-// noop subscription which doesn't contribute edges).
-const triageYAML = `
+// fanGraphYAML is a synthetic fan-out/fan-in DAG built from the surviving
+// echo/printer/terminator handlers: a source step parses, two parallel
+// fetch steps fan out, a classify step fans them back in, and two sink
+// steps (announce + finalize) close the branch. It exercises the graph
+// builder's edge resolution, fan-out/fan-in, and cycle check.
+const fanGraphYAML = `
 handlers:
   - name: parse
-    type: parse_target
+    type: echo
     on: RequestReceived
-  - name: fetch_comments
-    type: gh_query
-    on: TargetParsed
-    config: { path: comments }
-  - name: fetch_timeline
-    type: gh_query
-    on: TargetParsed
-    config: { path: timeline }
+    config: { emit: StepParsed }
+  - name: fetch_a
+    type: echo
+    on: StepParsed
+    config: { emit: StepFetched }
+  - name: fetch_b
+    type: echo
+    on: StepParsed
+    config: { emit: StepFetched }
   - name: classify
-    type: triage_rules
-    on: GhQueryResult
+    type: echo
+    on: StepFetched
+    config: { emit: StepDecided }
   - name: announce
     type: printer
-    on: TriageDecided
+    on: StepDecided
   - name: finalize
     type: terminator
-    on: TriageDecided
+    on: StepDecided
   - name: watcher
     type: unhandled_watcher
     on: __noop__
 `
 
-func TestBuildTriageGraphHasExpectedEdges(t *testing.T) {
+func TestBuildFanGraphHasExpectedEdges(t *testing.T) {
 	reg := handler.BuiltinRegistry()
-	cfg, err := config.Parse([]byte(triageYAML), reg.Types())
+	cfg, err := config.Parse([]byte(fanGraphYAML), reg.Types())
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -52,19 +57,19 @@ func TestBuildTriageGraphHasExpectedEdges(t *testing.T) {
 		t.Fatalf("nodes = %d, want 7", len(g.Nodes))
 	}
 	// Expected edges (non-exhaustive — assert the key ones):
-	//   parse → fetch_comments via TargetParsed
-	//   parse → fetch_timeline via TargetParsed
-	//   fetch_comments → classify via GhQueryResult
-	//   fetch_timeline → classify via GhQueryResult
-	//   classify → announce via TriageDecided
-	//   classify → finalize via TriageDecided
+	//   parse → fetch_a via StepParsed
+	//   parse → fetch_b via StepParsed
+	//   fetch_a → classify via StepFetched
+	//   fetch_b → classify via StepFetched
+	//   classify → announce via StepDecided
+	//   classify → finalize via StepDecided
 	want := []struct{ from, to, ev string }{
-		{"parse", "fetch_comments", "TargetParsed"},
-		{"parse", "fetch_timeline", "TargetParsed"},
-		{"fetch_comments", "classify", "GhQueryResult"},
-		{"fetch_timeline", "classify", "GhQueryResult"},
-		{"classify", "announce", "TriageDecided"},
-		{"classify", "finalize", "TriageDecided"},
+		{"parse", "fetch_a", "StepParsed"},
+		{"parse", "fetch_b", "StepParsed"},
+		{"fetch_a", "classify", "StepFetched"},
+		{"fetch_b", "classify", "StepFetched"},
+		{"classify", "announce", "StepDecided"},
+		{"classify", "finalize", "StepDecided"},
 	}
 	for _, w := range want {
 		if !hasEdge(g.Edges, w.from, w.to, w.ev) {
@@ -72,13 +77,13 @@ func TestBuildTriageGraphHasExpectedEdges(t *testing.T) {
 		}
 	}
 	if len(g.Cycles) != 0 {
-		t.Fatalf("triage has cycles: %v", g.Cycles)
+		t.Fatalf("fan graph has cycles: %v", g.Cycles)
 	}
 }
 
 func TestBuildDescribeOutputMentionsAllHandlers(t *testing.T) {
 	reg := handler.BuiltinRegistry()
-	cfg, err := config.Parse([]byte(triageYAML), reg.Types())
+	cfg, err := config.Parse([]byte(fanGraphYAML), reg.Types())
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -90,7 +95,7 @@ func TestBuildDescribeOutputMentionsAllHandlers(t *testing.T) {
 	if err := g.Describe(&buf); err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
-	for _, name := range []string{"parse", "fetch_comments", "fetch_timeline", "classify", "announce", "finalize", "watcher"} {
+	for _, name := range []string{"parse", "fetch_a", "fetch_b", "classify", "announce", "finalize", "watcher"} {
 		if !strings.Contains(buf.String(), name) {
 			t.Errorf("describe output missing %q\n%s", name, buf.String())
 		}

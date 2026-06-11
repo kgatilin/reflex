@@ -157,10 +157,10 @@ Human feedback enters the system as a normal handler:
 ```yaml
 - name: human_clarification_rule
   type: feedback_rule
-  on: TriageDecided
+  on: StepDecided
   scope:
     mutate: [feedback.clarification]
-    read:   [triage.*]
+    read:   [tools.*]
   config:
     rule: "if classification == 'STUCK' and not labelled 'agent-ready', do not auto-escalate"
 ```
@@ -231,7 +231,7 @@ Phase 3; Phase 6 wires it backwards.
 The candidate generator is bounded by the scope of the requesting
 handler:
 
-- archmotif with `mutate: [triage.*, chat.*]` can only generate
+- archmotif with `mutate: [tools.*, chat.*]` can only generate
   candidates whose patches target handlers under those scopes.
 - A patch that includes a `Subscribed` to an event type outside the
   requester's `read` scope is illegal — the enforcer will deny it.

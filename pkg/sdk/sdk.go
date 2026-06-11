@@ -112,7 +112,7 @@ func Terminal(eventType string) Option {
 }
 
 // WithScope declares the dotted scope this handler owns (e.g.
-// "triage.classify"). Defaults to "default.<name>" when omitted.
+// "tools.fs.read"). Defaults to "default.<name>" when omitted.
 func WithScope(scope string) Option {
 	return func(h *Handler) { h.scope = scope }
 }

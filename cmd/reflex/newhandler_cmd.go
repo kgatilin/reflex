@@ -79,7 +79,7 @@ func newNewHandlerCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.Consumes, "consumes", "", "event type this handler reacts to (required)")
 	cmd.Flags().StringVar(&emitsCSV, "emits", "", "comma-separated list of event types this handler may emit")
 	cmd.Flags().StringVar(&terminalCSV, "terminal", "", "comma-separated subset of --emits that should be marked terminal")
-	cmd.Flags().StringVar(&opts.Scope, "scope", "", "dotted scope this handler owns (e.g. triage.classify)")
+	cmd.Flags().StringVar(&opts.Scope, "scope", "", "dotted scope this handler owns (e.g. tools.fs.read)")
 	cmd.Flags().StringVar(&opts.Language, "language", "yaml", "scaffold language: yaml | go")
 	cmd.Flags().StringVar(&opts.ConfigPath, "config", "", "YAML config to append to (yaml mode); when empty, output to stdout")
 	cmd.Flags().StringVar(&opts.OutputDir, "output-dir", "", "override output directory for go mode (defaults to cmd/<name>)")

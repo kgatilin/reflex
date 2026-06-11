@@ -31,9 +31,9 @@ func newScopedSub(name, scope, consumes, emit string) *describedScopedSub {
 func TestRegisterCapturesDescriptorScope(t *testing.T) {
 	store := event.NewStore()
 	b := New(store)
-	b.Register(newScopedSub("triage-tool", "triage.classify", "X", "Y"))
-	if got := b.ScopeOf("triage-tool"); got != "triage.classify" {
-		t.Fatalf("ScopeOf = %q, want triage.classify", got)
+	b.Register(newScopedSub("fs-tool", "tools.fs.read", "X", "Y"))
+	if got := b.ScopeOf("fs-tool"); got != "tools.fs.read" {
+		t.Fatalf("ScopeOf = %q, want tools.fs.read", got)
 	}
 }
 
@@ -52,7 +52,7 @@ func TestScopeOfDefaultsByName(t *testing.T) {
 func TestHandlerRegisteredPayloadHasScope(t *testing.T) {
 	store := event.NewStore()
 	b := New(store)
-	b.Register(newScopedSub("triage-tool", "triage.classify", "X", "Y"))
+	b.Register(newScopedSub("fs-tool", "tools.fs.read", "X", "Y"))
 	snap := store.Snapshot()
 	hr, ok := findMeta(snap, HandlerRegisteredType)
 	if !ok {
@@ -64,8 +64,8 @@ func TestHandlerRegisteredPayloadHasScope(t *testing.T) {
 	if err := json.Unmarshal(hr.Payload, &p); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if p.Scope != "triage.classify" {
-		t.Fatalf("scope = %q, want triage.classify", p.Scope)
+	if p.Scope != "tools.fs.read" {
+		t.Fatalf("scope = %q, want tools.fs.read", p.Scope)
 	}
 }
 
@@ -74,7 +74,7 @@ func TestHandlerRegisteredPayloadHasScope(t *testing.T) {
 func TestApplyBootGrantEmitsPermissionGranted(t *testing.T) {
 	store := event.NewStore()
 	b := New(store)
-	b.ApplyBootGrant("triage-tool", PermSpec{Mutate: []string{"triage.*"}})
+	b.ApplyBootGrant("fs-tool", PermSpec{Mutate: []string{"tools.*"}})
 	pg, ok := findMeta(store.Snapshot(), PermissionGrantedType)
 	if !ok {
 		t.Fatal("no PermissionGranted emitted")
@@ -88,7 +88,7 @@ func TestApplyBootGrantEmitsPermissionGranted(t *testing.T) {
 		Granter   string   `json:"granter"`
 	}
 	_ = json.Unmarshal(pg.Payload, &p)
-	if p.Principal != "triage-tool" || len(p.Mutate) != 1 || p.Mutate[0] != "triage.*" {
+	if p.Principal != "fs-tool" || len(p.Mutate) != 1 || p.Mutate[0] != "tools.*" {
 		t.Fatalf("payload = %+v", p)
 	}
 	if p.Granter != "boot" {
@@ -96,15 +96,15 @@ func TestApplyBootGrantEmitsPermissionGranted(t *testing.T) {
 	}
 }
 
-// TestSubscribeAsAllowedWithGrant: a principal with mutate:[triage.*]
-// can subscribe a handler in the triage.* scope.
+// TestSubscribeAsAllowedWithGrant: a principal with mutate:[tools.*]
+// can subscribe a handler in the tools.* scope.
 func TestSubscribeAsAllowedWithGrant(t *testing.T) {
 	store := event.NewStore()
 	b := New(store)
-	b.Register(newScopedSub("triage-tool", "triage.classify", "RequestReceived", "Y"))
-	b.ApplyBootGrant("stub", PermSpec{Mutate: []string{"triage.*"}})
+	b.Register(newScopedSub("fs-tool", "tools.fs.read", "RequestReceived", "Y"))
+	b.ApplyBootGrant("stub", PermSpec{Mutate: []string{"tools.*"}})
 
-	if err := b.SubscribeAs("stub", "triage-tool", "OtherEvent", 0); err != nil {
+	if err := b.SubscribeAs("stub", "fs-tool", "OtherEvent", 0); err != nil {
 		t.Fatalf("SubscribeAs rejected: %v", err)
 	}
 	// SubscribeWithCheck emits a Subscribed event on accept; the
@@ -120,9 +120,9 @@ func TestSubscribeAsAllowedWithGrant(t *testing.T) {
 func TestSubscribeAsDeniedOutOfScope(t *testing.T) {
 	store := event.NewStore()
 	b := New(store)
-	b.Register(newScopedSub("triage-tool", "triage.classify", "RequestReceived", "Y"))
+	b.Register(newScopedSub("fs-tool", "tools.fs.read", "RequestReceived", "Y"))
 	// No grants for "rogue".
-	err := b.SubscribeAs("rogue", "triage-tool", "OtherEvent", 0)
+	err := b.SubscribeAs("rogue", "fs-tool", "OtherEvent", 0)
 	if err == nil {
 		t.Fatal("expected permission denied error")
 	}
@@ -143,14 +143,14 @@ func TestSubscribeAsDeniedOutOfScope(t *testing.T) {
 	if p.Principal != "rogue" || p.Op != "subscribe" || p.Reason != "out_of_scope" {
 		t.Fatalf("payload = %+v", p)
 	}
-	if p.TargetScope != "triage.classify" {
-		t.Fatalf("target_scope = %q, want triage.classify", p.TargetScope)
+	if p.TargetScope != "tools.fs.read" {
+		t.Fatalf("target_scope = %q, want tools.fs.read", p.TargetScope)
 	}
 	// And the binding was NOT added (only the original Register subscription
 	// remains).
 	_, subs := b.LiveTable()
 	for _, s := range subs {
-		if s.Handler == "triage-tool" && s.EventType == "OtherEvent" {
+		if s.Handler == "fs-tool" && s.EventType == "OtherEvent" {
 			t.Fatal("forbidden subscription should not have been recorded")
 		}
 	}
@@ -161,13 +161,13 @@ func TestSubscribeAsDeniedOutOfScope(t *testing.T) {
 func TestSubscribeAsDeniedForbidden(t *testing.T) {
 	store := event.NewStore()
 	b := New(store)
-	b.Register(newScopedSub("triage-tool", "triage.classify", "RequestReceived", "Y"))
+	b.Register(newScopedSub("fs-tool", "tools.fs.read", "RequestReceived", "Y"))
 	b.ApplyBootGrant("conflicted", PermSpec{
 		Mutate:    []string{"*"},
-		Forbidden: []string{"triage.*"},
+		Forbidden: []string{"tools.*"},
 	})
 
-	err := b.SubscribeAs("conflicted", "triage-tool", "OtherEvent", 0)
+	err := b.SubscribeAs("conflicted", "fs-tool", "OtherEvent", 0)
 	if err == nil {
 		t.Fatal("expected forbidden denial")
 	}
@@ -227,9 +227,9 @@ func TestExplicitGrantOverridesReservedDeny(t *testing.T) {
 func TestPublishPermissionGrantedRecursiveCheck(t *testing.T) {
 	store := event.NewStore()
 	b := New(store)
-	b.ApplyBootGrant("h", PermSpec{Mutate: []string{"triage.*"}})
+	b.ApplyBootGrant("h", PermSpec{Mutate: []string{"tools.*"}})
 
-	err := b.PublishPermissionGranted("h", "newcomer", PermSpec{Mutate: []string{"triage.*"}})
+	err := b.PublishPermissionGranted("h", "newcomer", PermSpec{Mutate: []string{"tools.*"}})
 	if err == nil {
 		t.Fatal("expected meta-grant denial")
 	}
@@ -259,9 +259,9 @@ func TestPublishPermissionGrantedRecursiveCheck(t *testing.T) {
 func TestPublishPermissionGrantedWithMetaGrant(t *testing.T) {
 	store := event.NewStore()
 	b := New(store)
-	b.ApplyBootGrant("delegator", PermSpec{MetaGrant: []string{"triage.*"}})
+	b.ApplyBootGrant("delegator", PermSpec{MetaGrant: []string{"tools.*"}})
 
-	err := b.PublishPermissionGranted("delegator", "newcomer", PermSpec{Mutate: []string{"triage.*"}})
+	err := b.PublishPermissionGranted("delegator", "newcomer", PermSpec{Mutate: []string{"tools.*"}})
 	if err != nil {
 		t.Fatalf("expected accept, got %v", err)
 	}
@@ -270,7 +270,7 @@ func TestPublishPermissionGrantedWithMetaGrant(t *testing.T) {
 		t.Fatalf("PermissionGranted count = %d, want 2", got)
 	}
 	// Newcomer now has the grant.
-	if !b.Permissions().CheckMutate("newcomer", "triage.x").Allowed {
+	if !b.Permissions().CheckMutate("newcomer", "tools.x").Allowed {
 		t.Fatal("newcomer should have the mutate right after grant")
 	}
 }
@@ -280,14 +280,14 @@ func TestPublishPermissionGrantedWithMetaGrant(t *testing.T) {
 func TestPublishPermissionRevokedRemovesGrant(t *testing.T) {
 	store := event.NewStore()
 	b := New(store)
-	b.ApplyBootGrant("delegator", PermSpec{MetaGrant: []string{"triage.*"}})
-	if err := b.PublishPermissionGranted("delegator", "h", PermSpec{Mutate: []string{"triage.*"}}); err != nil {
+	b.ApplyBootGrant("delegator", PermSpec{MetaGrant: []string{"tools.*"}})
+	if err := b.PublishPermissionGranted("delegator", "h", PermSpec{Mutate: []string{"tools.*"}}); err != nil {
 		t.Fatalf("setup grant: %v", err)
 	}
-	if err := b.PublishPermissionRevoked("delegator", "h", PermSpec{Mutate: []string{"triage.*"}}); err != nil {
+	if err := b.PublishPermissionRevoked("delegator", "h", PermSpec{Mutate: []string{"tools.*"}}); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if b.Permissions().CheckMutate("h", "triage.x").Allowed {
+	if b.Permissions().CheckMutate("h", "tools.x").Allowed {
 		t.Fatal("revoked grant should no longer allow")
 	}
 	if _, ok := findMeta(store.Snapshot(), PermissionRevokedType); !ok {
@@ -300,12 +300,12 @@ func TestPublishPermissionRevokedRemovesGrant(t *testing.T) {
 func TestUnsubscribeAsAndDeregisterAsCheckPermissions(t *testing.T) {
 	store := event.NewStore()
 	b := New(store)
-	b.Register(newScopedSub("triage-tool", "triage.classify", "X", "Y"))
+	b.Register(newScopedSub("fs-tool", "tools.fs.read", "X", "Y"))
 
-	if err := b.UnsubscribeAs("rogue", "triage-tool", "X"); err == nil {
+	if err := b.UnsubscribeAs("rogue", "fs-tool", "X"); err == nil {
 		t.Fatal("UnsubscribeAs should deny rogue")
 	}
-	if err := b.HandlerDeregisterAs("rogue", "triage-tool"); err == nil {
+	if err := b.HandlerDeregisterAs("rogue", "fs-tool"); err == nil {
 		t.Fatal("HandlerDeregisterAs should deny rogue")
 	}
 	// Two denies in the log.
@@ -320,7 +320,7 @@ func TestUnsubscribeAsAndDeregisterAsCheckPermissions(t *testing.T) {
 func TestPermissionEventsExcludedFromEventDispatched(t *testing.T) {
 	store := event.NewStore()
 	b := New(store)
-	b.ApplyBootGrant("h", PermSpec{Mutate: []string{"triage.*"}})
+	b.ApplyBootGrant("h", PermSpec{Mutate: []string{"tools.*"}})
 	if got := countMeta(store.Snapshot(), EventDispatchedType); got != 0 {
 		t.Fatalf("EventDispatched after grant = %d, want 0", got)
 	}

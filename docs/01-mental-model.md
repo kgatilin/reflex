@@ -103,7 +103,7 @@ a pure fold (see `pkg/projection/projection.go`). The projection cannot
 disagree with reality because the log is reality.
 
 Some patterns nonetheless want to stash a structured intermediate result
-that downstream handlers pick up by key — a triage verdict, an extracted
+that downstream handlers pick up by key — a classify verdict, an extracted
 entity, a parsed plan. The projection store
 (`pkg/projection/store.go`) is that side-channel: a per-request key/value
 map with `Set(req_id, key, value)` / `Get(req_id, key)` / `Has(req_id,
@@ -121,7 +121,7 @@ The CLI's wait-predicates are themselves waiters over the projection:
 --wait drain                      → DrainQuiesced fired for request_id
 --wait request_id_terminal        → any user-domain terminal event fired
                                     (meta-events don't count)
---wait projection.has=triage.verdict   → projection store has key set
+--wait projection.has=calc.verdict     → projection store has key set
 ```
 
 The waiter is not a privileged construct. It is a post-drain validator.
@@ -163,14 +163,14 @@ A single event flowing through the system, illustrative:
    ┌─────────────────────────────────────────────────────────────────┐
    │ Bus (single in-memory store, drain loop)                       │
    │                                                                 │
-   │  RequestReceived{request_id:R, payload:"archai#114"}            │
+   │  RequestReceived{request_id:R, payload:"what is 2+2"}           │
    │      │                                                          │
-   │      ├─► parse_target ─► TargetParsed{owner,repo,n}             │
+   │      ├─► parse ─► StepParsed{a:2, b:2, op:"+"}                  │
    │      │      │                                                   │
-   │      │      ├─► fetch_comments ─► GhQueryResult{path:comments}  │
-   │      │      └─► fetch_timeline ─► GhQueryResult{path:timeline}  │
+   │      │      ├─► fetch_a ─► StepFetched{path:left}              │
+   │      │      └─► fetch_b ─► StepFetched{path:right}             │
    │      │            │                                             │
-   │      │            └─► triage_rules ─► TriageDecided{STUCK}      │
+   │      │            └─► classify ─► StepDecided{result:4}        │
    │      │                  │   │                                   │
    │      │                  │   └─► announce (printer)   [sink]     │
    │      │                  └─► finalize ─► RequestHandled (T)      │
@@ -178,11 +178,11 @@ A single event flowing through the system, illustrative:
    │      ├─► EventDispatched{event_type:..., subscriber_count:1}    │
    │      └─► (after queue empties) DrainQuiesced{request_id:R}      │
    │                                                                 │
-   │  Projection store: { R: { "triage.verdict": "STUCK" } }         │
+   │  Projection store: { R: { "calc.verdict": "4" } }               │
    └─────────────────────────────────────────────────────────────────┘
             ▲
             │
-       Waiter (CLI):  --wait projection.has=triage.verdict
+       Waiter (CLI):  --wait projection.has=calc.verdict
                       resolves once the key appears.
 ```
 
@@ -197,7 +197,7 @@ Reflex's core claim is that one substrate — events on a single bus, with
 self-describing handlers, meta-events about the bus, and projections
 written and read by subscribers — is enough to express:
 
-- domain agent logic (chat, triage, tools),
+- domain agent logic (chat, classify, tools),
 - the static topology (`HandlerRegistered`, `Subscribed`),
 - the runtime topology's changes (`Unsubscribed`, optimisation rewrites),
 - the bus's own activity (`EventDispatched`, `DrainQuiesced`,

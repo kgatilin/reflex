@@ -3,10 +3,10 @@
 // Unix socket, registers itself as a handler reacting to RequestReceived,
 // and emits ResponseEmitted back into the bus.
 //
-// Pair with examples/distributed_triage.yaml:
+// Pair with examples/calc.yaml:
 //
 //	# terminal 1
-//	reflex daemon --config examples/distributed_triage.yaml --socket /tmp/reflex-demo.sock
+//	reflex daemon --config examples/calc.yaml --socket /tmp/reflex-demo.sock
 //
 //	# terminal 2
 //	reflex-sample-handler --socket /tmp/reflex-demo.sock

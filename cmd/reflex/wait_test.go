@@ -57,10 +57,10 @@ func TestCheckWaitPredicateRequestIDTerminal(t *testing.T) {
 
 func TestCheckWaitPredicateProjectionHas(t *testing.T) {
 	p := projection.NewStore()
-	p.Set("r", "triage.verdict", map[string]any{"classification": "STUCK"})
+	p.Set("r", "calc.verdict", map[string]any{"classification": "DONE"})
 	res := &runtime.Result{RequestID: "r", Projection: p}
 
-	if ok, why := checkWaitPredicate("projection.has=triage.verdict", res); !ok {
+	if ok, why := checkWaitPredicate("projection.has=calc.verdict", res); !ok {
 		t.Fatalf("projection.has should resolve: %s", why)
 	}
 	if ok, _ := checkWaitPredicate("projection.has=missing", res); ok {

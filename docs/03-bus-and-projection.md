@@ -88,7 +88,7 @@ If `React` returns an error, the dispatcher:
 
 The error path does not attempt recovery. A handler that wants to be
 fault-tolerant catches its own errors and emits a domain event
-(`GhQueryFailed`, `ParseFailed`, …) rather than returning err.
+(`StepFetchFailed`, `RequestUnhandled`, …) rather than returning err.
 
 ## Bus meta-events
 
@@ -179,9 +179,9 @@ that downstream handlers pick up by key. The `projection.Store`
 ```go
 s := projection.NewStore()
 
-s.Set(requestID, "triage.verdict", "STUCK")
-v, ok := s.Get(requestID, "triage.verdict")    // v = "STUCK", ok = true
-present := s.Has(requestID, "triage.verdict")  // true
+s.Set(requestID, "calc.verdict", "4")
+v, ok := s.Get(requestID, "calc.verdict")      // v = "4", ok = true
+present := s.Has(requestID, "calc.verdict")    // true
 
 snap := s.Snapshot()        // map[requestID]map[key]value, for trace output
 ids := s.RequestIDs()       // sorted list
@@ -214,9 +214,9 @@ ones that implement the interface. Handlers that don't implement
 
 The rule: anything that should affect causal structure stays an event.
 The store is for cached projection material — "I have decided X and
-don't want to re-emit every time someone asks". `triage_rules` stashes
-its verdict under `triage.verdict` so the CLI's
-`projection.has=triage.verdict` predicate can wait for it without
+don't want to re-emit every time someone asks". A decide handler stashes
+its verdict under `calc.verdict` so the CLI's
+`projection.has=calc.verdict` predicate can wait for it without
 needing a per-classifier event type to subscribe to.
 
 The store does not replace the log. Crashing and rebuilding the store
@@ -344,7 +344,7 @@ newline-delimited JSON with one connection per handler.
 The shape:
 
 ```
-reflex daemon --config examples/distributed_triage.yaml \
+reflex daemon --config examples/aggregate.yaml \
     --socket /tmp/reflex-demo.sock
 # (terminal stays attached; SIGINT/SIGTERM cleanly drain + close)
 ```

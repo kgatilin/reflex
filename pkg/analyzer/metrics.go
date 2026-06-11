@@ -48,19 +48,12 @@ type OrphanRecord struct {
 
 // requestClosingTerminals is the Phase 1 invariant set: every request_id
 // must have exactly one terminal whose type is in this set, marking the
-// request as closed. Other terminal events (GhQueryFailed, ParseFailed,
-// EventOrphaned, LoopExhausted, …) are legal leaves in the middle of a
-// trace but are not request closers — they don't satisfy the invariant
-// on their own.
-//
-// TriagePending is included because the triage_rules handler emits it as
-// a terminal leaf on the "still waiting" path and Phase 1 treats it as
-// satisfying the invariant for that branch (the other branch will
-// eventually emit RequestHandled).
+// request as closed. Other terminal events (EventOrphaned, LoopExhausted,
+// …) are legal leaves in the middle of a trace but are not request
+// closers — they don't satisfy the invariant on their own.
 var requestClosingTerminals = map[string]bool{
 	"RequestHandled":   true,
 	"RequestUnhandled": true,
-	"TriagePending":    true,
 }
 
 // childrenIndex returns map[parentID] → []TraceEvent of direct children
@@ -159,7 +152,7 @@ func requestMetrics(reqID string, evs []TraceEvent, children map[string][]TraceE
 
 	// Termination: collect terminal events. Phase 1 invariant requires
 	// at least one — and the set of acceptable types matches a closed
-	// request (RequestHandled / RequestUnhandled / TriagePending).
+	// request (RequestHandled / RequestUnhandled).
 	var termTypes []string
 	termCount := 0
 	for _, e := range evs {
@@ -184,12 +177,11 @@ func requestMetrics(reqID string, evs []TraceEvent, children map[string][]TraceE
 
 // isTerminationCorrect mirrors the Phase 1 invariant for a closed request:
 // at least one of the terminal events must be a request-closer
-// (RequestHandled / RequestUnhandled / TriagePending). Other terminal
-// types (GhQueryFailed, ParseFailed, EventOrphaned, LoopExhausted) are
-// legal leaves but do not by themselves close the request — the
-// dispatcher's unhandled_watcher will emit RequestUnhandled if no closer
-// appears, so the invariant "every request has at least one closing
-// terminal" should hold for any complete trace.
+// (RequestHandled / RequestUnhandled). Other terminal types (EventOrphaned,
+// LoopExhausted) are legal leaves but do not by themselves close the
+// request — the dispatcher's unhandled_watcher will emit RequestUnhandled
+// if no closer appears, so the invariant "every request has at least one
+// closing terminal" should hold for any complete trace.
 //
 // Returns (correct, violation-message). The violation message is empty
 // when correct == true.
@@ -202,7 +194,7 @@ func isTerminationCorrect(types []string, count int) (bool, string) {
 			return true, ""
 		}
 	}
-	return false, "no request-closing terminal (RequestHandled/RequestUnhandled/TriagePending)"
+	return false, "no request-closing terminal (RequestHandled/RequestUnhandled)"
 }
 
 // orphans walks every non-terminal event and flags those with zero
@@ -251,7 +243,7 @@ func handlerUtilization(events []TraceEvent) map[string]int {
 //
 // Why median and not mean: the dispatcher is single-threaded, so latency
 // is dominated by the slowest handler in the queue ahead of this one;
-// outliers (one slow gh_query call) would dominate a mean. Median is the
+// outliers (one slow tool call) would dominate a mean. Median is the
 // honest "typical" number.
 func handlerLatencyMS(events []TraceEvent, children map[string][]TraceEvent) map[string]float64 {
 	byID := map[string]TraceEvent{}

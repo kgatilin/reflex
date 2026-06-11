@@ -74,8 +74,8 @@ type GrantsConfig struct {
 // binding positional flags; type validation is left to handlers.
 //
 // CLI is the optional binding: it tells the CLI how to surface this event
-// as a friendly subcommand. Command="invoke triage" means
-// `reflex invoke triage <args>` emits this event. Wait names the
+// as a friendly subcommand. Command="invoke calc" means
+// `reflex invoke calc <args>` emits this event. Wait names the
 // wait-predicate the CLI applies after emission (drain |
 // request_id_terminal | projection.has=<key>).
 type EventConfig struct {

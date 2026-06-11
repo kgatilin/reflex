@@ -14,26 +14,26 @@ func TestMatchScopeExactAndWildcard(t *testing.T) {
 		want    bool
 	}{
 		// Exact equality.
-		{"triage", "triage", true},
-		{"triage.classify", "triage.classify", true},
+		{"tools", "tools", true},
+		{"tools.fs.read", "tools.fs.read", true},
 		// Exact requires equality — no prefix promotion.
-		{"triage", "triage.classify", false},
+		{"tools", "tools.fs.read", false},
 		// Trailing .* matches one or more additional components.
-		{"triage.*", "triage.classify", true},
-		{"triage.*", "triage.classify.intent", true},
-		// Conservative: "triage.*" does NOT match bare "triage".
-		{"triage.*", "triage", false},
+		{"tools.*", "tools.fs.read", true},
+		{"tools.*", "tools.fs.read.line", true},
+		// Conservative: "tools.*" does NOT match bare "tools".
+		{"tools.*", "tools", false},
 		// Mismatched prefix.
-		{"triage.*", "analytics.foo", false},
+		{"tools.*", "analytics.foo", false},
 		// Bare "*" matches any non-empty target.
-		{"*", "triage", true},
+		{"*", "tools", true},
 		{"*", "analytics.metrics", true},
 		{"*", "", false},
 		// Empty target never matches.
-		{"triage.*", "", false},
+		{"tools.*", "", false},
 		// Dotted prefix sentinel — pattern containing "." but not ending
 		// in ".*" must be an exact match.
-		{"triage.classify", "triage.classify.intent", false},
+		{"tools.fs.read", "tools.fs.read.line", false},
 	}
 	for _, c := range cases {
 		got := matchScope(c.pattern, c.target)
@@ -47,7 +47,7 @@ func TestMatchScopeExactAndWildcard(t *testing.T) {
 // mutate grant. Default-deny is the bus's posture for unknown principals.
 func TestPermissionTableDeniesUnknownPrincipal(t *testing.T) {
 	pt := NewPermissionTable()
-	d := pt.CheckMutate("rogue", "triage.classify")
+	d := pt.CheckMutate("rogue", "tools.fs.read")
 	if d.Allowed {
 		t.Fatalf("unknown principal should be denied")
 	}
@@ -59,8 +59,8 @@ func TestPermissionTableDeniesUnknownPrincipal(t *testing.T) {
 // A matching mutate grant allows the operation.
 func TestPermissionTableAllowsMatchingMutate(t *testing.T) {
 	pt := NewPermissionTable()
-	pt.Grant("triage-tool", PermSpec{Mutate: []string{"triage.*"}})
-	d := pt.CheckMutate("triage-tool", "triage.classify")
+	pt.Grant("fs-tool", PermSpec{Mutate: []string{"tools.*"}})
+	d := pt.CheckMutate("fs-tool", "tools.fs.read")
 	if !d.Allowed {
 		t.Fatalf("allowed=false reason=%q", d.Reason)
 	}
@@ -81,7 +81,7 @@ func TestPermissionTableForbiddenOverridesMutate(t *testing.T) {
 		t.Fatalf("reason = %q, want forbidden", d.Reason)
 	}
 	// But a non-core target is still allowed.
-	if !pt.CheckMutate("broad", "triage.x").Allowed {
+	if !pt.CheckMutate("broad", "tools.x").Allowed {
 		t.Fatalf("non-core target should pass with mutate:*")
 	}
 }
@@ -118,12 +118,12 @@ func TestPermissionTableExplicitGrantAllowsReservedZone(t *testing.T) {
 // PermissionRevoked removes a previously granted entry.
 func TestPermissionTableRevoke(t *testing.T) {
 	pt := NewPermissionTable()
-	pt.Grant("h", PermSpec{Mutate: []string{"triage.*"}})
-	if !pt.CheckMutate("h", "triage.x").Allowed {
+	pt.Grant("h", PermSpec{Mutate: []string{"tools.*"}})
+	if !pt.CheckMutate("h", "tools.x").Allowed {
 		t.Fatalf("setup: grant should allow")
 	}
-	pt.Revoke("h", PermSpec{Mutate: []string{"triage.*"}})
-	if pt.CheckMutate("h", "triage.x").Allowed {
+	pt.Revoke("h", PermSpec{Mutate: []string{"tools.*"}})
+	if pt.CheckMutate("h", "tools.x").Allowed {
 		t.Fatalf("after revoke, grant should not allow")
 	}
 }
@@ -131,16 +131,16 @@ func TestPermissionTableRevoke(t *testing.T) {
 // CheckMetaGrant requires the MetaGrant axis, not Mutate.
 func TestPermissionTableMetaGrantSeparateFromMutate(t *testing.T) {
 	pt := NewPermissionTable()
-	pt.Grant("h", PermSpec{Mutate: []string{"triage.*"}})
-	d := pt.CheckMetaGrant("h", "triage.x")
+	pt.Grant("h", PermSpec{Mutate: []string{"tools.*"}})
+	d := pt.CheckMetaGrant("h", "tools.x")
 	if d.Allowed {
 		t.Fatalf("plain mutate grant must not confer meta.grant")
 	}
 	if d.Reason != "no meta-grant authority" {
 		t.Fatalf("reason = %q, want no meta-grant authority", d.Reason)
 	}
-	pt.Grant("h", PermSpec{MetaGrant: []string{"triage.*"}})
-	if !pt.CheckMetaGrant("h", "triage.x").Allowed {
+	pt.Grant("h", PermSpec{MetaGrant: []string{"tools.*"}})
+	if !pt.CheckMetaGrant("h", "tools.x").Allowed {
 		t.Fatalf("with meta.grant, must allow")
 	}
 }
@@ -150,11 +150,11 @@ func TestPermissionTableMetaGrantSeparateFromMutate(t *testing.T) {
 // contract the loader leans on when replaying boot events.)
 func TestPermissionTableGrantIdempotent(t *testing.T) {
 	pt := NewPermissionTable()
-	pt.Grant("h", PermSpec{Mutate: []string{"triage.*"}})
-	pt.Grant("h", PermSpec{Mutate: []string{"triage.*"}})
+	pt.Grant("h", PermSpec{Mutate: []string{"tools.*"}})
+	pt.Grant("h", PermSpec{Mutate: []string{"tools.*"}})
 	got := pt.SpecFor("h")
-	if len(got.Mutate) != 1 || got.Mutate[0] != "triage.*" {
-		t.Fatalf("expected single triage.*, got %v", got.Mutate)
+	if len(got.Mutate) != 1 || got.Mutate[0] != "tools.*" {
+		t.Fatalf("expected single tools.*, got %v", got.Mutate)
 	}
 }
 

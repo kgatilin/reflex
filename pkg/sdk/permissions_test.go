@@ -11,7 +11,7 @@ import (
 )
 
 // TestSDKWithScopePropagatesToDescriptor: an SDK handler declared with
-// WithScope("triage.classify") shows up on the bus with that scope, so
+// WithScope("tools.fs.read") shows up on the bus with that scope, so
 // runtime permission checks resolve targets correctly.
 func TestSDKWithScopePropagatesToDescriptor(t *testing.T) {
 	b := newInProcBus(t)
@@ -21,12 +21,12 @@ func TestSDKWithScopePropagatesToDescriptor(t *testing.T) {
 	}
 	defer client.Close()
 
-	h := sdk.NewHandler("triage-tool",
+	h := sdk.NewHandler("fs-tool",
 		sdk.Consumes("RequestReceived"),
-		sdk.Emits("Triaged"),
-		sdk.WithScope("triage.classify"),
+		sdk.Emits("Done"),
+		sdk.WithScope("tools.fs.read"),
 		sdk.WithPermissions(sdk.PermSpec{
-			Mutate: []string{"triage.*"},
+			Mutate: []string{"tools.*"},
 		}),
 	).OnEvent(func(ctx sdk.Ctx, ev sdk.Event) error { return nil })
 	if err := client.Register(h); err != nil {
@@ -36,11 +36,11 @@ func TestSDKWithScopePropagatesToDescriptor(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 
-	if got := b.ScopeOf("triage-tool"); got != "triage.classify" {
-		t.Fatalf("ScopeOf = %q, want triage.classify", got)
+	if got := b.ScopeOf("fs-tool"); got != "tools.fs.read" {
+		t.Fatalf("ScopeOf = %q, want tools.fs.read", got)
 	}
-	got := b.Permissions().SpecFor("triage-tool")
-	if len(got.Mutate) != 1 || got.Mutate[0] != "triage.*" {
+	got := b.Permissions().SpecFor("fs-tool")
+	if len(got.Mutate) != 1 || got.Mutate[0] != "tools.*" {
 		t.Fatalf("inline mutate not applied: %+v", got)
 	}
 	// HandlerRegistered carries the scope on the wire too.
@@ -53,7 +53,7 @@ func TestSDKWithScopePropagatesToDescriptor(t *testing.T) {
 			Scope string `json:"scope"`
 		}
 		_ = json.Unmarshal(e.Payload, &p)
-		if p.Name == "triage-tool" && p.Scope != "triage.classify" {
+		if p.Name == "fs-tool" && p.Scope != "tools.fs.read" {
 			t.Fatalf("HandlerRegistered scope = %q", p.Scope)
 		}
 	}

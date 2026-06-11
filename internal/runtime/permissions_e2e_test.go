@@ -20,15 +20,15 @@ import (
 func TestBootGrantsLandBeforeHandlerRegistered(t *testing.T) {
 	const src = `
 permissions:
-  - principal: triage-tool
+  - principal: fs-tool
     grants:
-      mutate: [triage.*]
+      mutate: [tools.*]
       read: ["*"]
 handlers:
-  - name: triage-tool
+  - name: fs-tool
     type: llm_stub
     on: RequestReceived
-    scope: triage.classify
+    scope: tools.fs.read
 `
 	reg := handler.BuiltinRegistry()
 	cfg, err := config.Parse([]byte(src), reg.Types())
@@ -72,25 +72,25 @@ handlers:
 func TestInlinePermissionsEquivalentToTopLevel(t *testing.T) {
 	inline := `
 handlers:
-  - name: triage-tool
+  - name: fs-tool
     type: llm_stub
     on: RequestReceived
-    scope: triage.classify
+    scope: tools.fs.read
     permissions:
-      mutate: [triage.*]
+      mutate: [tools.*]
       read: ["*"]
 `
 	separate := `
 permissions:
-  - principal: triage-tool
+  - principal: fs-tool
     grants:
-      mutate: [triage.*]
+      mutate: [tools.*]
       read: ["*"]
 handlers:
-  - name: triage-tool
+  - name: fs-tool
     type: llm_stub
     on: RequestReceived
-    scope: triage.classify
+    scope: tools.fs.read
 `
 	reg := handler.BuiltinRegistry()
 	cfgA, err := config.Parse([]byte(inline), reg.Types())
@@ -103,8 +103,8 @@ handlers:
 	}
 	a, _ := Build(cfgA, reg)
 	bsep, _ := Build(cfgB, reg)
-	pa := a.Permissions().SpecFor("triage-tool")
-	pb := bsep.Permissions().SpecFor("triage-tool")
+	pa := a.Permissions().SpecFor("fs-tool")
+	pb := bsep.Permissions().SpecFor("fs-tool")
 	if len(pa.Mutate) != len(pb.Mutate) || len(pa.Read) != len(pb.Read) {
 		t.Fatalf("inline=%+v separate=%+v", pa, pb)
 	}
@@ -115,22 +115,22 @@ handlers:
 	}
 }
 
-// TestRuntimeMutationDeniedOutOfScope: a handler with mutate:[triage.*]
+// TestRuntimeMutationDeniedOutOfScope: a handler with mutate:[tools.*]
 // trying to mutate analytics.* gets PermissionDenied{out_of_scope}.
 func TestRuntimeMutationDeniedOutOfScope(t *testing.T) {
 	const src = `
 permissions:
-  - principal: triage-tool
+  - principal: fs-tool
     grants:
-      mutate: [triage.*]
+      mutate: [tools.*]
   - principal: analytics-tool
     grants:
       mutate: [analytics.*]
 handlers:
-  - name: triage-tool
+  - name: fs-tool
     type: llm_stub
     on: RequestReceived
-    scope: triage.classify
+    scope: tools.fs.read
   - name: analytics-tool
     type: llm_stub
     on: ToolResultObserved
@@ -142,8 +142,8 @@ handlers:
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	// triage-tool tries to mutate analytics-tool's scope.
-	err = b.SubscribeAs("triage-tool", "analytics-tool", "OtherEvent", 0)
+	// fs-tool tries to mutate analytics-tool's scope.
+	err = b.SubscribeAs("fs-tool", "analytics-tool", "OtherEvent", 0)
 	if err == nil {
 		t.Fatal("expected denial")
 	}
@@ -158,12 +158,12 @@ handlers:
 			Reason      string `json:"reason"`
 		}
 		_ = json.Unmarshal(e.Payload, &p)
-		if p.Principal == "triage-tool" && p.TargetScope == "analytics.tally" && p.Reason == "out_of_scope" {
+		if p.Principal == "fs-tool" && p.TargetScope == "analytics.tally" && p.Reason == "out_of_scope" {
 			denied = true
 		}
 	}
 	if !denied {
-		t.Fatal("expected PermissionDenied{triage-tool, analytics.tally, out_of_scope}")
+		t.Fatal("expected PermissionDenied{fs-tool, analytics.tally, out_of_scope}")
 	}
 }
 
@@ -236,19 +236,19 @@ func TestAuditCapturesPermissionEvents(t *testing.T) {
 	auditPath := dir + "/audit.jsonl"
 	src := `
 permissions:
-  - principal: triage-tool
+  - principal: fs-tool
     grants:
-      mutate: [triage.*]
+      mutate: [tools.*]
 handlers:
   - name: audit
     type: audit
     on: HandlerRegistered
     config:
       sink: file://` + auditPath + `
-  - name: triage-tool
+  - name: fs-tool
     type: llm_stub
     on: RequestReceived
-    scope: triage.classify
+    scope: tools.fs.read
 `
 	reg := handler.BuiltinRegistry()
 	cfg, _ := config.Parse([]byte(src), reg.Types())
@@ -257,7 +257,7 @@ handlers:
 		t.Fatalf("Build: %v", err)
 	}
 	// Trigger a denial.
-	_ = b.SubscribeAs("triage-tool", "audit", "OtherEvent", 0)
+	_ = b.SubscribeAs("fs-tool", "audit", "OtherEvent", 0)
 	// Drive a drain so the audit handler fires on pending events.
 	_, _ = Run(context.Background(), b, "hi")
 
@@ -287,8 +287,8 @@ handlers:
 	}
 }
 
-// TestMetaGrantRecursive: principal P with meta.grant:[triage.*] can
-// publish PermissionGranted for handlers under triage.*, but NOT under
+// TestMetaGrantRecursive: principal P with meta.grant:[tools.*] can
+// publish PermissionGranted for handlers under tools.*, but NOT under
 // analytics.*. The bus emits PermissionDenied for the out-of-scope
 // case and refuses to update the table.
 func TestMetaGrantRecursive(t *testing.T) {
@@ -296,12 +296,12 @@ func TestMetaGrantRecursive(t *testing.T) {
 permissions:
   - principal: delegator
     grants:
-      meta.grant: [triage.*]
+      meta.grant: [tools.*]
 handlers:
   - name: delegator
     type: llm_stub
     on: RequestReceived
-    scope: triage.delegator
+    scope: tools.delegator
 `
 	reg := handler.BuiltinRegistry()
 	cfg, _ := config.Parse([]byte(src), reg.Types())
@@ -309,9 +309,9 @@ handlers:
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	// Allowed: triage.* falls under meta.grant.
+	// Allowed: tools.* falls under meta.grant.
 	if err := b.PublishPermissionGranted("delegator", "newcomer",
-		bus.PermSpec{Mutate: []string{"triage.x"}}); err != nil {
+		bus.PermSpec{Mutate: []string{"tools.x"}}); err != nil {
 		t.Fatalf("legit grant rejected: %v", err)
 	}
 	// Denied: analytics.* is outside meta.grant.

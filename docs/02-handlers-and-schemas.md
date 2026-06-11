@@ -15,18 +15,18 @@ settings:
   max_steps: 64           # optional bound on dispatcher iterations per run
 
 events:                   # optional Phase 1.6 section (CLI bindings)
-  - name: RequestReceived
-    args: { payload: string }
+  - name: ClassifyRequested
+    args: { item: string }
     cli:
-      command: invoke triage
-      wait:    projection.has=triage.verdict
+      command: invoke classify
+      wait:    drain
 
 handlers:
-  - name: parse           # required, unique label, appears in the trace
-    type: parse_target    # required, must be a registered handler type
-    on:   RequestReceived # required, the event type the handler subscribes to
-    emits: [TargetParsed, ParseFailed]   # informational
-    config: { default_owner: kgatilin }  # handler-specific parameters
+  - name: classify        # required, unique label, appears in the trace
+    type: aggregator      # required, must be a registered handler type
+    on:   Classification  # required, the event type the handler subscribes to
+    emits: [ClassificationsAggregated]   # informational
+    config: { expected_from: ClassifyRequested, emit: ClassificationsAggregated }
     loop:                                # optional, declares cycle-cap node
       max_iterations: 2
       name: review_loop                  # optional label, defaults to handler name
@@ -141,10 +141,11 @@ The current built-in registry (`pkg/handler.BuiltinRegistry`) ships:
 | `terminator`         | configurable           | `RequestHandled` (terminal)                           |
 | `unhandled_watcher`  | `__noop__`             | `RequestUnhandled`, `EventOrphaned` (post-drain)      |
 | `echo`               | configurable           | configured emit type                                  |
-| `parse_target`       | configurable           | `TargetParsed`, `ParseFailed` (terminal)              |
-| `gh_query`           | configurable           | `GhQueryResult`, `GhQueryFailed` (terminal)           |
-| `triage_rules`       | configurable           | `TriageDecided`, `TriagePending` (terminal)           |
 | `aggregator`         | configurable           | configured emit type (terminal)                       |
+| `audit`              | configurable           | (sink — append-only record)                           |
+| `llm_gemini`         | configurable           | `AssistantMessageProposed`, `ToolCallProposed`        |
+| `llm_decode`         | configurable           | configured decode event type                          |
+| `tool_node`          | configurable           | `ToolResultObserved`                                  |
 
 The introspection contract lets `reflex describe --config <yaml>` render
 this table for any config without running it.
@@ -184,14 +185,14 @@ the built-in handlers:
 // RequestReceived
 { "payload": "<user message>" }
 
-// TargetParsed
-{ "owner": "kgatilin", "repo": "archai", "number": 114 }
+// StepParsed
+{ "a": 2, "b": 2, "op": "+" }
 
-// GhQueryResult
-{ "path": "comments", "data": [...] }
+// StepFetched
+{ "path": "left", "data": [...] }
 
-// TriageDecided
-{ "classification": "STUCK", "reason": "label_age=267h, kira=0 → STUCK" }
+// StepDecided
+{ "result": 4, "reason": "2 + 2 = 4" }
 
 // AssistantMessageProposed
 { "text": "The answer is 4" }
@@ -206,7 +207,7 @@ the built-in handlers:
 { "request_id": "<uuid>" }
 
 // HandlerFailed (meta)
-{ "handler_name": "fetch_comments", "event_type": "TargetParsed", "error": "..." }
+{ "handler_name": "fetch_a", "event_type": "StepParsed", "error": "..." }
 
 // LoopExhausted
 { "handler": "bouncer", "max_iterations": 2, "reason": "loop cap reached" }
@@ -246,14 +247,12 @@ descendant. The built-in handlers obey this:
   `AssistantMessageProposed` (terminal) and `RequestHandled` (terminal),
   closing both arms.
 - `terminator` emits `RequestHandled` (terminal).
-- `triage_rules` emits `TriageDecided` (non-terminal — followed by
-  printer + terminator) on the success path and `TriagePending`
-  (terminal) on the "waiting for the other branch" path. The
-  `TriagePending` terminal explicitly closes the trigger
-  `GhQueryResult`'s causal arm so the invariant holds even when only one
-  branch has arrived at the time `triage_rules` fires.
-- `parse_target` failure → `ParseFailed` (terminal).
-- `gh_query` failure → `GhQueryFailed` (terminal).
+- `aggregator` emits its configured aggregated event (terminal) once the
+  expected response count is reached, closing the fan-in arm; until then
+  it accumulates responses without emitting.
+- `unhandled_watcher` emits `RequestUnhandled` (terminal) when a request
+  reached no closing terminal, and `EventOrphaned` (terminal) for every
+  non-terminal event left with no descendant.
 
 Custom handlers default to non-terminal (`event.New(...)`) and opt into
 terminal only for genuine leaves (`event.NewTerminal(...)`).
@@ -269,7 +268,7 @@ reflex validate --config <yaml>
 
 reflex describe --config <yaml>
 # NAME       TYPE          DESCRIPTION              CONSUMES         EMITS                            LOOP
-# parse      parse_target  ...                      RequestReceived  TargetParsed, ParseFailed(T)     -
+# collect    aggregator    ...                      Classification   ClassificationsAggregated(T)     -
 # bouncer    echo          ...                      PongEvent        PingEvent                        ping_pong(max=2)
 # ...
 ```
@@ -293,7 +292,7 @@ reflex new-handler my-classifier \
   --consumes Classification \
   --emits ClassificationResult,RequestHandled \
   --terminal RequestHandled \
-  --scope triage.classifiers \
+  --scope tools.classifiers \
   [--language yaml|go] \
   [--config path/to/handlers.yaml]
 ```
@@ -311,7 +310,7 @@ the registry before the user wires the real type:
     type: TODO_handler_type   # set to a registered handler type before running
     on: Classification
     emits: [ClassificationResult, RequestHandled]
-    scope: triage.classifiers
+    scope: tools.classifiers
     # NOTE: terminal emits — RequestHandled
 ```
 

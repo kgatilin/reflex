@@ -15,10 +15,10 @@ handlers:
 permissions:
   - principal: analytics-tool
     grants:
-      mutate: [triage.*, chat.*]
+      mutate: [tools.*, chat.*]
       read: ["*"]
       forbidden: [core.*, system.*]
-      meta.grant: [triage.*]
+      meta.grant: [tools.*]
 `
 	f, err := Parse([]byte(src), known)
 	if err != nil {
@@ -31,7 +31,7 @@ permissions:
 	if p.Principal != "analytics-tool" {
 		t.Errorf("principal = %q", p.Principal)
 	}
-	if got := p.Grants.Mutate; len(got) != 2 || got[0] != "triage.*" || got[1] != "chat.*" {
+	if got := p.Grants.Mutate; len(got) != 2 || got[0] != "tools.*" || got[1] != "chat.*" {
 		t.Errorf("mutate = %v", got)
 	}
 	if got := p.Grants.Read; len(got) != 1 || got[0] != "*" {
@@ -40,7 +40,7 @@ permissions:
 	if got := p.Grants.Forbidden; len(got) != 2 || got[0] != "core.*" || got[1] != "system.*" {
 		t.Errorf("forbidden = %v", got)
 	}
-	if got := p.Grants.MetaGrant; len(got) != 1 || got[0] != "triage.*" {
+	if got := p.Grants.MetaGrant; len(got) != 1 || got[0] != "tools.*" {
 		t.Errorf("meta.grant = %v", got)
 	}
 }
@@ -50,12 +50,12 @@ permissions:
 func TestParseHandlerInlineScopeAndPermissions(t *testing.T) {
 	src := `
 handlers:
-  - name: triage-tool
+  - name: fs-tool
     type: llm_stub
     on: RequestReceived
-    scope: triage.classify
+    scope: tools.fs.read
     permissions:
-      mutate: [triage.*]
+      mutate: [tools.*]
       read: ["*"]
 `
 	f, err := Parse([]byte(src), known)
@@ -63,13 +63,13 @@ handlers:
 		t.Fatalf("Parse: %v", err)
 	}
 	h := f.Handlers[0]
-	if h.Scope != "triage.classify" {
+	if h.Scope != "tools.fs.read" {
 		t.Errorf("scope = %q", h.Scope)
 	}
 	if h.Permissions == nil {
 		t.Fatal("inline permissions missing")
 	}
-	if len(h.Permissions.Mutate) != 1 || h.Permissions.Mutate[0] != "triage.*" {
+	if len(h.Permissions.Mutate) != 1 || h.Permissions.Mutate[0] != "tools.*" {
 		t.Errorf("inline mutate = %v", h.Permissions.Mutate)
 	}
 }

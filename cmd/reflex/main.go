@@ -7,10 +7,10 @@
 //	reflex run      --config examples/calc.yaml --message "what is 2+2"
 //	reflex run      --config examples/calc.yaml --message "what is 2+2" --trace
 //	reflex emit     --config examples/aggregate.yaml --type ClassifyRequested --payload '{"item":"foo"}'
-//	reflex invoke   --config examples/triage.yaml triage archai#114
+//	reflex invoke   --config examples/aggregate.yaml classify foo
 //	reflex send     --config examples/calc.yaml "what is 2+2"
-//	reflex validate --config examples/triage.yaml
-//	reflex describe --config examples/triage.yaml
+//	reflex validate --config examples/calc.yaml
+//	reflex describe --config examples/calc.yaml
 //
 // Phase 1.6 adds:
 //   - emit / invoke / send subcommands for direct event emission.
@@ -177,7 +177,7 @@ func newInvokeCmd() *cobra.Command {
 	var opts runOpts
 	cmd := &cobra.Command{
 		Use:          "invoke <command> [arg]",
-		Short:        "invoke a YAML-declared event command (e.g. `invoke triage archai#114`)",
+		Short:        "invoke a YAML-declared event command (e.g. `invoke classify foo`)",
 		SilenceUsage: true,
 		Args:         cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

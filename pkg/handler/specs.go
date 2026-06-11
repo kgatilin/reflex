@@ -153,42 +153,6 @@ func echoSpecResolver(cfg config.HandlerConfig, base HandlerSpec) HandlerSpec {
 	return resolved
 }
 
-func parseTargetSpec() HandlerSpec {
-	return HandlerSpec{
-		Type:        "parse_target",
-		Description: "parses 'owner/repo#N' (or 'repo#N') into a TargetParsed event",
-		Consumes:    "*",
-		Emits: []EmittedSpec{
-			{Type: projection.TypeTargetParsed, Terminal: false, Optional: true},
-			{Type: projection.TypeParseFailed, Terminal: true, Optional: true},
-		},
-	}
-}
-
-func ghQuerySpec() HandlerSpec {
-	return HandlerSpec{
-		Type:        "gh_query",
-		Description: "shells to `gh api` for repos/{owner}/{repo}/issues/{N}/{path}; emits result or failure",
-		Consumes:    "*",
-		Emits: []EmittedSpec{
-			{Type: projection.TypeGhQueryResult, Terminal: false, Optional: true},
-			{Type: projection.TypeGhQueryFailed, Terminal: true, Optional: true},
-		},
-	}
-}
-
-func triageRulesSpec() HandlerSpec {
-	return HandlerSpec{
-		Type:        "triage_rules",
-		Description: "classifies an issue as STUCK / HEALTHY / FRESH from GhQueryResult fold",
-		Consumes:    "*",
-		Emits: []EmittedSpec{
-			{Type: projection.TypeTriageDecided, Terminal: false, Optional: true},
-			{Type: projection.TypeTriagePending, Terminal: true, Optional: true},
-		},
-	}
-}
-
 // llmGeminiSpec describes the Vertex AI reasoning node at the TYPE level.
 //
 // Consumes is "*" because the trigger event type comes from the YAML `on:`

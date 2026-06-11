@@ -141,8 +141,8 @@ control flow, all of it is node emits.
 
 `echo` → split into `signal` / `forward` (F4: signals must not smuggle
 payload). `terminator` → dropped (terminality is a flag any reaction sets).
-`tool_call` → dropped (payload routing). `parse_target` / `triage_rules` /
-`gh_query` → not defaults (fold into `router` or become plugins).
+`tool_call` → dropped (payload routing). Retired domain-specific handlers →
+not defaults (fold into `router` or become plugins).
 `ToolCallProposed` / `ToolResultObserved` kinds retire into subject-typed
 `tool.*`.
 

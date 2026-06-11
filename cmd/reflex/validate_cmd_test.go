@@ -102,13 +102,3 @@ func TestValidateLoopAcceptedExitsZero(t *testing.T) {
 		t.Fatalf("expected '1 declared loops' in output: %q", out)
 	}
 }
-
-func TestValidateTriageExitsZero(t *testing.T) {
-	out, code := validateConfigUseCase(examplePath(t, "triage.yaml"))
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0; output = %q", code, out)
-	}
-	if !strings.Contains(out, "config valid") {
-		t.Fatalf("expected 'config valid': %q", out)
-	}
-}

@@ -8,7 +8,7 @@ tracked under its own repo and cited where reflex depends on it.
 
 | Phase | Status     | Scope                                                                                                                    | Depends on                  |
 |-------|------------|--------------------------------------------------------------------------------------------------------------------------|-----------------------------|
-| 1+2   | done       | terminal-event invariant + real-task triage pipeline (`parse_target`, `gh_query`, `triage_rules`)                       | —                           |
+| 1+2   | done       | terminal-event invariant + worked multi-hop pipeline example (`examples/aggregate.yaml`)                                | —                           |
 | 1.5   | done       | self-describing handlers + Tarjan static cycle detection over the YAML-derived graph + loop caps (`36e25bb`)            | 1+2                         |
 | 3     | done       | analyzer engine + archmotif graph adapter + per-trace metrics + single-scalar objective (`df86e19`)                     | 1.5                         |
 | 1.6   | done       | events-only model: bus meta-events, projection store, generic aggregator, CLI wait-predicates (`c545df4`)                | 1.5                         |
@@ -60,8 +60,8 @@ different repo). Reflex Phase 4d consumes the tagged release and:
 
 - The terminal-event invariant and the orphan watcher
   (`pkg/handler/unhandled_watcher.go` `CheckQuiescence`).
-- The triage pipeline (`examples/triage.yaml`) operating against the
-  real `gh` CLI.
+- A worked multi-hop pipeline example (`examples/aggregate.yaml`)
+  exercising the fan-out / aggregate path end to end.
 - Self-describing handlers via `HandlerSpec` + the `Introspect`
   contract (`pkg/handler/handler.go`).
 - Static cycle detection via Tarjan's algorithm

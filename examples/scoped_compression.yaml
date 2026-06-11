@@ -3,14 +3,14 @@
 # Three handlers + a top-level permissions block demonstrate the scope-
 # based permission layer end-to-end:
 #
-#   triage-target       (scope: triage.classify) — a stand-in for a
-#                       triage-pipeline handler. Just echoes
+#   reply-target        (scope: tools.fs.read) — a stand-in for a
+#                       domain handler. Just echoes
 #                       AssistantMessageProposed for completeness.
 #
 #   analytics-stub      (scope: analytics.archmotif) — holds
-#                       mutate:[triage.*]. At runtime it could publish
+#                       mutate:[tools.*]. At runtime it could publish
 #                       a Subscribed control-plane event targeting
-#                       triage-target's scope (e.g. a compression
+#                       reply-target's scope (e.g. a compression
 #                       rewrite). The check accepts; the audit log
 #                       records the mutation.
 #
@@ -44,7 +44,7 @@ permissions:
 
   - principal: analytics-stub
     grants:
-      mutate: [triage.*, analytics.*]
+      mutate: [tools.*, analytics.*]
       read: ["*"]
       meta.grant: []
 
@@ -66,15 +66,15 @@ handlers:
     config:
       sink: file:///tmp/reflex-scoped-audit.jsonl
 
-  - name: triage-target
+  - name: reply-target
     type: llm_stub
     on: RequestReceived
-    scope: triage.classify
+    scope: tools.fs.read
     emits: [AssistantMessageProposed, RequestHandled]
     config:
       fallback:
         action: reply_and_handle
-        reply: "triage classified"
+        reply: "request replied"
 
   - name: analytics-stub
     type: printer

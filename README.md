@@ -85,8 +85,8 @@ reflex new-handler <name> --consumes <Type> [--emits ...] [--terminal ...] [--sc
   "Scaffolding".
 
 ```
-reflex validate --config examples/triage.yaml
-# config valid: 7 handlers, 6 edges, 0 declared loops
+reflex validate --config examples/aggregate.yaml
+# config valid: N handlers, M edges, 0 declared loops
 
 reflex validate --config examples/cycle.yaml
 # cycle detected: alpha -> beta -> gamma -> alpha; no max_iterations declared; refusing to start
@@ -148,7 +148,7 @@ stays meaningful.
 
 `SessionProjection` (the pure fold) is the canonical state derivation, but
 some patterns want a place to stash a structured intermediate result that
-downstream handlers can pick up by key — a triage verdict, an extracted
+downstream handlers can pick up by key — a classifier verdict, an extracted
 entity, a parsed plan. `pkg/projection.Store` is that side-channel: a
 per-request key/value map that the runtime wires into every handler
 implementing `bus.ProjectionAware`. Handlers `Set(request_id, key, value)`
@@ -157,8 +157,8 @@ during reaction; downstream readers `Get(request_id, key)`.
 The projection is not a substitute for events — anything that should
 affect causal structure stays an event. It is a way to express "I have
 decided X" once, without re-emitting an event every time someone wants to
-know. The triage example writes its decision under `triage.verdict`; the
-CLI predicate `projection.has=triage.verdict` waits for it.
+know. A classifier handler can write its decision under `calc.verdict`; a
+CLI predicate `projection.has=calc.verdict` then waits for it.
 
 ### Generic aggregator handler
 
@@ -207,11 +207,11 @@ Events can declare their default CLI binding + wait predicate in the YAML:
 
 ```yaml
 events:
-  - name: RequestReceived
-    args: { payload: string }
+  - name: ClassifyRequested
+    args: { item: string }
     cli:
-      command: invoke triage
-      wait: projection.has=triage.verdict
+      command: invoke classify
+      wait: drain
 
   - name: MessageReceived
     args: { text: string }
@@ -220,8 +220,8 @@ events:
       wait: drain
 ```
 
-So `reflex invoke triage archai#114` is sugar for
-`reflex emit --type RequestReceived --payload '{"payload":"archai#114"}' --wait projection.has=triage.verdict`.
+So `reflex invoke classify foo` is sugar for
+`reflex emit --type ClassifyRequested --payload '{"item":"foo"}' --wait drain`.
 
 ## Phase 4a: daemon mode + remote handler SDK
 
@@ -272,14 +272,13 @@ The same `sdk.NewHandler(...).OnEvent(...)` works in-process via
 
 ### End-to-end example
 
-`examples/distributed_triage.yaml` declares the YAML side: a `printer`, a
-`terminator`, and the `unhandled_watcher`. `cmd/reflex-sample-handler/` is a
-standalone binary that registers a handler on `RequestReceived` and emits
-`ResponseEmitted`.
+`examples/calc.yaml` declares the YAML side: the in-process handlers that
+own the bus. `cmd/reflex-sample-handler/` is a standalone binary that
+registers a handler on `RequestReceived` and emits `ResponseEmitted`.
 
 ```
 # terminal 1 — daemon
-reflex daemon --config examples/distributed_triage.yaml --socket /tmp/reflex-demo.sock
+reflex daemon --config examples/calc.yaml --socket /tmp/reflex-demo.sock
 
 # terminal 2 — sample handler
 go run ./cmd/reflex-sample-handler --socket /tmp/reflex-demo.sock
@@ -372,7 +371,7 @@ pkg/graph/                   static handler graph compiler + Tarjan SCC cycle de
 pkg/config/                  YAML loader + validation (including `loop:` grammar)
 pkg/sdk/                     Phase 4a: handler-client SDK (in-process + Unix-socket transports), daemon, wire protocol
 internal/runtime/            glue: build a bus from a config, run a single user message
-examples/                    calc / stall / triage / aggregate / distributed_triage (Phase 4a) + loop (capped cycle) + bad_loop / cycle (validate negatives)
+examples/                    calc / stall / aggregate / react + loop (capped cycle) + bad_loop / cycle (validate negatives) + control_plane_audit / scoped_compression (Phase 4b/4c)
 ```
 
 ## YAML handler grammar
@@ -402,9 +401,6 @@ handlers:
 | `terminator`         | configurable        | `RequestHandled` (if not already)          | (none) |
 | `unhandled_watcher`  | `__noop__`          | `RequestUnhandled`, `EventOrphaned` (post-drain) | (none) |
 | `echo`               | configurable        | event type from `emit:`                    | `emit` |
-| `parse_target`       | typically `RequestReceived` | `TargetParsed`, `ParseFailed`       | `default_owner` (default `kgatilin`) |
-| `gh_query`           | typically `TargetParsed` | `GhQueryResult`, `GhQueryFailed`       | `path` (e.g. `comments`, `timeline`) |
-| `triage_rules`       | typically `GhQueryResult` | `TriageDecided`, `TriagePending`     | `stuck_hours` (48), `kira_login`, `now` (RFC3339, default real `time.Now()`) |
 | `aggregator`         | configurable (the response type) | event type from `config.emit` (terminal) | `expected_from` (fan-out event type), `emit` (aggregated type) |
 
 ### `llm_stub` rule grammar
@@ -496,54 +492,11 @@ Stock handlers mark events terminal when appropriate:
   so AMP closes the chain).
 - `terminator` → `RequestHandled` is terminal.
 - `unhandled_watcher` → `RequestUnhandled`, `EventOrphaned` are terminal.
-- `parse_target` failure → `ParseFailed` is terminal.
-- `gh_query` failure → `GhQueryFailed` is terminal.
-- `triage_rules` → `TriageDecided` is non-terminal (printer + terminator
-  downstream); `TriagePending` is terminal (covers the "waiting for the
-  other path" and "already decided" cases so trigger events still have
-  a descendant and stay invariant-compliant).
+- `aggregator` → its aggregated `config.emit` event is terminal (it closes
+  the fan-in barrier once `subscriber_count` responses have arrived).
 
 Custom handlers should default to non-terminal (`event.New(...)`) and
 opt into terminal only for genuine leaves (`event.NewTerminal(...)`).
-
-## Triage example
-
-The `examples/triage.yaml` config classifies a real GitHub agent-ready
-issue as `STUCK`, `HEALTHY`, or `FRESH` using only the `gh` CLI on PATH:
-
-```
-go run ./cmd/reflex --config examples/triage.yaml --message "archai#114"
-# triage: label_age=267h, kira=0 → STUCK
-
-go run ./cmd/reflex --config examples/triage.yaml --message "archai#98"
-# triage: label_age=730h, kira=1 → HEALTHY
-
-go run ./cmd/reflex --config examples/triage.yaml --message "archai#9999"
-# (no triage line — GhQueryFailed + RequestUnhandled, exit 2)
-```
-
-Classification rules:
-
-- `STUCK`   — `label_age > 48h` and `kira_interactions == 0`
-- `HEALTHY` — `kira_interactions > 0`
-- `FRESH`   — `label_age ≤ 48h` and `kira_interactions == 0`
-
-`LABEL_AGE_HOURS` = hours since the most recent `labeled` timeline event
-with `label.name == "agent-ready"` (defensive fallback: earliest timeline
-entry, since the `/timeline` endpoint always returns the issue's history).
-
-`KIRA_INTERACTIONS` = comments authored by `kira-autonoma` + timeline
-`cross-referenced` entries whose `source.issue.user.login == kira-autonoma`.
-`mentioned` and `subscribed` timeline events with the same actor are
-deliberately **not** counted (they auto-fire on @-mentions and are false
-positives).
-
-The triage chain ends in `RequestHandled` on success; the example also
-shows the Phase 1 invariant in action — even when only one of the two
-`GhQueryResult` paths arrives at the time the dispatcher pops the first
-event, `triage_rules` emits a terminal `TriagePending` so the trigger
-`GhQueryResult` still has a descendant and the orphan watcher stays
-silent.
 
 ## Tests
 
@@ -554,7 +507,6 @@ go test ./...
 Covers the projection fold, dispatcher fan-out and bounded termination,
 YAML parse + validate (including unknown-type rejection), the calc tool,
 the printer, the request-unhandled watcher, the event-orphan watcher
-(Phase 1 invariant), `parse_target` / `gh_query` / `triage_rules`
-(Phase 2 triage pipeline) with mocked CmdRunner against captured-from-prod
-fixtures in `pkg/handler/testdata/`, and three end-to-end runs covering
-STUCK / HEALTHY / 404-not-found.
+(Phase 1 invariant), the static graph compiler + cycle detection, the
+aggregator fan-in barrier, the permission/scope layer, and the Phase 4
+daemon + handler-client SDK end-to-end.
