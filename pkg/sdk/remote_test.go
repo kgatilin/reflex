@@ -32,8 +32,15 @@ type daemonHarness struct {
 
 func startDaemon(t *testing.T) *daemonHarness {
 	t.Helper()
-	dir := t.TempDir()
-	socket := filepath.Join(dir, "reflex-test.sock")
+	// Unix socket paths are capped at ~104 bytes on darwin; t.TempDir()
+	// (under /var/folders/... with the long test name appended) blows the
+	// limit. Use a short mkdtemp under /tmp instead.
+	dir, err := os.MkdirTemp("/tmp", "rfx")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "d.sock")
 	store := event.NewStore()
 	proj := projection.NewStore()
 	b := bus.New(store, bus.WithProjection(proj), bus.WithSource("daemon-test"))
@@ -578,8 +585,8 @@ type fakeYAMLSub struct {
 	emit     string
 }
 
-func (f *fakeYAMLSub) Name() string                  { return f.name }
-func (f *fakeYAMLSub) Match(ev event.Event) bool     { return ev.Type == f.consumes }
+func (f *fakeYAMLSub) Name() string              { return f.name }
+func (f *fakeYAMLSub) Match(ev event.Event) bool { return ev.Type == f.consumes }
 func (f *fakeYAMLSub) React(_ context.Context, ev event.Event, _ []event.Event) ([]event.Event, error) {
 	return []event.Event{{Type: f.emit, Terminal: true}}, nil
 }
