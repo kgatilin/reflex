@@ -1,10 +1,11 @@
 # 05 — Control plane as events
 
-Phase 4b vision. Subscriptions themselves are managed via events on the
-bus. The YAML config becomes a seeded stream of control-plane events. The
-handler graph IS the live subscription table; there is no separate parsed
-model. Compression, audit, and permission enforcement all become ordinary
-handlers subscribed to control-plane events.
+Phase 4b status: shipped. Subscriptions are managed via events on the
+bus. The YAML config is a seeded stream of control-plane events. The
+handler graph IS the live subscription table; the parsed-YAML model is
+retained only as a fast pre-flight check. Audit logging is an ordinary
+handler subscribed to control-plane events. Permission enforcement (4c)
+and compression (Phase 6) will use the same primitives.
 
 ## The shift
 
@@ -36,41 +37,55 @@ control-plane.
 
 ## Control-plane events
 
-```
-HandlerRegistered{name, type, consumes, emits, description, scope?}
-```
-
-Announces a handler to the bus. Carries the full `HandlerSpec` shape
-plus the optional `scope` (Phase 4c). Until a `HandlerRegistered` has
-been seen for `name`, no `Subscribed{handler: name, ...}` can take effect.
+Implemented in `pkg/bus`. All five are terminal.
 
 ```
-Subscribed{handler, event_type, filter?}
+HandlerRegistered{name, consumes, emits, description}
 ```
 
-Binds a handler to an event type. `filter` is an optional payload-shape
-predicate (Phase 4c+; today the bus matches on event type only).
-`Subscribed` is the unit of subscription change — multiple subscriptions
-per handler produce multiple `Subscribed` events.
+Announces a handler to the bus. Carries the descriptor shape. Until a
+`HandlerRegistered` has been seen for `name`, no
+`Subscribed{handler_name: name, ...}` can take effect (`SubscribeWithCheck`
+returns an error and emits `SubscriptionRejected`).
 
 ```
-Unsubscribed{handler, event_type}
+Subscribed{handler_name, event_type, max_iterations?}
+```
+
+Binds a handler to an event type. `max_iterations` carries the loop cap
+when the binding is part of a declared loop. Multiple bindings per
+handler (notably the audit handler reacting to N control-plane types)
+produce multiple `Subscribed` events.
+
+```
+Unsubscribed{handler_name, event_type}
 ```
 
 Removes a binding. Idempotent — removing a non-existent binding is a
-no-op, not an error.
+no-op.
 
 ```
-HandlerDeregistered{name}
+HandlerDeregistered{handler_name}
 ```
 
-Removes the handler and all its bindings. Equivalent to one
-`HandlerDeregistered` plus N `Unsubscribed` events; the bus emits the
-expansion so the trace records the full picture.
+Removes the handler and all its bindings. The bus emits one
+`Unsubscribed` per remaining binding followed by one
+`HandlerDeregistered` so the trace records the full picture.
 
-All four are terminal. They describe a control-plane mutation; the
-mutation has happened by the time the event is on the log. Anyone who
-cares about the change subscribes to the relevant control-plane event.
+```
+SubscriptionRejected{handler_name, event_type, reason}
+```
+
+Emitted when `SubscribeWithCheck` refuses a binding. Today the only
+rejection reasons are "handler is not registered" and "would introduce
+uncapped cycle: H1 -> H2 -> H1". The subscription does NOT take effect
+when this event fires.
+
+Control-plane events emitted outside an active `Run` (boot-time YAML
+seeding, or test setup) are queued and delivered on the next `Run` so
+audit handlers can react to them even though no domain event has yet
+fired. They are excluded from the `EventDispatched` meta-event class so
+N registrations do not produce N×EventDispatched noise.
 
 ## The live table
 
@@ -102,23 +117,29 @@ read-side query over the live table.
 
 Phase 1.5's cycle detector (`pkg/graph/graph.go`) runs Tarjan's
 algorithm over the YAML-derived graph. Phase 4b ports it to the live
-table:
+table at the bus layer (`pkg/bus/bus.go` —
+`liveTableHasUncappedCycle`).
 
-1. A handler subscribes to `Subscribed` and `Unsubscribed`.
-2. On each event, it recomputes the SCC over the current live table.
-3. If a new SCC has appeared without a `loop:` cap declared on any node,
-   it emits `CycleDetected{handlers, event_types, no_cap: true}`.
-4. The permission enforcer (if configured) treats `CycleDetected` as a
-   policy violation and emits `PermissionDenied` for the offending
-   `Subscribed` — which the originating handler can react to.
+The static graph builder is retained as a defence-in-depth pre-flight:
+parsing the YAML and running Tarjan over the parsed nodes is cheap,
+catches typos early, and matches what `reflex validate` exposes to
+config authors. The authoritative check is the live-table one — the
+runtime `Build` calls `bus.CheckLiveTableCycles()` after all YAML
+handlers have been registered, and any runtime `SubscribeWithCheck` is
+gated by the same algorithm.
 
-There is no "static" check distinct from a "runtime" check. The static
-graph is the live table at startup, immediately after the seeded
-control-plane events have been processed.
+A runtime subscription that would close an uncapped cycle is refused
+synchronously: the bus emits
+`SubscriptionRejected{handler_name, event_type, reason}`, the binding
+is NOT added, and the caller of `SubscribeWithCheck` receives a
+non-nil error. Phase 4c will additionally have the permission enforcer
+treat the rejection as a policy event and report
+`PermissionDenied{principal, op: subscribe, ...}` against the
+originating handler.
 
-This composes cleanly with the `Subscribed`-emitted-from-config flow:
-the cycle detector observes the same events whether they came from YAML
-seeding or from a Phase 6 optimisation pass.
+This composes cleanly with the seeded-from-YAML flow: the cycle check
+runs whether the binding came from YAML at boot or from a Phase 6
+optimisation pass.
 
 ## Compression operations as subscription operations
 
@@ -158,21 +179,28 @@ None of these require new primitives on the bus.
 
 ## Audit as a handler
 
-The audit logger:
+The audit logger ships as the `audit` handler type (`pkg/handler/audit.go`):
 
 ```yaml
 - name: audit
   type: audit
-  on: [HandlerRegistered, HandlerDeregistered, Subscribed, Unsubscribed,
-       PermissionGranted, PermissionRevoked, PermissionDenied]
+  on: HandlerRegistered    # cosmetic — the handler matches its full set
   config:
     sink: file:///var/log/reflex-audit.jsonl
 ```
 
 It is an ordinary handler with no privileged access. It subscribes to
-every control-plane and permission event and writes them to an
-append-only sink. The audit log is itself an event projection — losing
-it cannot disagree with reality because the bus log is reality.
+all five control-plane event types (`HandlerRegistered`, `Subscribed`,
+`Unsubscribed`, `HandlerDeregistered`, `SubscriptionRejected`) and
+writes them to the configured sink as JSONL. Supported sinks today:
+`stderr` (default), `stdout`, `file:///path`. Phase 4c will add the
+permission events to the audited set without changing the handler API.
+
+The audit handler uses the bus's `MultiConsumes` descriptor field — one
+`HandlerRegistered` event for the handler, one `Subscribed` per audited
+type — so the boot-time control-plane log fully describes the audit
+handler's reach. See `examples/control_plane_audit.yaml` for a runnable
+end-to-end demonstration.
 
 Auditors are not built into the framework; they are configured. A
 deployment that doesn't want audit doesn't declare one. A deployment

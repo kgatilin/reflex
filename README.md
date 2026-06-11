@@ -287,15 +287,38 @@ the payload; the printer prefixes "response: ").
 
 ### Wire protocol
 
-Newline-delimited JSON over a Unix domain socket. One handler per
-connection. Message types: `hello` / `welcome` (handshake), `deliver` /
-`ack` / `nack` (event delivery + completion), `emit` (handler emits — tied
-to a `delivery_id` if mid-delivery, otherwise treated as a fresh seed),
-`goodbye`, `error`. See `pkg/sdk/protocol.go` for the full spec.
+Newline-delimited JSON over a Unix domain socket. One connection can host
+N handlers (each via its own `hello`/`welcome` handshake on the same
+socket). Message types: `hello` / `welcome` (handshake), `deliver` /
+`ack` / `nack` (event delivery + completion — `deliver` carries
+`handler_name` for multi-handler demultiplexing), `emit` (handler emits —
+tied to a `delivery_id` if mid-delivery, otherwise treated as a fresh
+seed), `goodbye`, `error`. Phase 4b adds `await` / `resolved` (wait
+predicates over the socket) and `proj_get` / `proj_value` / `proj_set`
+(projection store RPCs). See `pkg/sdk/protocol.go` for the full spec.
+
+### + Phase 4b: control-plane events + daemon completeness
+
+Phase 4b builds on 4a:
+
+- The bus emits five control-plane events on every subscription mutation
+  (`HandlerRegistered`, `Subscribed`, `Unsubscribed`, `HandlerDeregistered`,
+  `SubscriptionRejected`). YAML loading is now a seeded stream of those
+  events; the audit handler in `examples/control_plane_audit.yaml`
+  subscribes and writes them to a JSONL log.
+- The cycle detector runs over the live subscription table on every
+  registration. The Phase 1.5 static YAML check stays as a fast
+  pre-flight; the live-table check is the authority. A runtime
+  `SubscribeWithCheck` that would close an uncapped cycle is refused with
+  a `SubscriptionRejected` event.
+- All four Phase 4a daemon TODOs are closed: wait-predicates over the
+  socket (`--wait drain` / `request_id_terminal` / `projection.has=KEY`
+  with `--daemon`), projection RPCs for remote handlers, multi-handler
+  mux per connection, and post-drain `CheckQuiescence` so the daemon
+  surfaces `RequestUnhandled` / `EventOrphaned` for socket-driven seeds.
 
 ### Out of scope here (later sub-phases)
 
-- Subscription as a first-class event on the bus (4b).
 - Permission/scope checks on register (4c).
 - Scaffold CLI for new handlers (4d).
 - HTTP / Go-embed external API (4e).

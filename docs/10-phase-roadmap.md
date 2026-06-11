@@ -12,8 +12,8 @@ tracked under its own repo and cited where reflex depends on it.
 | 1.5   | done       | self-describing handlers + Tarjan static cycle detection over the YAML-derived graph + loop caps (`36e25bb`)            | 1+2                         |
 | 3     | done       | analyzer engine + archmotif graph adapter + per-trace metrics + single-scalar objective (`df86e19`)                     | 1.5                         |
 | 1.6   | done       | events-only model: bus meta-events, projection store, generic aggregator, CLI wait-predicates (`c545df4`)                | 1.5                         |
-| 4a    | in flight  | bus daemon + remote handler SDK over a Unix socket                                                                        | 1.6                         |
-| 4b    | pending    | control-plane API as events (`HandlerRegistered`, `Subscribed`, `Unsubscribed`) + cycle detector over the live table     | 4a                          |
+| 4a    | done       | bus daemon + remote handler SDK over a Unix socket (`c1b735c`)                                                            | 1.6                         |
+| 4b    | done       | control-plane events + live-table cycle detector + daemon completeness (multi-handler mux, projection RPCs, await frames, CheckQuiescence)  | 4a                          |
 | 4c    | pending    | scope-based permission layer (`PermissionGranted`, `PermissionRevoked`, `PermissionDenied` + enforcer handler)            | 4b                          |
 | 4d    | pending    | scaffold CLI + tag archmotif release exposing `pkg/metrics` shim → drop the `go.mod replace` directive                   | 4a, archmotif side-quest    |
 | 4e    | pending    | external embedder API (Go `pkg/embed` package + HTTP daemon + optional gRPC)                                             | 4a                          |
@@ -100,17 +100,31 @@ implementation can use a pre-Phase-4b boot-time registration model
 (handler announces itself once, never deregisters) — that simplifies
 4a without compromising 4b's design.
 
-## Phase 4b — control plane as events
+## Phase 4b — control plane as events + daemon completeness
 
-Goal: promote `HandlerRegistered`, `Subscribed`, `Unsubscribed`,
-`HandlerDeregistered` to first-class events. The bus's subscriber list
-becomes a projection over the control-plane event stream. The cycle
-detector ports from "Tarjan over parsed YAML" to "Tarjan over the live
-table". YAML configuration becomes a seeded event stream.
+Done. Five control-plane event types
+(`HandlerRegistered`, `Subscribed`, `Unsubscribed`,
+`HandlerDeregistered`, `SubscriptionRejected`) are first-class events
+emitted by the bus on every subscription mutation. YAML loading is a
+seeded stream of those events; the audit handler subscribes to them
+and writes a JSONL log. The cycle detector is ported to the live
+subscription table; a runtime `SubscribeWithCheck` that would close an
+uncapped cycle is refused and a `SubscriptionRejected` event records
+the rejection. The Phase 1.5 static check stays as a fast pre-flight.
 
-The Phase 1.5 static check becomes a runtime check that refuses the
-`Subscribed` event that would create an uncapped cycle. See
-[`05-control-plane-as-events.md`](./05-control-plane-as-events.md).
+The four Phase 4a daemon TODOs are also closed:
+
+- `await` / `resolved` frames carry wait-predicates over the socket.
+- `proj_get` / `proj_value` / `proj_set` frames give remote handlers
+  full projection-store access.
+- A single SDK Client connection now hosts N handlers; the daemon
+  routes `deliver` frames by `handler_name`.
+- The daemon runs `CheckQuiescence` after every successful
+  `EmitAndDrain` so `RequestUnhandled` / `EventOrphaned` surface for
+  socket-driven seeds.
+
+See [`05-control-plane-as-events.md`](./05-control-plane-as-events.md)
+and [`03-bus-and-projection.md`](./03-bus-and-projection.md).
 
 ## Phase 4c — scope-based permission layer
 

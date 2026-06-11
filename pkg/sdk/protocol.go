@@ -70,6 +70,22 @@ const (
 	KindEmit    = "emit"
 	KindGoodbye = "goodbye"
 	KindError   = "error"
+
+	// Phase 4b additions.
+
+	// KindAwait is sent client→daemon to subscribe to a wait predicate
+	// (drain | request_id_terminal | projection.has=<key>) for a given
+	// request_id. The daemon resolves the predicate after each drain
+	// (or after a deadline) and replies with KindResolved / KindTimeout.
+	KindAwait    = "await"
+	KindResolved = "resolved"
+	KindTimeout  = "timeout"
+
+	// Projection RPCs for remote handlers (KindProjSet / KindProjGet /
+	// KindProjValue). Get is request/reply; Set is fire-and-forget.
+	KindProjSet   = "proj_set"
+	KindProjGet   = "proj_get"
+	KindProjValue = "proj_value"
 )
 
 // Frame is the envelope every wire message decodes into. Unknown fields are
@@ -89,6 +105,21 @@ type Frame struct {
 
 	// Error / Nack
 	Error string `json:"error,omitempty"`
+
+	// Await / Resolved / Timeout (Phase 4b). AwaitID lets the daemon
+	// correlate multiple in-flight predicates from the same CLI client.
+	AwaitID   string `json:"await_id,omitempty"`
+	Predicate string `json:"predicate,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+
+	// Projection RPCs (Phase 4b). RPCID is the request/reply correlator
+	// for proj_get / proj_value. Key/Value carry the payload; Found
+	// reports whether the key existed (proj_value only).
+	RPCID string          `json:"rpc_id,omitempty"`
+	Key   string          `json:"key,omitempty"`
+	Value json.RawMessage `json:"value,omitempty"`
+	Found bool            `json:"found,omitempty"`
 }
 
 // HandlerSpec is the wire description of the handler the client is

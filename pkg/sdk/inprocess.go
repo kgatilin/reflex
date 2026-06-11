@@ -65,6 +65,21 @@ func (s *inProcessSub) Match(ev event.Event) bool {
 	return ev.Type == s.h.consumes
 }
 
+// Descriptor implements bus.Described so the bus emits HandlerRegistered +
+// Subscribed control-plane events when an SDK handler joins the
+// in-process bus.
+func (s *inProcessSub) Descriptor() bus.HandlerDescriptor {
+	d := bus.HandlerDescriptor{Name: s.h.name, Consumes: s.h.consumes}
+	for _, e := range s.h.emits {
+		d.Emits = append(d.Emits, bus.EmittedDescriptor{
+			Type:     e.Type,
+			Terminal: e.Terminal,
+			Optional: e.Optional,
+		})
+	}
+	return d
+}
+
 // SetProjection satisfies bus.ProjectionAware so WireProjection (re-)injects
 // the store when the bus assembles late.
 func (s *inProcessSub) SetProjection(p *projection.Store) { s.proj = p }

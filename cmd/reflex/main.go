@@ -141,7 +141,7 @@ func newEmitCmd() *cobra.Command {
 				// Daemon owns config / drain / trace; CLI just ships the
 				// seed. Local wait-predicates can't observe daemon state
 				// in Phase 4a — see TODO in emitToDaemon.
-				return emitToDaemon(cmd.Context(), opts.daemon, eventType, payload)
+				return emitToDaemon(cmd.Context(), opts.daemon, eventType, payload, opts.wait)
 			}
 			// Apply event-config defaults (wait predicate) if the YAML
 			// declares this type.
@@ -203,7 +203,7 @@ func newInvokeCmd() *cobra.Command {
 				opts.wait = ec.CLI.Wait
 			}
 			if opts.daemon != "" {
-				return emitToDaemon(cmd.Context(), opts.daemon, eventType, payload)
+				return emitToDaemon(cmd.Context(), opts.daemon, eventType, payload, opts.wait)
 			}
 			res, err := executeRunWithConfig(cmd.Context(), cfg, eventType, payload)
 			if err != nil {
@@ -244,7 +244,7 @@ func newSendCmd() *cobra.Command {
 				opts.wait = ec.CLI.Wait
 			}
 			if opts.daemon != "" {
-				return emitToDaemon(cmd.Context(), opts.daemon, eventType, payload)
+				return emitToDaemon(cmd.Context(), opts.daemon, eventType, payload, opts.wait)
 			}
 			res, err := executeRunWithConfig(cmd.Context(), cfg, eventType, payload)
 			if err != nil {

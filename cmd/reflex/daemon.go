@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -80,6 +81,10 @@ socket closes, the process exits 0.`,
 			_ = os.Chmod(socketPath, 0o600)
 
 			d := sdk.NewDaemon(b, lis)
+			// Phase 4b: install the post-drain quiescence check so the
+			// daemon surfaces RequestUnhandled / EventOrphaned diagnostics
+			// the same way `reflex run` does.
+			d.SetQuiescence(handler.CheckQuiescence)
 
 			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
@@ -99,27 +104,24 @@ socket closes, the process exits 0.`,
 	return cmd
 }
 
-// emitToDaemon connects to a daemon over the given socket and sends a
-// single bare emit frame, then waits for either a daemon-side error or a
-// clean EOF (the daemon does not currently send any post-drain signal back
-// — see TODO below). Used by 'reflex emit --daemon ...'.
+// emitToDaemon connects to a daemon over the given socket, sends a single
+// seed event, optionally registers a wait predicate, and disconnects when
+// the predicate resolves (or immediately when no predicate is set).
 //
-// Returns the err the daemon reported, or nil on clean disconnect.
-// TODO(phase-4b): the daemon should ACK the seed with a drain summary so
-// CLI wait-predicates can be evaluated here instead of just locally on the
-// post-drain state.
-func emitToDaemon(ctx context.Context, socketPath, eventType string, payload map[string]any) error {
-	// Re-use the SDK Connect path for the dial — but we don't want to
-	// register a handler. Drop down to a direct net.Dial.
+// Phase 4b: when `wait` is non-empty the CLI installs an Await frame on
+// the daemon side; the daemon evaluates the predicate after every drain
+// and replies with Resolved (or Timeout). The CLI blocks on the inbound
+// channel; the daemon does NOT block its drain — multiple in-flight
+// predicates are evaluated lazily after each drain step.
+func emitToDaemon(ctx context.Context, socketPath, eventType string, payload map[string]any, wait string) error {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
 		return fmt.Errorf("connect %s: %w", socketPath, err)
 	}
 	defer conn.Close()
 
-	// We still need to handshake — the daemon's handleConn expects a
-	// hello frame. Send a dummy handler that consumes a never-fired event
-	// type so it never gets delivered to.
+	// Hello with a dummy handler that consumes a never-fired event type so
+	// it never gets delivered to.
 	helloSpec := sdk.HandlerSpec{
 		Name:     "_cli_seed",
 		Consumes: "__noop__",
@@ -128,7 +130,6 @@ func emitToDaemon(ctx context.Context, socketPath, eventType string, payload map
 	if err := enc.encode(sdk.Frame{Kind: sdk.KindHello, Version: sdk.ProtocolVersion, Handler: &helloSpec}); err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
-	// Read welcome.
 	dec := newLineDecoder(conn)
 	wf, err := dec.decode()
 	if err != nil {
@@ -138,12 +139,72 @@ func emitToDaemon(ctx context.Context, socketPath, eventType string, payload map
 		return fmt.Errorf("expected welcome, got %q: %s", wf.Kind, wf.Error)
 	}
 
-	// Emit the seed.
+	// Build the seed.
 	seed := buildSeedEvent(eventType, payload)
+
+	// If we have a wait predicate, install it BEFORE emit so the daemon's
+	// post-drain await check sees the resolved condition.
+	if wait != "" {
+		awaitID := "cli-await-1"
+		if err := enc.encode(sdk.Frame{
+			Kind:      sdk.KindAwait,
+			AwaitID:   awaitID,
+			Predicate: wait,
+			RequestID: seed.RequestID,
+		}); err != nil {
+			return fmt.Errorf("await: %w", err)
+		}
+	}
+
 	if err := enc.encode(sdk.Frame{Kind: sdk.KindEmit, Event: &seed}); err != nil {
 		return fmt.Errorf("emit: %w", err)
 	}
-	// Goodbye and let the daemon close.
-	_ = enc.encode(sdk.Frame{Kind: sdk.KindGoodbye})
-	return nil
+
+	// If no wait predicate: send goodbye and return. The daemon owns the
+	// drain.
+	if wait == "" {
+		_ = enc.encode(sdk.Frame{Kind: sdk.KindGoodbye})
+		return nil
+	}
+
+	// Wait for the daemon to resolve the predicate. Deadline keeps the CLI
+	// from hanging forever on a misbehaving daemon.
+	deadline := time.NewTimer(30 * time.Second)
+	defer deadline.Stop()
+
+	type frameOrErr struct {
+		f   sdk.Frame
+		err error
+	}
+	frames := make(chan frameOrErr, 1)
+	go func() {
+		for {
+			f, err := dec.decode()
+			if err != nil {
+				frames <- frameOrErr{err: err}
+				return
+			}
+			frames <- frameOrErr{f: f}
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("await %q: timeout after 30s", wait)
+		case fe := <-frames:
+			if fe.err != nil {
+				return fmt.Errorf("await read: %w", fe.err)
+			}
+			switch fe.f.Kind {
+			case sdk.KindResolved:
+				_ = enc.encode(sdk.Frame{Kind: sdk.KindGoodbye})
+				return nil
+			case sdk.KindError:
+				return fmt.Errorf("daemon: %s", fe.f.Error)
+			}
+		}
+	}
 }

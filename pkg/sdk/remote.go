@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/kgatilin/reflex/pkg/event"
 )
@@ -31,34 +32,113 @@ func (o *remoteOption) build() (transport, error) {
 	return &remoteTransport{conn: conn}, nil
 }
 
-// remoteTransport drives one Unix-socket connection to a daemon. It
-// supports exactly ONE handler per connection in Phase 4a — registering
-// multiple handlers on the same client opens multiple connections (one
-// per handler) in Run. Keeps the wire protocol stupid.
+// remoteTransport drives one Unix-socket connection to a daemon.
+// Phase 4b: a single connection hosts N handlers. The daemon's deliver
+// frames carry the handler_name; this transport demultiplexes them to
+// the right callback via a name → handler map.
 type remoteTransport struct {
 	conn net.Conn
 
 	closeMu sync.Mutex
 	closed  bool
+
+	// proj RPC plumbing.
+	rpcMu      sync.Mutex
+	rpcSeq     uint64
+	rpcWaiters map[string]chan Frame
 }
 
 func (t *remoteTransport) run(ctx context.Context, handlers []*Handler) error {
 	if len(handlers) == 0 {
 		return errors.New("sdk: remote: no handlers registered")
 	}
+	t.rpcWaiters = map[string]chan Frame{}
 
-	// Phase 4a simple model: one handler per remote.Transport instance.
-	// Connect() returned with one already-dialled socket; if the user
-	// registered exactly one handler, we use it directly. If they
-	// registered multiple, we open additional sockets — but that is a
-	// rare ask in 4a and the example only registers one.
-	if len(handlers) == 1 {
-		return t.runOne(ctx, t.conn, handlers[0])
+	enc := json.NewEncoder(t.conn)
+	encMu := &sync.Mutex{}
+	reader := bufio.NewReaderSize(t.conn, 1<<20)
+
+	send := func(f Frame) error {
+		encMu.Lock()
+		defer encMu.Unlock()
+		return enc.Encode(f)
 	}
-	// Multi-handler: open extra connections (re-using the dial path is
-	// awkward because we don't know the socket path here; punt by failing
-	// loudly).
-	return errors.New("sdk: remote: only one handler per client is supported in Phase 4a — open a separate Client per handler")
+
+	// Register every handler via its own Hello/Welcome handshake on the
+	// same connection.
+	for _, h := range handlers {
+		if err := send(Frame{Kind: KindHello, Version: ProtocolVersion, Handler: ptr(h.Spec())}); err != nil {
+			return fmt.Errorf("sdk: hello %q: %w", h.name, err)
+		}
+		line, err := readLine(reader)
+		if err != nil {
+			return fmt.Errorf("sdk: read welcome %q: %w", h.name, err)
+		}
+		wf, err := DecodeFrame(line)
+		if err != nil {
+			return fmt.Errorf("sdk: decode welcome: %w", err)
+		}
+		if wf.Kind == KindError {
+			return fmt.Errorf("sdk: daemon error on hello: %s", wf.Error)
+		}
+		if wf.Kind != KindWelcome {
+			return fmt.Errorf("sdk: expected welcome, got %q", wf.Kind)
+		}
+	}
+
+	// Index handlers by name for delivery routing.
+	byName := make(map[string]*Handler, len(handlers))
+	for _, h := range handlers {
+		byName[h.name] = h
+	}
+
+	// Cancellation: close the conn when ctx fires.
+	go func() {
+		<-ctx.Done()
+		_ = t.conn.Close()
+	}()
+
+	// Inbound loop.
+	for {
+		line, err := readLine(reader)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return nil
+		}
+		f, err := DecodeFrame(line)
+		if err != nil {
+			return fmt.Errorf("sdk: decode: %w", err)
+		}
+		switch f.Kind {
+		case KindDeliver:
+			if f.Event == nil {
+				return fmt.Errorf("sdk: deliver missing event")
+			}
+			h, ok := byName[f.HandlerName]
+			if !ok {
+				// Daemon sent us a deliver for a handler we don't host —
+				// nack so the daemon doesn't hang waiting.
+				_ = send(Frame{Kind: KindNack, DeliveryID: f.DeliveryID, Error: fmt.Sprintf("unknown handler %q", f.HandlerName)})
+				continue
+			}
+			// Dispatch in a goroutine so the inbound loop keeps reading
+			// (the handler may need round-trip RPCs like proj_get which
+			// arrive on this same connection while it runs).
+			ev := *f.Event
+			deliveryID := f.DeliveryID
+			go t.dispatch(ctx, send, h, deliveryID, ev)
+		case KindProjValue:
+			t.deliverRPC(f)
+		case KindError:
+			return fmt.Errorf("sdk: daemon: %s", f.Error)
+		case KindGoodbye:
+			return nil
+		default:
+			// Unknown but non-fatal.
+		}
+	}
 }
 
 func (t *remoteTransport) close() error {
@@ -71,90 +151,57 @@ func (t *remoteTransport) close() error {
 	return t.conn.Close()
 }
 
-// runOne drives the handshake and inbound loop for a single handler/socket.
-func (t *remoteTransport) runOne(ctx context.Context, conn net.Conn, h *Handler) error {
-	enc := json.NewEncoder(conn)
-	reader := bufio.NewReaderSize(conn, 1<<20)
-
-	// Hello.
-	hello := Frame{Kind: KindHello, Version: ProtocolVersion, Handler: ptr(h.Spec())}
-	if err := enc.Encode(hello); err != nil {
-		return fmt.Errorf("sdk: hello: %w", err)
-	}
-	// Welcome.
-	line, err := readLine(reader)
-	if err != nil {
-		return fmt.Errorf("sdk: read welcome: %w", err)
-	}
-	wf, err := DecodeFrame(line)
-	if err != nil {
-		return fmt.Errorf("sdk: decode welcome: %w", err)
-	}
-	if wf.Kind == KindError {
-		return fmt.Errorf("sdk: daemon error: %s", wf.Error)
-	}
-	if wf.Kind != KindWelcome {
-		return fmt.Errorf("sdk: expected welcome, got %q", wf.Kind)
-	}
-
-	// Cancellation: close the conn when ctx fires.
-	go func() {
-		<-ctx.Done()
-		_ = conn.Close()
-	}()
-
-	// Inbound loop.
-	encMu := &sync.Mutex{}
-	for {
-		line, err := readLine(reader)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			// Clean disconnect on EOF.
-			return nil
-		}
-		f, err := DecodeFrame(line)
-		if err != nil {
-			// Decode errors on inbound frames are fatal for this
-			// connection. Don't try to write back — the conn may be
-			// half-broken.
-			return fmt.Errorf("sdk: decode: %w", err)
-		}
-		switch f.Kind {
-		case KindDeliver:
-			if f.Event == nil {
-				return fmt.Errorf("sdk: deliver missing event")
-			}
-			t.dispatch(ctx, encMu, enc, h, f.DeliveryID, *f.Event)
-		case KindError:
-			return fmt.Errorf("sdk: daemon: %s", f.Error)
-		case KindGoodbye:
-			return nil
-		default:
-			// Unknown but non-fatal: log via a stderr write would be
-			// nice but the SDK has no logger; ignore for now.
-		}
-	}
-}
-
-func (t *remoteTransport) dispatch(ctx context.Context, encMu *sync.Mutex, enc *json.Encoder, h *Handler, deliveryID string, ev event.Event) {
+func (t *remoteTransport) dispatch(ctx context.Context, send func(Frame) error, h *Handler, deliveryID string, ev event.Event) {
 	rc := &remoteCtx{
 		ctx:        ctx,
 		parent:     ev,
 		deliveryID: deliveryID,
-		encMu:      encMu,
-		enc:        enc,
+		send:       send,
+		transport:  t,
 		emits:      emitsByType(h),
 	}
 	err := h.fn(rc, ev)
-	encMu.Lock()
-	defer encMu.Unlock()
 	if err != nil {
-		_ = enc.Encode(Frame{Kind: KindNack, DeliveryID: deliveryID, Error: err.Error()})
+		_ = send(Frame{Kind: KindNack, DeliveryID: deliveryID, Error: err.Error()})
 		return
 	}
-	_ = enc.Encode(Frame{Kind: KindAck, DeliveryID: deliveryID})
+	_ = send(Frame{Kind: KindAck, DeliveryID: deliveryID})
+}
+
+// deliverRPC matches an incoming proj_value frame to its waiting RPC
+// goroutine.
+func (t *remoteTransport) deliverRPC(f Frame) {
+	t.rpcMu.Lock()
+	ch, ok := t.rpcWaiters[f.RPCID]
+	if ok {
+		delete(t.rpcWaiters, f.RPCID)
+	}
+	t.rpcMu.Unlock()
+	if !ok {
+		return
+	}
+	select {
+	case ch <- f:
+	default:
+	}
+}
+
+// nextRPCID returns a fresh RPC correlation ID.
+func (t *remoteTransport) nextRPCID() string {
+	t.rpcMu.Lock()
+	defer t.rpcMu.Unlock()
+	t.rpcSeq++
+	return fmt.Sprintf("rpc-%d", t.rpcSeq)
+}
+
+// registerRPC creates a waiter channel for the given RPC ID and returns
+// it. The inbound loop's deliverRPC drains entries.
+func (t *remoteTransport) registerRPC(id string) chan Frame {
+	ch := make(chan Frame, 1)
+	t.rpcMu.Lock()
+	t.rpcWaiters[id] = ch
+	t.rpcMu.Unlock()
+	return ch
 }
 
 // remoteCtx is the Ctx implementation for the remote transport. Emits go
@@ -164,8 +211,8 @@ type remoteCtx struct {
 	ctx        context.Context
 	parent     event.Event
 	deliveryID string
-	encMu      *sync.Mutex
-	enc        *json.Encoder
+	send       func(Frame) error
+	transport  *remoteTransport
 	emits      map[string]EmittedSpec
 }
 
@@ -197,23 +244,61 @@ func (c *remoteCtx) EmitEvent(ev event.Event) error {
 			ev.Terminal = true
 		}
 	}
-	frame := Frame{Kind: KindEmit, DeliveryID: c.deliveryID, Event: &ev}
-	c.encMu.Lock()
-	defer c.encMu.Unlock()
-	return c.enc.Encode(frame)
+	return c.send(Frame{Kind: KindEmit, DeliveryID: c.deliveryID, Event: &ev})
 }
 
+// ProjectionGet round-trips a proj_get frame to the daemon. Blocks until
+// the daemon replies with proj_value (or the context fires). On error or
+// timeout, returns (nil, false) so callers degrade gracefully.
 func (c *remoteCtx) ProjectionGet(key string) (any, bool) {
-	// Phase 4a: remote projection reads are not yet wired (would need an
-	// extra round-trip kind). Return absent so callers degrade gracefully
-	// rather than panicking. TODO(phase-4b).
-	_ = key
-	return nil, false
+	if c.transport == nil {
+		return nil, false
+	}
+	id := c.transport.nextRPCID()
+	ch := c.transport.registerRPC(id)
+	frame := Frame{
+		Kind:      KindProjGet,
+		RPCID:     id,
+		Key:       key,
+		RequestID: c.parent.RequestID,
+	}
+	if err := c.send(frame); err != nil {
+		return nil, false
+	}
+	select {
+	case f := <-ch:
+		if !f.Found {
+			return nil, false
+		}
+		var v any
+		if err := json.Unmarshal(f.Value, &v); err != nil {
+			return nil, false
+		}
+		return v, true
+	case <-c.ctx.Done():
+		return nil, false
+	case <-time.After(10 * time.Second):
+		return nil, false
+	}
 }
 
+// ProjectionSet sends a fire-and-forget proj_set frame to the daemon.
+// Errors during marshal / send are silently swallowed (callers can't
+// react to them inside a handler anyway).
 func (c *remoteCtx) ProjectionSet(key string, value any) {
-	// Same as Get: no-op for now. TODO(phase-4b).
-	_, _ = key, value
+	if c.transport == nil {
+		return
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	_ = c.send(Frame{
+		Kind:      KindProjSet,
+		Key:       key,
+		Value:     raw,
+		RequestID: c.parent.RequestID,
+	})
 }
 
 func ptr[T any](v T) *T { return &v }

@@ -13,8 +13,11 @@ package bus
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +55,54 @@ const (
 	HandlerFailedType   = "HandlerFailed"
 )
 
+// Phase 4b control-plane event types — the bus emits these when its
+// subscription table mutates. They describe the bus's own topology and are
+// first-class events on the same log: audit handlers, the cycle detector,
+// and downstream policy enforcers consume them. All five are terminal.
+const (
+	HandlerRegisteredType   = "HandlerRegistered"
+	SubscribedType          = "Subscribed"
+	UnsubscribedType        = "Unsubscribed"
+	HandlerDeregisteredType = "HandlerDeregistered"
+	SubscriptionRejectedType = "SubscriptionRejected"
+)
+
+// HandlerDescriptor is the static description of a registered handler. The
+// bus keeps one per handler name in the live table and re-emits it on the
+// HandlerRegistered control-plane event.
+//
+// MultiConsumes is the catch-all for handlers that subscribe to more than
+// one event type (notably the audit handler reacting to the entire
+// control-plane stream). When set, Consumes is informational; the live
+// table records one subscription per type in MultiConsumes.
+type HandlerDescriptor struct {
+	Name          string
+	Consumes      string
+	MultiConsumes []string
+	Emits         []EmittedDescriptor
+	Description   string
+}
+
+// EmittedDescriptor mirrors handler.EmittedSpec on the wire of the
+// HandlerRegistered control-plane event. Kept here to avoid a layering
+// cycle between bus and handler.
+type EmittedDescriptor struct {
+	Type     string
+	Terminal bool
+	Optional bool
+}
+
+// SubscriptionInfo is one entry in the live subscription table. The cycle
+// detector reads (handler, eventType) pairs to recompute the SCC.
+type SubscriptionInfo struct {
+	Handler   string
+	EventType string
+	// MaxIterations > 0 marks this subscription as part of a declared loop.
+	// The cycle check treats any SCC touching a capped subscription as
+	// allowable.
+	MaxIterations int
+}
+
 // Bus owns the event store and the subscriber registry. Dispatch is
 // single-threaded by design: each event drains its consequences before the
 // next event is processed. That gives reflex deterministic event ordering
@@ -75,6 +126,17 @@ type Bus struct {
 	// May be nil — handlers that touch it through ProjectionAware get a
 	// no-op store back in that case.
 	proj *projection.Store
+
+	// Live control-plane table — Phase 4b. The dispatcher's fan-out still
+	// reads `subscribers` (back-compat); the live table is the
+	// authoritative model the cycle detector reads.
+	descriptors   map[string]HandlerDescriptor // handler name → descriptor
+	subscriptions []SubscriptionInfo           // ordered list of (handler, event_type) bindings
+
+	// pendingControl is the FIFO of control-plane events emitted outside
+	// any Run. Subsequent Runs prepend them to the dispatch queue so
+	// subscribers (notably the audit handler) get a chance to react.
+	pendingControl []event.Event
 }
 
 // Option customises a Bus.
@@ -128,10 +190,11 @@ func WithLoopCaps(caps map[string]int) Option {
 // New constructs a Bus over store.
 func New(store *event.Store, opts ...Option) *Bus {
 	b := &Bus{
-		store:    store,
-		source:   "reflex",
-		maxSteps: 256,
-		clock:    func() time.Time { return time.Now().UTC() },
+		store:       store,
+		source:      "reflex",
+		maxSteps:    256,
+		clock:       func() time.Time { return time.Now().UTC() },
+		descriptors: map[string]HandlerDescriptor{},
 	}
 	for _, o := range opts {
 		o(b)
@@ -142,10 +205,84 @@ func New(store *event.Store, opts ...Option) *Bus {
 // Register adds sub to the bus. Subscribers fire in registration order when
 // multiple match a single event. Safe to call concurrently — Phase 4a
 // daemon mode invokes this from each accepted connection.
+//
+// Phase 4b: when sub implements Described (i.e. exposes its HandlerSpec),
+// Register also records the descriptor in the live table and emits
+// HandlerRegistered + Subscribed control-plane events. Subscribers without
+// a descriptor (test fakes, ad-hoc adapters) are added silently as before.
 func (b *Bus) Register(sub Subscriber) {
 	b.subsMu.Lock()
-	defer b.subsMu.Unlock()
 	b.subscribers = append(b.subscribers, sub)
+	desc, hasDesc := describeSub(sub)
+	consumesList := []string{}
+	if hasDesc {
+		b.descriptors[desc.Name] = desc
+		consumesList = subscriptionTypes(desc)
+		cap := b.loopCaps[desc.Name]
+		for _, et := range consumesList {
+			b.subscriptions = append(b.subscriptions, SubscriptionInfo{
+				Handler:       desc.Name,
+				EventType:     et,
+				MaxIterations: cap,
+			})
+		}
+	}
+	b.subsMu.Unlock()
+	if hasDesc {
+		b.emitHandlerRegistered(desc)
+		cap := 0
+		b.subsMu.RLock()
+		cap = b.loopCaps[desc.Name]
+		b.subsMu.RUnlock()
+		for _, et := range consumesList {
+			b.emitSubscribed(desc.Name, et, cap)
+		}
+	}
+}
+
+// subscriptionTypes returns the set of event types a handler subscribes
+// to. MultiConsumes wins when set; otherwise Consumes is the single type;
+// "*" / empty are treated as "no static subscription" — those handlers
+// are dispatch-only (their Match() is responsible for choosing which
+// events to react to, but the live table doesn't model an arbitrary
+// match-anything binding).
+func subscriptionTypes(desc HandlerDescriptor) []string {
+	if len(desc.MultiConsumes) > 0 {
+		out := make([]string, 0, len(desc.MultiConsumes))
+		for _, t := range desc.MultiConsumes {
+			if t != "" {
+				out = append(out, t)
+			}
+		}
+		return out
+	}
+	if desc.Consumes == "" || desc.Consumes == "*" {
+		return nil
+	}
+	return []string{desc.Consumes}
+}
+
+// Described is the optional interface a Subscriber implements to opt into
+// the Phase 4b control-plane table. The bus uses the descriptor for
+// HandlerRegistered emission, the live-table cycle check, and the audit
+// stream. Subscribers that don't implement it (test fakes) are tracked
+// only as opaque dispatch targets — they will not appear in the audit log.
+type Described interface {
+	Descriptor() HandlerDescriptor
+}
+
+// describeSub extracts a HandlerDescriptor from a Subscriber via the
+// Described interface. Returns ok=false when the Subscriber does not
+// participate in the control-plane table (e.g. test fakes).
+func describeSub(sub Subscriber) (HandlerDescriptor, bool) {
+	if d, ok := sub.(Described); ok {
+		desc := d.Descriptor()
+		if desc.Name == "" {
+			desc.Name = sub.Name()
+		}
+		return desc, true
+	}
+	return HandlerDescriptor{}, false
 }
 
 // Subscribers returns the registered list in registration order. Safe to
@@ -232,8 +369,17 @@ func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 		return errors.New("bus: store is nil")
 	}
 
+	// Phase 4b: drain any control-plane events queued outside Run before
+	// firing the seed. The audit handler subscribes to these and would
+	// otherwise miss the boot-time registrations.
+	b.subsMu.Lock()
+	pending := b.pendingControl
+	b.pendingControl = nil
+	b.subsMu.Unlock()
+
 	first := b.Emit(seed)
-	queue := []event.Event{first}
+	queue := append([]event.Event{}, pending...)
+	queue = append(queue, first)
 	steps := 0
 	// fireCount[reqID][handlerName] = number of times the handler has
 	// reacted to an event for this request. Only populated for handlers
@@ -362,10 +508,14 @@ func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 
 // isMetaEventType reports whether typ is one of the bus's own meta-events.
 // Used to break the recursion: the bus never emits a meta-event about
-// another meta-event.
+// another meta-event. Includes the Phase 4b control-plane events so a
+// HandlerRegistered emission doesn't spawn an EventDispatched-of-control
+// loop.
 func isMetaEventType(typ string) bool {
 	switch typ {
-	case EventDispatchedType, DrainQuiescedType, HandlerFailedType, LoopExhaustedType:
+	case EventDispatchedType, DrainQuiescedType, HandlerFailedType, LoopExhaustedType,
+		HandlerRegisteredType, SubscribedType, UnsubscribedType,
+		HandlerDeregisteredType, SubscriptionRejectedType:
 		return true
 	}
 	return false
@@ -428,6 +578,360 @@ func (b *Bus) emitHandlerFailed(handlerName string, trigger event.Event, err err
 		Payload:   payload,
 	}
 	b.store.Append(ne)
+}
+
+// LiveTable returns a snapshot of the current handler descriptors and the
+// ordered subscription list. Used by the static-graph migration and the
+// audit examples. The returned slices/maps are owned by the caller — the
+// bus never mutates them after return.
+func (b *Bus) LiveTable() (map[string]HandlerDescriptor, []SubscriptionInfo) {
+	b.subsMu.RLock()
+	defer b.subsMu.RUnlock()
+	descs := make(map[string]HandlerDescriptor, len(b.descriptors))
+	for k, v := range b.descriptors {
+		descs[k] = v
+	}
+	subs := make([]SubscriptionInfo, len(b.subscriptions))
+	copy(subs, b.subscriptions)
+	return descs, subs
+}
+
+// Unsubscribe removes the binding (handler, eventType) from the live
+// table. Idempotent — unsubscribing a non-existent binding is a no-op,
+// not an error. Emits Unsubscribed.
+//
+// Phase 4b: this is a control-plane API. It does NOT remove the dispatch
+// subscriber from `subscribers` — that requires HandlerDeregister, which
+// pulls the subscriber from the dispatch list and emits the full set of
+// removal events.
+func (b *Bus) Unsubscribe(handlerName, eventType string) {
+	b.subsMu.Lock()
+	found := false
+	out := b.subscriptions[:0]
+	for _, s := range b.subscriptions {
+		if s.Handler == handlerName && s.EventType == eventType {
+			found = true
+			continue
+		}
+		out = append(out, s)
+	}
+	b.subscriptions = out
+	b.subsMu.Unlock()
+	if found {
+		b.emitUnsubscribed(handlerName, eventType)
+	}
+}
+
+// HandlerDeregister removes the handler from the live table and the
+// dispatch list, then emits Unsubscribed events for each removed
+// subscription followed by a HandlerDeregistered. Idempotent.
+func (b *Bus) HandlerDeregister(handlerName string) {
+	b.subsMu.Lock()
+	if _, ok := b.descriptors[handlerName]; !ok {
+		b.subsMu.Unlock()
+		return
+	}
+	delete(b.descriptors, handlerName)
+	var removed []string
+	keep := b.subscriptions[:0]
+	for _, s := range b.subscriptions {
+		if s.Handler == handlerName {
+			removed = append(removed, s.EventType)
+			continue
+		}
+		keep = append(keep, s)
+	}
+	b.subscriptions = keep
+	// Pull the subscriber out of the dispatch list.
+	subs := b.subscribers[:0]
+	for _, s := range b.subscribers {
+		if s.Name() == handlerName {
+			continue
+		}
+		subs = append(subs, s)
+	}
+	b.subscribers = subs
+	b.subsMu.Unlock()
+	for _, et := range removed {
+		b.emitUnsubscribed(handlerName, et)
+	}
+	b.emitHandlerDeregistered(handlerName)
+}
+
+// SubscribeWithCheck registers an additional (handler, eventType) binding
+// against an already-registered handler. The cycle detector runs over the
+// resulting live table; if the new edge would close an uncapped cycle the
+// subscription is NOT recorded and a SubscriptionRejected control-plane
+// event is emitted. On accept, a Subscribed event is emitted.
+//
+// This is the runtime authority promised by Phase 4b: subscriptions
+// arriving over the wire (or from a config diff) get the same cycle check
+// the YAML pre-flight does.
+//
+// Returns nil on accept, a non-nil error describing the rejection reason
+// otherwise (the SubscriptionRejected event has already been emitted in
+// that case).
+func (b *Bus) SubscribeWithCheck(handlerName, eventType string, maxIterations int) error {
+	b.subsMu.Lock()
+	if _, ok := b.descriptors[handlerName]; !ok {
+		b.subsMu.Unlock()
+		reason := fmt.Sprintf("handler %q is not registered", handlerName)
+		b.emitSubscriptionRejected(handlerName, eventType, reason)
+		return fmt.Errorf("bus: %s", reason)
+	}
+	// Tentatively add and check.
+	prev := append([]SubscriptionInfo(nil), b.subscriptions...)
+	b.subscriptions = append(b.subscriptions, SubscriptionInfo{
+		Handler:       handlerName,
+		EventType:     eventType,
+		MaxIterations: maxIterations,
+	})
+	cycle, ok := liveTableHasUncappedCycle(b.descriptors, b.subscriptions)
+	if !ok {
+		// Roll back.
+		b.subscriptions = prev
+		b.subsMu.Unlock()
+		reason := fmt.Sprintf("would introduce uncapped cycle: %s", strings.Join(cycle, " -> "))
+		b.emitSubscriptionRejected(handlerName, eventType, reason)
+		return fmt.Errorf("bus: %s", reason)
+	}
+	if maxIterations > 0 {
+		if b.loopCaps == nil {
+			b.loopCaps = map[string]int{}
+		}
+		b.loopCaps[handlerName] = maxIterations
+	}
+	b.subsMu.Unlock()
+	b.emitSubscribed(handlerName, eventType, maxIterations)
+	return nil
+}
+
+// CheckLiveTableCycles runs the cycle detector over the current live table.
+// Returns the SCC that breaks the cap rule, or (nil, true) when the table
+// is acceptable. Used at startup after seed control-plane events have
+// drained, and by tests.
+func (b *Bus) CheckLiveTableCycles() ([]string, bool) {
+	b.subsMu.RLock()
+	defer b.subsMu.RUnlock()
+	return liveTableHasUncappedCycle(b.descriptors, b.subscriptions)
+}
+
+// queueControl appends ev to the store and the pendingControl FIFO so a
+// subsequent Run picks it up for fan-out.
+func (b *Bus) queueControl(ev event.Event) {
+	b.store.Append(ev)
+	b.subsMu.Lock()
+	b.pendingControl = append(b.pendingControl, ev)
+	b.subsMu.Unlock()
+}
+
+func (b *Bus) emitHandlerRegistered(d HandlerDescriptor) {
+	emits := make([]map[string]any, 0, len(d.Emits))
+	for _, e := range d.Emits {
+		em := map[string]any{"type": e.Type}
+		if e.Terminal {
+			em["terminal"] = true
+		}
+		if e.Optional {
+			em["optional"] = true
+		}
+		emits = append(emits, em)
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"name":        d.Name,
+		"consumes":    d.Consumes,
+		"emits":       emits,
+		"description": d.Description,
+	})
+	b.queueControl(event.Event{
+		ID:       uuid.NewString(),
+		Type:     HandlerRegisteredType,
+		TS:       b.clock(),
+		Source:   "bus",
+		Terminal: true,
+		Payload:  payload,
+	})
+}
+
+func (b *Bus) emitSubscribed(handler, eventType string, maxIterations int) {
+	body := map[string]any{
+		"handler_name": handler,
+		"event_type":   eventType,
+	}
+	if maxIterations > 0 {
+		body["max_iterations"] = maxIterations
+	}
+	payload, _ := json.Marshal(body)
+	b.queueControl(event.Event{
+		ID:       uuid.NewString(),
+		Type:     SubscribedType,
+		TS:       b.clock(),
+		Source:   "bus",
+		Terminal: true,
+		Payload:  payload,
+	})
+}
+
+func (b *Bus) emitUnsubscribed(handler, eventType string) {
+	payload, _ := json.Marshal(map[string]any{
+		"handler_name": handler,
+		"event_type":   eventType,
+	})
+	b.queueControl(event.Event{
+		ID:       uuid.NewString(),
+		Type:     UnsubscribedType,
+		TS:       b.clock(),
+		Source:   "bus",
+		Terminal: true,
+		Payload:  payload,
+	})
+}
+
+func (b *Bus) emitHandlerDeregistered(handler string) {
+	payload, _ := json.Marshal(map[string]any{"handler_name": handler})
+	b.queueControl(event.Event{
+		ID:       uuid.NewString(),
+		Type:     HandlerDeregisteredType,
+		TS:       b.clock(),
+		Source:   "bus",
+		Terminal: true,
+		Payload:  payload,
+	})
+}
+
+func (b *Bus) emitSubscriptionRejected(handler, eventType, reason string) {
+	payload, _ := json.Marshal(map[string]any{
+		"handler_name": handler,
+		"event_type":   eventType,
+		"reason":       reason,
+	})
+	b.queueControl(event.Event{
+		ID:       uuid.NewString(),
+		Type:     SubscriptionRejectedType,
+		TS:       b.clock(),
+		Source:   "bus",
+		Terminal: true,
+		Payload:  payload,
+	})
+}
+
+// liveTableHasUncappedCycle runs Tarjan's SCC over the live subscription
+// table. For every (handler H, event E) binding in `subs`, an edge exists
+// from any handler whose descriptor lists E in Emits to H. An SCC is
+// acceptable when at least one node in the SCC has MaxIterations > 0 on
+// the subscription that's part of the cycle.
+//
+// Returns (offending-scc, ok). ok=true means no uncapped cycle.
+func liveTableHasUncappedCycle(descs map[string]HandlerDescriptor, subs []SubscriptionInfo) ([]string, bool) {
+	// Build adjacency: from = emitter handler name, to = subscribed handler name.
+	// Also record the per-handler "cap" — true if any of this handler's
+	// subscriptions has MaxIterations > 0, OR (back-compat) if loopCaps
+	// records this handler.
+	capped := map[string]bool{}
+	for _, s := range subs {
+		if s.MaxIterations > 0 {
+			capped[s.Handler] = true
+		}
+	}
+	adj := map[string][]string{}
+	for name := range descs {
+		adj[name] = nil
+	}
+	for _, s := range subs {
+		consumer := s.Handler
+		// For each handler whose descriptor emits s.EventType, add an edge
+		// emitter → consumer. Skip terminal emissions — a terminal cannot
+		// spawn descendants, so it can't close a runtime cycle.
+		for emitterName, d := range descs {
+			for _, em := range d.Emits {
+				if em.Type != s.EventType {
+					continue
+				}
+				if em.Terminal {
+					continue
+				}
+				adj[emitterName] = append(adj[emitterName], consumer)
+			}
+		}
+	}
+	// Tarjan
+	index := 0
+	indexOf := map[string]int{}
+	lowlink := map[string]int{}
+	onStack := map[string]bool{}
+	stack := []string{}
+	var sccs [][]string
+
+	var strongConnect func(v string)
+	strongConnect = func(v string) {
+		indexOf[v] = index
+		lowlink[v] = index
+		index++
+		stack = append(stack, v)
+		onStack[v] = true
+		for _, w := range adj[v] {
+			if _, seen := indexOf[w]; !seen {
+				strongConnect(w)
+				if lowlink[w] < lowlink[v] {
+					lowlink[v] = lowlink[w]
+				}
+			} else if onStack[w] {
+				if indexOf[w] < lowlink[v] {
+					lowlink[v] = indexOf[w]
+				}
+			}
+		}
+		if lowlink[v] == indexOf[v] {
+			var scc []string
+			for {
+				w := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				onStack[w] = false
+				scc = append(scc, w)
+				if w == v {
+					break
+				}
+			}
+			// Non-trivial only (size > 1 OR self-loop).
+			if len(scc) > 1 || hasSelfLoopName(scc[0], adj) {
+				sccs = append(sccs, scc)
+			}
+		}
+	}
+	var names []string
+	for n := range adj {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, v := range names {
+		if _, seen := indexOf[v]; !seen {
+			strongConnect(v)
+		}
+	}
+	for _, scc := range sccs {
+		// Any capped node in the SCC absolves it.
+		anyCapped := false
+		for _, n := range scc {
+			if capped[n] {
+				anyCapped = true
+				break
+			}
+		}
+		if !anyCapped {
+			sort.Strings(scc)
+			return scc, false
+		}
+	}
+	return nil, true
+}
+
+func hasSelfLoopName(v string, adj map[string][]string) bool {
+	for _, w := range adj[v] {
+		if w == v {
+			return true
+		}
+	}
+	return false
 }
 
 // loopExhaustedPayload formats the diagnostic payload as a JSON object with

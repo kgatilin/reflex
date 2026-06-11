@@ -1,0 +1,44 @@
+# control_plane_audit example — Phase 4b.
+#
+# Demonstrates that audit lives inside the bus as an ordinary handler.
+# The `audit` handler subscribes to the bus's Phase 4b control-plane
+# meta-events (HandlerRegistered, Subscribed, Unsubscribed,
+# HandlerDeregistered, SubscriptionRejected) and writes each one to a
+# JSONL sink.
+#
+# Run:
+#   reflex emit --config examples/control_plane_audit.yaml \
+#       --type RequestReceived --payload '{"payload":"hi"}'
+#
+# The boot sequence emits HandlerRegistered + Subscribed for every
+# declared handler INCLUDING audit. Because audit is first in the list,
+# it sees the registrations of all subsequent handlers — and writes them
+# to stderr (default sink) so you can confirm the audit trail.
+#
+# To pin the audit output to a file:
+#   - change `sink: stderr` to `sink: file:///tmp/reflex-audit.jsonl`.
+settings:
+  max_steps: 128
+
+handlers:
+  - name: audit
+    type: audit
+    on: HandlerRegistered
+    config:
+      sink: stderr
+
+  - name: brain
+    type: llm_stub
+    on: RequestReceived
+    emits: [AssistantMessageProposed, RequestHandled]
+    config:
+      fallback:
+        action: reply_and_handle
+        reply: "Hello from the audited bus."
+
+  - name: out
+    type: printer
+    on: AssistantMessageProposed
+    config:
+      prefix: "assistant: "
+      field: text

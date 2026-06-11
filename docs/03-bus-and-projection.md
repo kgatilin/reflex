@@ -92,13 +92,38 @@ fault-tolerant catches its own errors and emits a domain event
 
 ## Bus meta-events
 
-The bus emits three meta-events about its own activity, all terminal:
+The bus emits two classes of meta-events about its own activity.
+
+### Dispatch meta-events (Phase 1.6), all terminal:
 
 ```
 EventDispatched{event_type, subscriber_count}
 DrainQuiesced{request_id}
 HandlerFailed{handler_name, event_type, error}
 ```
+
+### Control-plane events (Phase 4b), all terminal:
+
+```
+HandlerRegistered{name, consumes, emits, description}
+Subscribed{handler_name, event_type, max_iterations?}
+Unsubscribed{handler_name, event_type}
+HandlerDeregistered{handler_name}
+SubscriptionRejected{handler_name, event_type, reason}
+```
+
+`HandlerRegistered` + `Subscribed` are emitted by `Register`/`SubscribeWithCheck`;
+`Unsubscribed` + `HandlerDeregistered` are emitted by `Unsubscribe`/`HandlerDeregister`.
+`SubscriptionRejected` is emitted when a runtime subscription would
+introduce an uncapped cycle in the live subscription table — the
+subscription does NOT take effect and the offending caller receives a
+non-nil error from `SubscribeWithCheck`.
+
+Control-plane events emitted outside an active `Run` (e.g. at config-load
+time) are queued and delivered to subscribers on the next `Run` so audit
+handlers can react to boot-time topology even though no domain event has
+fired yet. They are excluded from the `EventDispatched` meta-event class
+so registering N handlers doesn't produce N×EventDispatched noise.
 
 ### EventDispatched
 
@@ -352,15 +377,21 @@ reflex emit --type RequestReceived --payload '{"payload":"hi"}' \
 Semantic guarantees: an SDK-registered handler is observationally
 indistinguishable from a YAML-declared one. Same consumes/emits
 declaration, same Terminal-painting (declared `Terminal` on the spec
-auto-paints emitted events), same drain ordering. The only thing the
-remote transport currently lacks vs in-process is projection read/write
-RPCs — those are TODO(phase-4b).
+auto-paints emitted events), same drain ordering. With Phase 4b the
+remote transport is feature-complete vs in-process: it supports
+projection RPCs, multi-handler per connection, post-drain quiescence
+checks, and wait-predicates over the wire.
 
 Wire-protocol kinds:
 
 - `hello { version, handler{name, consumes, emits} }` (client→daemon).
-- `welcome { handler_name, version }` (daemon→client).
-- `deliver { delivery_id, event }` (daemon→client).
+  Multiple `hello`s per connection are allowed — each registers a fresh
+  handler against the same socket (Phase 4b: multi-handler mux).
+- `welcome { handler_name, version }` (daemon→client). One per accepted
+  `hello`.
+- `deliver { delivery_id, handler_name, event }` (daemon→client). The
+  `handler_name` field is the demultiplex key when one client hosts N
+  handlers on one connection.
 - `emit { delivery_id?, event }` (client→daemon — with `delivery_id` the
   emit is buffered onto the in-flight delivery; without one it's a fresh
   seed).
@@ -368,13 +399,34 @@ Wire-protocol kinds:
 - `goodbye` (either side).
 - `error { error }` (daemon→client, fatal-for-connection).
 
-Anti-goal: this is not a new sync primitive. Handlers still emit and
-return. "Wait for reply" is still a projection-predicate property of the
-post-drain state. The daemon does not yet broker `--wait` predicates
-across the socket — for now, when `--daemon` is set the CLI does not
-evaluate wait-predicates locally (the daemon's drain owns them). A round
-trip that returns drain status on the socket is TODO(phase-4b).
+Phase 4b additions:
 
-What 4a deliberately leaves to 4b/4c/4d/4e: subscription-as-event,
-permission checks on register, scaffold CLI for new handlers, the
-external HTTP / Go-embed embedder API.
+- `await { await_id, predicate, request_id }` (client→daemon). Registers
+  a wait predicate (`drain` / `request_id_terminal` / `projection.has=<k>`)
+  the daemon will resolve after every drain.
+- `resolved { await_id, predicate, request_id }` (daemon→client). One per
+  satisfied predicate. Sent at most once per await_id; the entry is
+  dropped from the daemon's pending list on resolution.
+- `timeout { await_id, reason }` (daemon→client; reserved — not yet
+  emitted by the daemon, the CLI's own deadline does the cancellation).
+- `proj_get { rpc_id, request_id, key }` (client→daemon). Looks up the
+  projection store on behalf of a remote handler.
+- `proj_value { rpc_id, request_id, key, value, found }` (daemon→client).
+  The response to `proj_get`. `value` is the JSON-encoded payload;
+  `found` reports whether the key existed.
+- `proj_set { request_id, key, value }` (client→daemon). Fire-and-forget;
+  the daemon writes into its projection store.
+
+Anti-goal: this is still not a new sync primitive. Wait-predicates over
+the socket are async on the wire — `await` is a notification subscription
+and `resolved` is the notification when the predicate first becomes true.
+The CLI blocks; the daemon does not. Multiple in-flight `await`s from
+multiple CLI clients are evaluated lazily after each drain step.
+
+The daemon now also runs `CheckQuiescence` after every successful drain
+(when wired in via `daemon.SetQuiescence`), so `RequestUnhandled` and
+`EventOrphaned` surface for socket-driven emits identically to
+in-process `reflex run`.
+
+What 4b still leaves to 4c/4d/4e: permission checks on register,
+scaffold CLI for new handlers, the external HTTP / Go-embed embedder API.

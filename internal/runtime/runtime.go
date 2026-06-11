@@ -35,6 +35,13 @@ type Result struct {
 // start than silently loop forever. Declared loops (cycles with a
 // max_iterations cap) are honoured by installing per-handler caps on the
 // dispatcher.
+//
+// Phase 4b: the YAML config is no longer just parsed-and-registered in
+// place. Each handler is wrapped in a describedSub so the bus emits the
+// control-plane events (HandlerRegistered, Subscribed) into the log as it
+// is built. The static graph cycle check still runs as a fast pre-flight;
+// the bus also runs its live-table cycle check after registration to
+// confirm the resulting topology is sound.
 func Build(cfg *config.File, reg *handler.Registry) (*bus.Bus, error) {
 	g, err := graph.Build(cfg, reg)
 	if err != nil {
@@ -55,10 +62,76 @@ func Build(cfg *config.File, reg *handler.Registry) (*bus.Bus, error) {
 		if err != nil {
 			return nil, fmt.Errorf("runtime: build %q: %w", h.Name, err)
 		}
-		b.Register(sub)
+		// If the handler self-describes (e.g. the audit handler with its
+		// custom multi-consume set), prefer its descriptor.
+		if d, ok := sub.(bus.Described); ok {
+			desc := d.Descriptor()
+			if desc.Name == "" {
+				desc.Name = h.Name
+			}
+			b.Register(describedSubFor(sub, desc))
+			continue
+		}
+		spec, ok := reg.ResolveSpec(h)
+		if !ok {
+			// No spec → register without control-plane descriptor.
+			b.Register(sub)
+			continue
+		}
+		desc := descriptorFromSpec(h.Name, spec)
+		b.Register(describedSubFor(sub, desc))
 	}
 	b.WireProjection()
+	// Defence-in-depth: the live-table cycle check now also has the right
+	// to refuse. The YAML pre-check above is the fast path; this catches
+	// any drift between the parsed YAML and the actual descriptors that
+	// reached the bus.
+	if scc, ok := b.CheckLiveTableCycles(); !ok {
+		return nil, fmt.Errorf("bus: live-table cycle detected: %v (no cap declared)", scc)
+	}
 	return b, nil
+}
+
+// descriptorFromSpec converts a handler.HandlerSpec into a
+// bus.HandlerDescriptor for the control-plane events.
+func descriptorFromSpec(name string, spec handler.HandlerSpec) bus.HandlerDescriptor {
+	d := bus.HandlerDescriptor{
+		Name:        name,
+		Consumes:    spec.Consumes,
+		Description: spec.Description,
+	}
+	for _, e := range spec.Emits {
+		d.Emits = append(d.Emits, bus.EmittedDescriptor{
+			Type:     e.Type,
+			Terminal: e.Terminal,
+			Optional: e.Optional,
+		})
+	}
+	return d
+}
+
+// describedSub is a thin wrapper around a bus.Subscriber that also exposes
+// a HandlerDescriptor via the bus.Described interface. The runtime
+// constructs one per YAML handler so the bus can emit HandlerRegistered +
+// Subscribed control-plane events when Register is called.
+type describedSub struct {
+	bus.Subscriber
+	desc bus.HandlerDescriptor
+}
+
+func (d *describedSub) Descriptor() bus.HandlerDescriptor { return d.desc }
+
+// SetProjection passes through to the wrapped subscriber when it
+// implements ProjectionAware. Without this delegation, WireProjection
+// would skip wrapped handlers.
+func (d *describedSub) SetProjection(p *projection.Store) {
+	if pa, ok := d.Subscriber.(bus.ProjectionAware); ok {
+		pa.SetProjection(p)
+	}
+}
+
+func describedSubFor(sub bus.Subscriber, desc bus.HandlerDescriptor) bus.Subscriber {
+	return &describedSub{Subscriber: sub, desc: desc}
 }
 
 // Run seeds a RequestReceived event with the user's message, drains the

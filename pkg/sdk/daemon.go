@@ -32,11 +32,12 @@ type Daemon struct {
 	bus      *bus.Bus
 	listener net.Listener
 
-	mu      sync.Mutex
-	conns   map[*remoteSub]struct{}
-	closed  bool
-	emitMu  sync.Mutex // serialises bus.Run across remote emit() requests
-	nextDID atomic.Uint64
+	mu         sync.Mutex
+	conns      map[*conn]struct{}
+	closed     bool
+	emitMu     sync.Mutex // serialises bus.Run across remote emit() requests
+	nextDID    atomic.Uint64
+	quiescence QuiescenceFn
 }
 
 // NewDaemon constructs a daemon over the supplied bus. Call Serve(ctx) to
@@ -45,7 +46,7 @@ func NewDaemon(b *bus.Bus, listener net.Listener) *Daemon {
 	return &Daemon{
 		bus:      b,
 		listener: listener,
-		conns:    map[*remoteSub]struct{}{},
+		conns:    map[*conn]struct{}{},
 	}
 }
 
@@ -86,7 +87,7 @@ func (d *Daemon) Close() error {
 		return nil
 	}
 	d.closed = true
-	conns := make([]*remoteSub, 0, len(d.conns))
+	conns := make([]*conn, 0, len(d.conns))
 	for c := range d.conns {
 		conns = append(conns, c)
 	}
@@ -111,66 +112,129 @@ func (d *Daemon) isClosed() bool {
 	return d.closed
 }
 
+// QuiescenceFn is the post-drain check the daemon runs after each
+// EmitAndDrain. The handler package's CheckQuiescence is the canonical
+// implementation; we accept a func so the daemon doesn't have to import
+// pkg/handler (which would create a layering cycle: handler depends on
+// bus, sdk depends on bus, daemon-using-handler would close the loop).
+//
+// The daemon ctor sets this from the cmd layer where both packages are
+// already in scope.
+type QuiescenceFn func(ctx context.Context, b *bus.Bus) error
+
+// SetQuiescence installs the post-drain quiescence check the daemon
+// runs after every successful EmitAndDrain. Passing nil disables it.
+// Phase 4b: this is the daemon-side counterpart of the in-process
+// CheckQuiescence call made by runtime.Run / executeRunWithConfig.
+func (d *Daemon) SetQuiescence(fn QuiescenceFn) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.quiescence = fn
+}
+
 // EmitAndDrain takes a seed event from a CLI client (over the socket) and
 // drains the bus. Serialised so multiple concurrent CLI clients don't
 // trample on each other's drain.
+//
+// Phase 4b: after drain, the quiescence check (if installed) runs to
+// surface RequestUnhandled / EventOrphaned diagnostics the same way
+// `reflex run` does. Failures are propagated as the EmitAndDrain error.
 func (d *Daemon) EmitAndDrain(ctx context.Context, seed event.Event) error {
 	d.emitMu.Lock()
 	defer d.emitMu.Unlock()
-	return d.bus.Run(ctx, seed)
+	if err := d.bus.Run(ctx, seed); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	q := d.quiescence
+	d.mu.Unlock()
+	if q != nil {
+		return q(ctx, d.bus)
+	}
+	return nil
 }
 
-func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+// conn wraps a single client connection. Phase 4b: one connection can
+// host N handlers; the per-connection state is shared (encoder, reader,
+// awaits, projection RPCs) while each handler keeps its own pending
+// delivery table.
+type conn struct {
+	daemon *Daemon
+	net    net.Conn
+	encMu  sync.Mutex
+	enc    *json.Encoder
 
-	reader := bufio.NewReaderSize(conn, 1<<20) // 1 MiB line cap
-	enc := json.NewEncoder(conn)
+	mu         sync.Mutex
+	handlers   []*remoteSub
+	awaits     []*pendingAwait
+	helloSeen  bool
 
-	// Step 1: handshake.
-	line, err := readLine(reader)
-	if err != nil {
-		_ = enc.Encode(Frame{Kind: KindError, Error: fmt.Sprintf("read hello: %v", err)})
-		return
-	}
-	frame, err := DecodeFrame(line)
-	if err != nil {
-		_ = enc.Encode(Frame{Kind: KindError, Error: fmt.Sprintf("decode hello: %v", err)})
-		return
-	}
-	if frame.Kind != KindHello || frame.Handler == nil {
-		_ = enc.Encode(Frame{Kind: KindError, Error: "expected hello"})
-		return
-	}
-	if frame.Version != 0 && frame.Version != ProtocolVersion {
-		_ = enc.Encode(Frame{Kind: KindError, Error: fmt.Sprintf("protocol version %d, expected %d", frame.Version, ProtocolVersion)})
-		return
-	}
-	if frame.Handler.Name == "" || frame.Handler.Consumes == "" {
-		_ = enc.Encode(Frame{Kind: KindError, Error: "handler.name and handler.consumes are required"})
-		return
-	}
+	shutdownOnce sync.Once
+	dead         chan struct{}
+}
 
-	sub := newRemoteSub(d, conn, enc, *frame.Handler)
-	d.bus.Register(sub)
+func newConn(d *Daemon, netConn net.Conn) *conn {
+	return &conn{
+		daemon: d,
+		net:    netConn,
+		enc:    json.NewEncoder(netConn),
+		dead:   make(chan struct{}),
+	}
+}
+
+func (c *conn) helloPassed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.helloSeen
+}
+
+func (c *conn) shutdown() {
+	c.shutdownOnce.Do(func() {
+		close(c.dead)
+		_ = c.net.Close()
+		c.mu.Lock()
+		hs := c.handlers
+		c.mu.Unlock()
+		for _, h := range hs {
+			h.shutdown()
+		}
+	})
+}
+
+// writeFrame serialises one frame on the wire, holding the encoder mutex
+// so concurrent deliver / proj_value / resolved emissions don't interleave.
+func (c *conn) writeFrame(f Frame) error {
+	c.encMu.Lock()
+	defer c.encMu.Unlock()
+	return c.enc.Encode(f)
+}
+
+// pendingAwait tracks an in-flight wait-predicate the daemon is checking
+// on behalf of a CLI client. The daemon evaluates it after each
+// EmitAndDrain; once true, it sends KindResolved and drops the entry.
+type pendingAwait struct {
+	awaitID   string
+	predicate string
+	requestID string
+}
+
+func (d *Daemon) handleConn(ctx context.Context, netConn net.Conn) {
+	c := newConn(d, netConn)
+	defer c.shutdown()
+
+	reader := bufio.NewReaderSize(netConn, 1<<20)
 
 	d.mu.Lock()
-	d.conns[sub] = struct{}{}
+	d.conns[c] = struct{}{}
 	d.mu.Unlock()
-
 	defer func() {
 		d.mu.Lock()
-		delete(d.conns, sub)
+		delete(d.conns, c)
 		d.mu.Unlock()
-		sub.shutdown()
 	}()
 
-	// Welcome.
-	if err := enc.Encode(Frame{Kind: KindWelcome, HandlerName: sub.spec.Name, Version: ProtocolVersion}); err != nil {
-		return
-	}
-
-	// Step 2: per-connection inbound loop. Reads ack/nack/emit/goodbye from
-	// the client.
+	// Per-connection inbound loop. Multiple hellos are accepted —
+	// each register a fresh handler against the same socket.
 	for {
 		line, err := readLine(reader)
 		if err != nil {
@@ -178,42 +242,186 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		}
 		f, err := DecodeFrame(line)
 		if err != nil {
-			_ = enc.Encode(Frame{Kind: KindError, Error: fmt.Sprintf("decode: %v", err)})
+			_ = c.writeFrame(Frame{Kind: KindError, Error: fmt.Sprintf("decode: %v", err)})
 			return
 		}
+		// Phase 4a back-compat: the first frame must be a Hello. After
+		// the initial Hello, additional Hellos are accepted (multi-handler).
+		if !c.helloPassed() && f.Kind != KindHello {
+			_ = c.writeFrame(Frame{Kind: KindError, Error: "expected hello"})
+			return
+		}
+
 		switch f.Kind {
+		case KindHello:
+			if err := c.handleHello(ctx, f); err != nil {
+				_ = c.writeFrame(Frame{Kind: KindError, Error: err.Error()})
+				return
+			}
+			c.mu.Lock()
+			c.helloSeen = true
+			c.mu.Unlock()
 		case KindAck:
-			sub.complete(f.DeliveryID, nil)
+			c.completeDelivery(f.DeliveryID, nil)
 		case KindNack:
-			sub.complete(f.DeliveryID, errors.New(f.Error))
+			c.completeDelivery(f.DeliveryID, errors.New(f.Error))
 		case KindEmit:
 			if f.Event == nil {
-				_ = enc.Encode(Frame{Kind: KindError, Error: "emit missing event"})
+				_ = c.writeFrame(Frame{Kind: KindError, Error: "emit missing event"})
 				continue
 			}
 			if f.DeliveryID != "" {
-				// Emit tied to an in-flight delivery: buffer for React.
-				if !sub.addEmit(f.DeliveryID, *f.Event) {
-					_ = enc.Encode(Frame{Kind: KindError, Error: fmt.Sprintf("emit: unknown delivery_id %q", f.DeliveryID)})
+				if !c.addEmit(f.DeliveryID, *f.Event) {
+					_ = c.writeFrame(Frame{Kind: KindError, Error: fmt.Sprintf("emit: unknown delivery_id %q", f.DeliveryID)})
 				}
 				continue
 			}
-			// Bare emit: treat as a fresh seed event. Lets clients drive
-			// the bus from outside any delivery cycle (e.g. a `reflex
-			// emit … --daemon` CLI shim connects, emits, disconnects).
 			ev := *f.Event
 			if ev.RequestID == "" {
 				ev.RequestID = uuid.NewString()
 			}
 			if err := d.EmitAndDrain(ctx, ev); err != nil {
-				_ = enc.Encode(Frame{Kind: KindError, Error: err.Error()})
+				_ = c.writeFrame(Frame{Kind: KindError, Error: err.Error()})
+				continue
 			}
+			// After every drain, evaluate any pending awaits.
+			c.resolveAwaits()
+		case KindAwait:
+			c.registerAwait(f)
+			// Try immediate resolution in case the predicate is already
+			// true (e.g. an earlier drain produced the awaited state).
+			c.resolveAwaits()
+		case KindProjGet:
+			c.handleProjGet(f)
+		case KindProjSet:
+			c.handleProjSet(f)
 		case KindGoodbye:
 			return
 		default:
-			_ = enc.Encode(Frame{Kind: KindError, Error: fmt.Sprintf("unknown kind %q", f.Kind)})
+			_ = c.writeFrame(Frame{Kind: KindError, Error: fmt.Sprintf("unknown kind %q", f.Kind)})
 		}
 	}
+}
+
+func (c *conn) handleHello(ctx context.Context, f Frame) error {
+	_ = ctx
+	if f.Handler == nil {
+		return errors.New("hello missing handler")
+	}
+	if f.Version != 0 && f.Version != ProtocolVersion {
+		return fmt.Errorf("protocol version %d, expected %d", f.Version, ProtocolVersion)
+	}
+	if f.Handler.Name == "" || f.Handler.Consumes == "" {
+		return errors.New("handler.name and handler.consumes are required")
+	}
+	sub := newRemoteSub(c.daemon, c, *f.Handler)
+	c.daemon.bus.Register(sub)
+	c.mu.Lock()
+	c.handlers = append(c.handlers, sub)
+	c.mu.Unlock()
+	return c.writeFrame(Frame{Kind: KindWelcome, HandlerName: sub.spec.Name, Version: ProtocolVersion})
+}
+
+// completeDelivery routes an ack/nack to the handler that issued the
+// delivery. Each handler's delivery_id space is independent, so we walk
+// the slice.
+func (c *conn) completeDelivery(deliveryID string, herr error) {
+	c.mu.Lock()
+	hs := append([]*remoteSub(nil), c.handlers...)
+	c.mu.Unlock()
+	for _, h := range hs {
+		if h.complete(deliveryID, herr) {
+			return
+		}
+	}
+}
+
+func (c *conn) addEmit(deliveryID string, ev event.Event) bool {
+	c.mu.Lock()
+	hs := append([]*remoteSub(nil), c.handlers...)
+	c.mu.Unlock()
+	for _, h := range hs {
+		if h.addEmit(deliveryID, ev) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *conn) registerAwait(f Frame) {
+	c.mu.Lock()
+	c.awaits = append(c.awaits, &pendingAwait{
+		awaitID:   f.AwaitID,
+		predicate: f.Predicate,
+		requestID: f.RequestID,
+	})
+	c.mu.Unlock()
+}
+
+// resolveAwaits walks the pending await list and emits Resolved for any
+// predicate that has now become true. Entries that resolve are removed
+// from the list.
+func (c *conn) resolveAwaits() {
+	c.mu.Lock()
+	awaits := append([]*pendingAwait(nil), c.awaits...)
+	c.mu.Unlock()
+	if len(awaits) == 0 {
+		return
+	}
+	store := c.daemon.bus.Store()
+	proj := c.daemon.bus.Projection()
+	keep := make([]*pendingAwait, 0, len(awaits))
+	for _, a := range awaits {
+		ok, _ := evalDaemonPredicate(a.predicate, a.requestID, store, proj)
+		if ok {
+			_ = c.writeFrame(Frame{
+				Kind:      KindResolved,
+				AwaitID:   a.awaitID,
+				Predicate: a.predicate,
+				RequestID: a.requestID,
+			})
+			continue
+		}
+		keep = append(keep, a)
+	}
+	c.mu.Lock()
+	c.awaits = keep
+	c.mu.Unlock()
+}
+
+// handleProjGet looks up the key in the daemon's projection store and
+// replies with proj_value.
+func (c *conn) handleProjGet(f Frame) {
+	proj := c.daemon.bus.Projection()
+	resp := Frame{Kind: KindProjValue, RPCID: f.RPCID, Key: f.Key, RequestID: f.RequestID}
+	if proj != nil {
+		if v, ok := proj.Get(f.RequestID, f.Key); ok {
+			b, err := json.Marshal(v)
+			if err == nil {
+				resp.Value = b
+				resp.Found = true
+			}
+		}
+	}
+	_ = c.writeFrame(resp)
+}
+
+// handleProjSet writes the key to the daemon's projection store. The Set
+// is fire-and-forget (no response frame); errors in JSON decode are
+// reported via KindError because the wire shape was wrong.
+func (c *conn) handleProjSet(f Frame) {
+	proj := c.daemon.bus.Projection()
+	if proj == nil {
+		return
+	}
+	var v any
+	if len(f.Value) > 0 {
+		if err := json.Unmarshal(f.Value, &v); err != nil {
+			_ = c.writeFrame(Frame{Kind: KindError, Error: fmt.Sprintf("proj_set decode: %v", err)})
+			return
+		}
+	}
+	proj.Set(f.RequestID, f.Key, v)
 }
 
 func readLine(r *bufio.Reader) ([]byte, error) {
@@ -236,13 +444,12 @@ func readLine(r *bufio.Reader) ([]byte, error) {
 }
 
 // remoteSub is the daemon-side bus.Subscriber that proxies events to a
-// connected remote handler.
+// connected remote handler. Phase 4b: multiple remoteSubs share a single
+// conn so the connection can host N handlers.
 type remoteSub struct {
 	daemon *Daemon
 	spec   HandlerSpec
-	conn   net.Conn
-	encMu  sync.Mutex
-	enc    *json.Encoder
+	conn   *conn
 
 	mu        sync.Mutex
 	pending   map[string]*pendingDelivery
@@ -258,12 +465,11 @@ type pendingDelivery struct {
 	emitted []event.Event
 }
 
-func newRemoteSub(d *Daemon, conn net.Conn, enc *json.Encoder, spec HandlerSpec) *remoteSub {
+func newRemoteSub(d *Daemon, c *conn, spec HandlerSpec) *remoteSub {
 	return &remoteSub{
 		daemon:  d,
 		spec:    spec,
-		conn:    conn,
-		enc:     enc,
+		conn:    c,
 		pending: map[string]*pendingDelivery{},
 		dead:    make(chan struct{}),
 	}
@@ -274,12 +480,26 @@ func (s *remoteSub) Match(ev event.Event) bool {
 	return ev.Type == s.spec.Consumes
 }
 
+// Descriptor lets the bus emit HandlerRegistered + Subscribed control-plane
+// events for handlers arriving over the socket.
+func (s *remoteSub) Descriptor() bus.HandlerDescriptor {
+	d := bus.HandlerDescriptor{Name: s.spec.Name, Consumes: s.spec.Consumes}
+	for _, e := range s.spec.Emits {
+		d.Emits = append(d.Emits, bus.EmittedDescriptor{
+			Type:     e.Type,
+			Terminal: e.Terminal,
+			Optional: e.Optional,
+		})
+	}
+	return d
+}
+
 // React sends Deliver to the remote handler, blocks waiting for Ack/Nack,
 // then returns success/error. Emit frames received with the same delivery_id
 // before the ack are collected and returned to the dispatcher as if the
 // handler had run in-process — preserving the YAML-handler semantics.
 func (s *remoteSub) React(ctx context.Context, ev event.Event, _ []event.Event) ([]event.Event, error) {
-	deliveryID := fmt.Sprintf("d-%d", s.daemon.nextDID.Add(1))
+	deliveryID := fmt.Sprintf("%s-%d", s.spec.Name, s.daemon.nextDID.Add(1))
 	pd := &pendingDelivery{done: make(chan error, 1)}
 	s.mu.Lock()
 	s.pending[deliveryID] = pd
@@ -291,11 +511,17 @@ func (s *remoteSub) React(ctx context.Context, ev event.Event, _ []event.Event) 
 		s.mu.Unlock()
 	}()
 
-	frame := Frame{Kind: KindDeliver, DeliveryID: deliveryID, Event: &ev}
-	s.encMu.Lock()
-	err := s.enc.Encode(frame)
-	s.encMu.Unlock()
-	if err != nil {
+	// Frame carries handler_name so the multi-handler client can route
+	// the deliver to the right callback. The deliver frame's
+	// handler_name field is informational on the daemon side but required
+	// on the client for the demultiplex.
+	frame := Frame{
+		Kind:        KindDeliver,
+		DeliveryID:  deliveryID,
+		HandlerName: s.spec.Name,
+		Event:       &ev,
+	}
+	if err := s.conn.writeFrame(frame); err != nil {
 		return nil, fmt.Errorf("remote-sub %q: send deliver: %w", s.spec.Name, err)
 	}
 
@@ -334,23 +560,26 @@ func (s *remoteSub) addEmit(deliveryID string, ev event.Event) bool {
 	return true
 }
 
-func (s *remoteSub) complete(deliveryID string, herr error) {
+// complete reports completion of a delivery. Returns true when the
+// delivery_id matched a pending entry on this handler; false otherwise
+// (the caller walks other handlers in the same connection).
+func (s *remoteSub) complete(deliveryID string, herr error) bool {
 	s.mu.Lock()
 	pd, ok := s.pending[deliveryID]
 	s.mu.Unlock()
 	if !ok {
-		return
+		return false
 	}
 	select {
 	case pd.done <- herr:
 	default:
 	}
+	return true
 }
 
 func (s *remoteSub) shutdown() {
 	s.shutdown1.Do(func() {
 		close(s.dead)
-		_ = s.conn.Close()
 	})
 }
 
@@ -360,3 +589,51 @@ func (s *remoteSub) shutdown() {
 var _ interface{ SetProjection(p *projection.Store) } = (*remoteSub)(nil)
 
 func (s *remoteSub) SetProjection(_ *projection.Store) {}
+
+// evalDaemonPredicate is the daemon-side mirror of the CLI's
+// checkWaitPredicate. Returns (ok, reason). The supported predicates
+// mirror the in-process set:
+//
+//   - "drain": DrainQuiesced for requestID has fired.
+//   - "request_id_terminal": a user-domain terminal event for requestID has
+//     fired (RequestHandled / RequestUnhandled / EventOrphaned /
+//     LoopExhausted / TriagePending — domain terminals; meta terminals
+//     EventDispatched/DrainQuiesced/HandlerFailed don't count).
+//   - "projection.has=<key>": projection store has key for requestID.
+func evalDaemonPredicate(predicate, requestID string, store *event.Store, proj *projection.Store) (bool, string) {
+	switch {
+	case predicate == "drain":
+		for _, e := range store.Snapshot() {
+			if e.Type == projection.TypeDrainQuiesced && e.RequestID == requestID {
+				return true, ""
+			}
+		}
+		return false, "no DrainQuiesced for request_id"
+	case predicate == "request_id_terminal":
+		for _, e := range store.Snapshot() {
+			if e.RequestID != requestID || !e.Terminal {
+				continue
+			}
+			switch e.Type {
+			case projection.TypeEventDispatched, projection.TypeDrainQuiesced, projection.TypeHandlerFailed,
+				bus.HandlerRegisteredType, bus.SubscribedType, bus.UnsubscribedType,
+				bus.HandlerDeregisteredType, bus.SubscriptionRejectedType:
+				continue
+			}
+			return true, ""
+		}
+		return false, "no user-domain terminal event for request_id"
+	}
+	const prefix = "projection.has="
+	if len(predicate) > len(prefix) && predicate[:len(prefix)] == prefix {
+		key := predicate[len(prefix):]
+		if key == "" {
+			return false, "empty key after projection.has="
+		}
+		if proj != nil && proj.Has(requestID, key) {
+			return true, ""
+		}
+		return false, fmt.Sprintf("projection key %q absent", key)
+	}
+	return false, fmt.Sprintf("unknown predicate %q", predicate)
+}

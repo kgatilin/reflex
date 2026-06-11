@@ -253,37 +253,53 @@ the delta — the optimisation loop's read side.
 
 `--metric objective` prints exactly one number for shell pipelines.
 
-## The planned migration (Phase 4b)
+## Live-table cycle detection (Phase 4b)
 
-The static graph (Phase 1.5) and the runtime analyzer (Phase 3) both
-have their own representation of the topology. The static side reads
-the parsed YAML; the runtime side rebuilds it from the trace. There is
-no shared in-memory graph object that both could query.
+Phase 4b promotes subscriptions to first-class events on the bus
+(`HandlerRegistered`, `Subscribed`, `Unsubscribed`,
+`HandlerDeregistered`, `SubscriptionRejected`). The bus owns a
+`live_table` projection of those events — `bus.LiveTable()` returns the
+current handler descriptors and subscription bindings — and the cycle
+detector ports from "Tarjan over parsed YAML" to "Tarjan over the live
+table".
 
-Phase 4b removes this split. Subscriptions become managed via events:
-`HandlerRegistered{name, consumes, emits, description}`,
-`Subscribed{handler, event_type}`, `Unsubscribed{handler, event_type}`.
-The bus owns a `live_table` projection that folds these events into the
-current subscription set; the cycle detector runs over the live table
-on every `Subscribed` / `Unsubscribed`. There is no parsed YAML at
-runtime — `reflex run config.yaml` becomes "publish initial
-control-plane events from config.yaml, then process domain events".
+Two checks now run:
 
-After Phase 4b:
+1. **YAML pre-flight (defence in depth).** `graph.Build` still reads the
+   parsed config and refuses to return a bus when the static graph has
+   an uncapped cycle. This is the fast path — there's no point
+   queueing seed events when the YAML itself is broken.
+2. **Live-table authority.** After every `Subscribed` arrives — at boot
+   from the YAML seed stream or at runtime via `bus.SubscribeWithCheck`
+   — the bus reruns Tarjan over the live subscription table. A new
+   subscription that would close an uncapped cycle is rejected: the
+   bus does NOT add the binding and emits
+   `SubscriptionRejected{handler_name, event_type, reason}`. The
+   `SubscribeWithCheck` call returns a non-nil error to the caller.
 
-- The Phase 1.5 cycle detector becomes a handler subscribed to
-  `Subscribed` / `Unsubscribed` that rebuilds the SCC over the live
-  table and emits `CycleDetected{handlers, no_cap}` when an uncapped
-  cycle appears. Refusal to start becomes refusal of the `Subscribed`
-  event that would create the cycle.
-- The Phase 3 analyzer no longer needs a separate trace file — the
-  live table is the topology and the live trace is the trace. The
-  `--watch` driver becomes a subscriber to `DrainQuiesced` that
-  recomputes metrics per request.
+The runtime `Build` call also runs `bus.CheckLiveTableCycles()` after
+all YAML handlers have been registered, so any drift between the
+parsed-YAML pre-check and the actual descriptors that reached the bus
+is caught before any user event flows.
 
-Same algorithms; same objective; one source of truth. See
+Algorithmic notes:
+
+- The adjacency rules are unchanged: for every `(emitter handler H
+  emits T)` × `(subscriber handler S consumes T)`, edge H→S exists.
+  Terminal emissions are excluded — a terminal cannot spawn a
+  descendant by construction.
+- A cycle is "capped" iff at least one handler in the SCC has a
+  subscription with `MaxIterations > 0`. The set of caps is sourced
+  from the same `WithLoopCaps` map the dispatcher enforces, so the
+  static check and the runtime cap enforcement stay in lockstep.
+
+The Phase 3 analyzer's static graph adapter is unaffected — it still
+operates on the YAML-derived `HandlerGraph`. A future refactor could
+have the analyzer query `bus.LiveTable()` directly when running over a
+live daemon, but the offline `--trace` workflow has no live bus to
+query and stays as-is. See
 [`05-control-plane-as-events.md`](./05-control-plane-as-events.md) for
-the control-plane shape this depends on.
+the full control-plane shape.
 
 ## The archmotif side-quest
 
