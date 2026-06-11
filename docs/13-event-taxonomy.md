@@ -10,10 +10,11 @@ normative; the deltas it implies for current code close it.
 ## The envelope
 
 ```
-subject   app.session.{id}.{kind...}     scope (routing + projection bucket)
-trace     { request_id?, caused_by[] }   correlation + causation
-terminal  bool                           leaf of the causal DAG (see 02/11)
-payload   { ...data, source }            data + origin metadata
+subject   app.session.{id}.{kind...}                 scope (routing + projection bucket)
+trace     { session_id, request_id?, span_id,        correlation + causation + telemetry
+            caused_by[], otel? }
+terminal  bool                                        leaf of the causal DAG (see 02/11)
+payload   { ...data, source }                         data + origin metadata
 ```
 
 Three axes, three homes. Mixing them is the bug this document removes: the
@@ -87,20 +88,49 @@ on: tool.calc.call        # subscribes to app.session.*.tool.calc.call
 Handlers speak pure kind; the bus manages scope. Projections do the opposite —
 they bind the scope and wildcard the kind.
 
-## Trace: correlation and causation
+## Trace: correlation, causation, telemetry
 
-Two distinct ids travel with every event:
+The trace travels with every event and carries three things:
 
 - **`request_id` (correlation)** — minted on `request.received`, propagated
   unchanged to every descendant. Constant across one request. The flat,
   `O(1)`-filterable answer to "which request am I under".
+- **`session_id` (correlation)** — the conversation the request belongs to,
+  denormalised from the subject (dispatcher-stamped, like `request_id`). Groups
+  many requests; absent on `sys.*`. Present so telemetry export and
+  cross-request projections need no subject parsing.
 - **`caused_by[]` (causation)** — the ids of the events that directly caused
   this one. Changes every hop. The causal edge of the DAG; a list, because
   join nodes have N causes (delta #1 of 11-domain-model.md).
+- **`span_id` / `otel?` (telemetry)** — see the OTel mapping below.
 
 `request_id` is *denormalised causation*: the request root you would reach by
 walking `caused_by` to its origin, cached flat so per-request filtering does
 not require a DAG traversal.
+
+### OpenTelemetry mapping
+
+reflex maps onto OTel almost 1:1, and most of it is **derived, not stored**:
+
+| OTel | reflex |
+|---|---|
+| trace | **request** — one inbound → cone → answer; `trace_id` ≡ `request_id` |
+| span | **event** — each reaction firing; `span_id` = the event id |
+| `parent_span_id` | `caused_by[0]` |
+| span links | `caused_by[1:]` (a join node's extra causes) |
+| `session.id` attribute | `session_id` — a session is many traces grouped by attribute, **not** one trace |
+| name / attributes / status | kind / payload / `*.failed` + `terminal` |
+
+`caused_by[]` stays the canonical DAG; the OTel parent/links view is computed at
+export, never written twice. `otel?` is the only genuinely stored OTel field and
+exists only for **distributed tracing**: an ingress carrying an upstream W3C
+`traceparent` is *adopted* — the resolver continues that trace instead of minting
+a fresh `trace_id` — so reflex spans stitch into a caller's trace across the
+service boundary.
+
+**Metrics are projections, not trace fields.** `count(llm.completed)`,
+`histogram(latency)` are folds over the log; the event carries tracing context,
+never counters.
 
 ### Stamping rule: narrowest scope covering all causes
 

@@ -19,11 +19,36 @@ Every event on the log has four parts, each with one home:
 | Part | Shape | Carries |
 |---|---|---|
 | `subject` | `{class}.{scope...}.{kind...}` | routing + projection scope |
-| `trace` | `{ request_id?, caused_by[] }` | correlation + causation |
+| `trace` | `{ session_id, request_id?, span_id, caused_by[], otel? }` | correlation, causation, telemetry context |
 | `terminal` | `bool` | leaf of the causal DAG (no descendant expected) |
 | `payload` | `{ ...data, source }` | data + origin metadata |
 
 Replaces today's flat `Type` + `RequestID` + `Source` + scalar `CausedBy`.
+
+### Trace ↔ OpenTelemetry
+
+reflex concepts map onto OTel almost 1:1 — most fields are **derived**, not new:
+
+| OTel | reflex | note |
+|---|---|---|
+| trace | **request** | one inbound → cone → answer = one trace; `trace_id` ≡ `request_id` |
+| span | **event** | each reaction firing; `span_id` = the event id |
+| `parent_span_id` | `caused_by[0]` | OTel spans have one parent… |
+| span links | `caused_by[1:]` | …a join node's extra causes become links |
+| `session.id` attribute | `session_id` | a session is many requests = many traces, grouped by attribute, **not** one trace |
+| name / attributes / status | kind / payload / `*.failed`+terminal | |
+
+- `session_id` is **new** — denormalised from the subject (dispatcher-stamped,
+  like `request_id`), so OTel export needs no subject parsing. Absent on `sys.*`.
+- `trace_id` / `span_id` / `parent_span_id` are a **projection**, not stored
+  twice: `caused_by[]` stays the canonical DAG; the OTel parent/links view is
+  derived at export.
+- `otel?` is the one genuinely stored OTel field, and only for **distributed
+  tracing**: an ingress carrying an upstream W3C `traceparent` is *adopted*
+  (the resolver continues that trace) instead of minting a fresh one.
+- **Metrics are projections, not fields.** `count(llm.completed)`,
+  `histogram(latency)` are folds over the log; the event carries tracing
+  context, never counters.
 
 ## Subjects
 
