@@ -74,6 +74,11 @@ reflex from another application, jump to
     reasoning loop → post-answer hooks) modeled end-to-end on scopes with
     zero new primitives; surfaces two subject-grammar refinements (state
     paths in the subject, typed closure kinds for named scopes).
+19. [`19-projections.md`](./19-projections.md) *(draft)* —
+    the projection interface: declared folds over a causal horizon
+    (kv/log shapes, `in:` as walk boundary), `reads:` access positioned
+    at the trigger, control-plane registration, sessions as causal
+    chains; carries doc 14's read-before-edit guard end to end.
 
 ## Convention
 
