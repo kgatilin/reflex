@@ -51,6 +51,9 @@ drive reflex from another application, jump to
 13. [`13-event-taxonomy.md`](./13-event-taxonomy.md) —
     the wire shape: subjects (scope + kind), the trace envelope (correlation +
     causation), session resolution, and projections as wildcard subscriptions.
+14. [`14-target-coding-agent.md`](./14-target-coding-agent.md) —
+    the first end-to-end target: a minimal coding agent (read/edit/write/search
+    + fmt/lint) built from out-of-process tool plugins, scoped to its workspace.
 
 ## Convention
 
