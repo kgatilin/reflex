@@ -64,6 +64,11 @@ reflex from another application, jump to
     projection, scope rooting/nesting, the closure-predicate algebra
     (waitgroup/errgroup/race/quorum on the bus), cancellation, budgets, the
     engine event catalog, and the explicit guarantee list.
+17. [`17-quiescence-prior-art.md`](./17-quiescence-prior-art.md) *(draft)* —
+    Timely/Naiad progress tracking mapped onto reflex: what the causal-cone
+    geometry buys back (could-result-in, loop counters, the distributed
+    exchange), the obligation-count quiescence algorithm, and uprightness ⇒
+    engine-stamped `caused_by`.
 
 ## Convention
 

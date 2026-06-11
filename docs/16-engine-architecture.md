@@ -77,7 +77,12 @@ quiescent(cone)  = frontier(cone) is empty
 ```
 
 Quiescence is Dijkstra–Scholten termination detection; the terminal-event
-invariant of doc 11 *is* this algorithm. Three engine facilities are views of
+invariant of doc 11 *is* this algorithm. The formula above is the
+*log-level* view; the *operational* mechanism must count obligations
+(dispatched-but-uncompleted handler invocations), or it cannot distinguish
+"handlers still running" from "all handlers returned nothing" (an orphan) —
+see [17-quiescence-prior-art.md](./17-quiescence-prior-art.md) for the
+counting scheme, taken from Naiad's progress tracking. Three engine facilities are views of
 this one fold:
 
 - **The execution position.** There is no program counter; "where execution
@@ -290,7 +295,8 @@ The anti-catalog — absences that are design decisions, not gaps:
 1. **Per-scope incremental quiescence.** `DrainQuiesced` is computed once
    at full drain end (`pkg/bus/bus.go`); the closure algebra needs
    per-cut-point, online detection (delta #3 of doc 11, now load-bearing
-   for the doc-15 loop).
+   for the doc-15 loop). Algorithm: the obligation-count scheme of
+   [doc 17](./17-quiescence-prior-art.md).
 2. **Frontier rebuild on start.** The in-memory queue is a frontier cache
    but is not yet rebuilt from the log after a crash (12 F3); G5 is
    currently aspirational.
