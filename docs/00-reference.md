@@ -86,7 +86,10 @@ everything else is a tool plugin or `sys` machinery.
 > ⚠ **Draft evolution:** [15-primitive-reduction.md](./15-primitive-reduction.md)
 > proposes collapsing this eight-node vocabulary to **two primitives** (`llm` +
 > `tool`) — `decode`/`signal`/`forward`/`router`/`aggregate`/`sink`/`tool_node`
-> fold into direct subscription, a tool, or `sys` machinery. Read it before
+> fold into direct subscription, a tool, or `sys` machinery. The engine side —
+> what the runtime itself provides and guarantees (scopes, closure predicates,
+> cancellation, budgets) — is specified in
+> [16-engine-architecture.md](./16-engine-architecture.md). Read both before
 > relying on the set below.
 
 ### User-declared (YAML)

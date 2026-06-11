@@ -59,6 +59,11 @@ reflex from another application, jump to
 15. [`15-primitive-reduction.md`](./15-primitive-reduction.md) *(draft)* —
     collapsing the node vocabulary to two primitives (`llm` + `tool`); fan-out
     synchronization as the `scope.closed` projection, not a node.
+16. [`16-engine-architecture.md`](./16-engine-architecture.md) *(draft)* —
+    the engine side of the contract: append + dispatch, the progress
+    projection, scope rooting/nesting, the closure-predicate algebra
+    (waitgroup/errgroup/race/quorum on the bus), cancellation, budgets, the
+    engine event catalog, and the explicit guarantee list.
 
 ## Convention
 
