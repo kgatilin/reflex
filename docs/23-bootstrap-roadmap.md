@@ -53,7 +53,14 @@ doc's delta list.
 Additive Go, obvious tests, immediately useful (cheap models for future
 lanes) — and it calibrates the task size the agent can carry.
 
-- **Task 1a — Gemini adapter.**
+- **Task 1a — Gemini adapter.** ~~Done — but hand-built, not agent-built
+  (2026-06-12): the GCP project turned out to have no Anthropic publisher
+  access (404 on every `claude-*`), so the stage-0 brain had no working
+  model and the adapter became a kernel completion, written by the
+  operator's tooling (`pkg/provider/gemini_vertex.go`, commit `1987bbf`).
+  The brain now runs on `vertex:gemini-3.5-flash` (location `global`) —
+  strongest binding live in the project; revisit when Anthropic access
+  exists. The original task text, kept for the record:~~
   > In pkg/provider, add a Gemini adapter behind the existing Provider
   > interface, registered under key "vertex" (binding strings like
   > vertex:gemini-2.5-flash). Use google.golang.org/genai (already a
@@ -149,7 +156,7 @@ accepted/rejected + commit)
 
 | date | task | model | turns | in tok | out tok | $ | verdict |
 |---|---|---|---|---|---|---|---|
-| — | — | — | — | — | — | — | — |
+| 2026-06-12 | smoke: locate factory registry (read-only) | vertex:gemini-3.5-flash | 10 | 101,813 | 357 | $0.032 | accepted — first live run; answer exact, incl. fresh gemini_vertex.go |
 
 ## Open questions carried from doc 22
 

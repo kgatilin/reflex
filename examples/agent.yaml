@@ -58,13 +58,19 @@ handlers:
   # bottleneck is task success rate, not cost. Swapping the model is this
   # one line; the cost report (reflex costs) is what justifies moving any
   # lane to a cheaper model later.
+  #
+  # Reality check (operator, 2026-06-12): the project has no Anthropic
+  # publisher access (404 for every claude-* model), so the doc-22 "strong
+  # Anthropic brain" is unavailable. Strongest live binding is
+  # vertex:gemini-3.5-flash (location: global) — the doc-12 react model,
+  # proven on tool calls. Revisit when Anthropic access exists.
   - name: brain
     type: llm
     on: llm.turn
     config:
-      model: vertex:anthropic/claude-opus-4-8
+      model: vertex:gemini-3.5-flash
       project: iow-uagent
-      location: us-east5
+      location: global
       max_tokens: 16384
       system: |
         You are the stage-0 reflex bootstrap agent. You make small, real,
