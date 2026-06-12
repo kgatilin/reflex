@@ -161,7 +161,10 @@ handlers:
             properties:
               package: { type: string }
     loop:
-      max_iterations: 48   # stage-0 budget: the only cap on the reason/act cycle
+      max_iterations: 96   # stage-0 budget: the only cap on the reason/act cycle.
+                           # Raised 48 -> 96 after task 2.1 attempt #1: engine tasks
+                           # need more read turns than adapter tasks (one tool call
+                           # per firing is the crutch); the cost log is the real watchdog.
 
   # ── observation pumps: tool verdicts re-enter the brain as turns ──────
   # One echo per result/failed kind — verbose on purpose: zero new code,

@@ -67,6 +67,7 @@ const (
 	TypeEventDispatched = "EventDispatched"
 	TypeDrainQuiesced   = "DrainQuiesced"
 	TypeHandlerFailed   = "HandlerFailed"
+	TypeScopeQuiesced   = "scope.quiesced"
 )
 
 // SessionProjection folds events for one request into a SessionState. Events
