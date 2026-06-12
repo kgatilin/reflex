@@ -318,3 +318,124 @@ func TestLLMSpecResolver(t *testing.T) {
 		t.Error("llm.usage must be terminal in the spec")
 	}
 }
+
+// llmAdvisorHandlerForTest builds an llm handler with answer_as set so the
+// text-answer path emits advisor.advice instead of the terminal pair.
+func llmAdvisorHandlerForTest(t *testing.T) *genericSub {
+	t.Helper()
+	sub, err := newLLM(config.HandlerConfig{
+		Name: "planner",
+		Type: "llm",
+		On:   "llm.turn",
+		Config: map[string]any{
+			"model":     "vertex:anthropic/claude-opus-4-8",
+			"project":   "proj",
+			"answer_as": "advisor.advice",
+		},
+	})
+	if err != nil {
+		t.Fatalf("newLLM (advisor): %v", err)
+	}
+	return sub.(*genericSub)
+}
+
+func TestLLMAnswerAs_TextEmitsConfiguredKind(t *testing.T) {
+	// When answer_as is set and the model returns text, exactly one non-terminal
+	// event of the configured kind must be emitted. assistant.message and
+	// RequestHandled must NOT appear. llm.usage is still emitted.
+	fake := &fakeProvider{resp: provider.Response{
+		Text:       "Use a plan-then-execute loop for this task.",
+		StopReason: "end_turn",
+		Usage:      provider.Usage{InputTokens: 80, OutputTokens: 15},
+	}}
+	withFakeProvider(t, fake)
+	out := reactLLM(t, llmAdvisorHandlerForTest(t))
+	m := byType(out)
+
+	advice := m["advisor.advice"]
+	if len(advice) != 1 {
+		t.Fatalf("advisor.advice events = %d; all: %+v", len(advice), out)
+	}
+	if advice[0].Terminal {
+		t.Error("advisor.advice must be non-terminal (request continues downstream)")
+	}
+	var payload struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(advice[0].Payload, &payload); err != nil {
+		t.Fatalf("advisor.advice payload unmarshal: %v", err)
+	}
+	if payload.Text == "" {
+		t.Error("advisor.advice payload text must not be empty")
+	}
+
+	if len(m[TypeAssistantMessage]) != 0 {
+		t.Errorf("assistant.message must not appear when answer_as is set, got %+v", m[TypeAssistantMessage])
+	}
+	if len(m[projection.TypeRequestHandled]) != 0 {
+		t.Errorf("RequestHandled must not appear when answer_as is set, got %+v", m[projection.TypeRequestHandled])
+	}
+	if len(m[TypeLLMUsage]) != 1 {
+		t.Fatalf("llm.usage must still be emitted: %+v", out)
+	}
+}
+
+func TestLLMAnswerAs_DefaultBehaviourUnchanged(t *testing.T) {
+	// Without answer_as the text-answer path must still emit the terminal pair,
+	// confirming the opt-in nature of the override.
+	fake := &fakeProvider{resp: provider.Response{
+		Text:       "Done — all tests pass.",
+		StopReason: "end_turn",
+		Usage:      provider.Usage{InputTokens: 40, OutputTokens: 8},
+	}}
+	withFakeProvider(t, fake)
+	out := reactLLM(t, llmHandlerForTest(t))
+	m := byType(out)
+
+	if len(m[TypeAssistantMessage]) != 1 || !m[TypeAssistantMessage][0].Terminal {
+		t.Fatalf("assistant.message = %+v", m[TypeAssistantMessage])
+	}
+	if len(m[projection.TypeRequestHandled]) != 1 || !m[projection.TypeRequestHandled][0].Terminal {
+		t.Fatalf("RequestHandled = %+v", m[projection.TypeRequestHandled])
+	}
+}
+
+func TestLLMAnswerAs_SpecReflectsOverride(t *testing.T) {
+	// When answer_as is set in the YAML config, llmSpecResolver must list the
+	// configured kind (non-terminal) and must NOT list assistant.message or
+	// RequestHandled.
+	cfg := config.HandlerConfig{
+		Name: "planner",
+		Type: "llm",
+		On:   "llm.turn",
+		Config: map[string]any{
+			"model":     "vertex:anthropic/claude-x",
+			"answer_as": "advisor.advice",
+		},
+	}
+	spec := llmSpecResolver(cfg, llmSpec())
+	types := map[string]EmittedSpec{}
+	for _, e := range spec.Emits {
+		types[e.Type] = e
+	}
+
+	advice, ok := types["advisor.advice"]
+	if !ok {
+		t.Fatalf("spec must list advisor.advice when answer_as is set; got %+v", spec.Emits)
+	}
+	if advice.Terminal {
+		t.Error("advisor.advice spec entry must be non-terminal")
+	}
+	if _, ok := types[TypeAssistantMessage]; ok {
+		t.Errorf("spec must not list assistant.message when answer_as is set")
+	}
+	if _, ok := types[projection.TypeRequestHandled]; ok {
+		t.Errorf("spec must not list RequestHandled when answer_as is set")
+	}
+	// Diagnostic/usage events must still be present.
+	for _, must := range []string{TypeLLMUsage, TypeLLMFailed} {
+		if _, ok := types[must]; !ok {
+			t.Errorf("spec missing %q when answer_as is set; got %+v", must, spec.Emits)
+		}
+	}
+}
