@@ -113,6 +113,13 @@ queue, [`23-bootstrap-roadmap.md`](./23-bootstrap-roadmap.md).
     changesets, conventions, the coding-agent/bootstrap stance, the
     legacy→converged supersession table) and the open questions (ranked
     design gaps, recorded leans, explicit deferrals).
+25. [`25-regulation-concept.md`](./25-regulation-concept.md) *(concept)* —
+    the forward-looking regulation target — a self-balancing agent system
+    governed by one conserved quantity ("energy") — and the proof that it
+    needs no fourth primitive: every regulatory action reduces to three
+    control-plane verbs (config-fact, changeset, intervention) over a
+    projection read surface, with the regulator running *externally* for
+    now and crystallisable inward later.
 
 ## Convention
 
