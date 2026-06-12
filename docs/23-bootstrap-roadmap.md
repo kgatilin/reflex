@@ -97,6 +97,22 @@ scope-qualified subscriptions).
   `llm.calls_dropped` in `pkg/handler/llm.go`), the loop cap moves to a
   request-scope budget. The migration is the acceptance test.
 
+### Iteration 2.5 — llm body sheds legacy vocabulary (after scopes land)
+
+A simplification, not a feature (operator correction, 2026-06-12, after
+the rejected `answer_as` detour — a knob on top of a wrong constant):
+the llm body emits ONE uniform message fact — `llm.message` `{text}`,
+terminal ("a message is a fact, not a demand", 15/24) — and stops
+emitting `assistant.message` / `RequestHandled` entirely. What a message
+*means* (final answer, plan, draft) is subscription topology, never node
+config; request completion is scope quiescence (`scope.quiesced`, task
+2.1 — which is what `reflex emit --wait` then waits on). The printer and
+watcher rewire by subscription. Sequenced after iteration 2 because the
+wait semantics need quiescence and message meaning needs scope-qualified
+subscriptions. A planner is then *zero code*: one more llm node (R1, no
+tools) plus subscriptions — not a node type, not a pump, not a config
+knob.
+
 ### Iteration 3 — projections (19)
 
 The walk evaluator, `reads:` / attach-at-dispatch, plugin-registered
