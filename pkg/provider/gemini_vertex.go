@@ -134,6 +134,11 @@ func geminiFunctionDeclarations(tools []ToolSchema) ([]*genai.FunctionDeclaratio
 // decodeGeminiResponse folds the SDK response into the neutral Response.
 // Text parts are concatenated; function-call parts become ToolCalls (ID from
 // the FunctionCall.ID field if set, otherwise synthesised from the name).
+// Thought parts (part.Thought == true) are silently dropped — they are the
+// model's internal reasoning chain, not content to return to the caller. A
+// response composed entirely of thought parts (thinking model reasoning without
+// a visible answer) produces empty Text and no ToolCalls, which the llm handler
+// converts to an llm.failed event (G4 invariant: no silent dead ends).
 // FinishReason is lowercased for consistency with the Anthropic stop_reason
 // convention ("stop", "max_tokens", etc.).
 // Usage is filled from UsageMetadata; CachedContentTokenCount maps to
@@ -152,7 +157,9 @@ func decodeGeminiResponse(resp *genai.GenerateContentResponse) Response {
 		if cand.Content != nil {
 			for _, part := range cand.Content.Parts {
 				switch {
-				case part.Text != "":
+				case part.Text != "" && !part.Thought:
+					// Thought parts carry the model's reasoning trace; skip them
+					// so they never surface as visible text output.
 					textBuf.WriteString(part.Text)
 				case part.FunctionCall != nil:
 					fc := part.FunctionCall

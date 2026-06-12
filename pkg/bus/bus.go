@@ -588,7 +588,8 @@ func isMetaEventType(typ string) bool {
 	case EventDispatchedType, DrainQuiescedType, HandlerFailedType, LoopExhaustedType,
 		HandlerRegisteredType, SubscribedType, UnsubscribedType,
 		HandlerDeregisteredType, SubscriptionRejectedType,
-		PermissionGrantedType, PermissionRevokedType, PermissionDeniedType:
+		PermissionGrantedType, PermissionRevokedType, PermissionDeniedType,
+		projection.TypeScopeQuiesced:
 		return true
 	}
 	return false

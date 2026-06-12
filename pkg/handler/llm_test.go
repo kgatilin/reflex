@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/kgatilin/reflex/pkg/config"
@@ -223,6 +224,55 @@ func TestLLMEmptyCompletionFails(t *testing.T) {
 	// Usage is still reported — the tokens were spent.
 	if len(m[TypeLLMUsage]) != 1 {
 		t.Fatalf("usage must be reported even for empty completions: %+v", out)
+	}
+}
+
+func TestLLMEmptyCompletionPayload(t *testing.T) {
+	// G4 invariant (doc 24): an empty completion (no tool calls, no visible
+	// text) must produce llm.failed with an error message that names "empty
+	// completion" and embeds the stop_reason — never a silent dead end.
+	fake := &fakeProvider{resp: provider.Response{StopReason: "stop", Usage: provider.Usage{InputTokens: 200, OutputTokens: 28}}}
+	withFakeProvider(t, fake)
+	out := reactLLM(t, llmHandlerForTest(t))
+	m := byType(out)
+
+	failed := m[TypeLLMFailed]
+	if len(failed) != 1 {
+		t.Fatalf("want exactly one llm.failed, got %+v", out)
+	}
+	if failed[0].Terminal {
+		t.Error("llm.failed must be non-terminal (topology reacts to it)")
+	}
+
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(failed[0].Payload, &payload); err != nil {
+		t.Fatalf("llm.failed payload unmarshal: %v", err)
+	}
+	if !strings.Contains(payload.Error, "empty completion") {
+		t.Errorf("llm.failed error = %q, want substring \"empty completion\"", payload.Error)
+	}
+	if !strings.Contains(payload.Error, "stop") {
+		t.Errorf("llm.failed error = %q, want stop_reason embedded", payload.Error)
+	}
+
+	// Usage is still emitted so cost accounting sees the tokens that were spent
+	// on a failed thinking turn.
+	usage := m[TypeLLMUsage]
+	if len(usage) != 1 {
+		t.Fatalf("llm.usage must be emitted even for empty completions: %+v", out)
+	}
+	var u struct {
+		InputTokens  int64  `json:"input_tokens"`
+		OutputTokens int64  `json:"output_tokens"`
+		StopReason   string `json:"stop_reason"`
+	}
+	if err := json.Unmarshal(usage[0].Payload, &u); err != nil {
+		t.Fatalf("llm.usage payload: %v", err)
+	}
+	if u.InputTokens != 200 || u.OutputTokens != 28 || u.StopReason != "stop" {
+		t.Errorf("llm.usage = %+v", u)
 	}
 }
 

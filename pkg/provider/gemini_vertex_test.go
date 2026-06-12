@@ -271,3 +271,99 @@ func TestDecodeGeminiResponseMaxTokens(t *testing.T) {
 		t.Errorf("StopReason = %q, want max_tokens", out.StopReason)
 	}
 }
+
+// Thinking-model regression tests — gemini-2.5-flash and similar models return
+// parts with Thought=true that represent the model's internal reasoning chain.
+// Those parts must never surface as visible text output or mask real content.
+
+func TestDecodeGeminiResponseThoughtOnly(t *testing.T) {
+	// A response composed entirely of thought parts (model reasoned but produced
+	// no visible text and no function call) must yield an empty Response so the
+	// llm handler fires an llm.failed event (G4: no silent dead ends).
+	resp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{
+					{Text: "Let me think step by step...", Thought: true},
+					{Text: "I need to consider the trade-offs.", Thought: true},
+				},
+			},
+			FinishReason: genai.FinishReasonStop,
+		}},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:        200,
+			CandidatesTokenCount:    28,
+			ThoughtsTokenCount:      28,
+		},
+	}
+	out := decodeGeminiResponse(resp)
+	if out.Text != "" {
+		t.Errorf("thought-only response must yield empty Text, got %q", out.Text)
+	}
+	if len(out.ToolCalls) != 0 {
+		t.Errorf("thought-only response must yield no ToolCalls, got %+v", out.ToolCalls)
+	}
+	if out.StopReason != "stop" {
+		t.Errorf("StopReason = %q, want stop", out.StopReason)
+	}
+	// Usage is still forwarded — the tokens were spent on thinking.
+	if out.Usage.InputTokens != 200 || out.Usage.OutputTokens != 28 {
+		t.Errorf("Usage = %+v, want {Input:200 Output:28}", out.Usage)
+	}
+}
+
+func TestDecodeGeminiResponseThoughtPlusFunctionCall(t *testing.T) {
+	// A thinking model that emits a thought followed by a function call: the
+	// thought must be dropped and the function call must be captured.
+	resp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{
+					{Text: "I should read the file first.", Thought: true},
+					{FunctionCall: &genai.FunctionCall{
+						ID:   "call-42",
+						Name: "fs.read",
+						Args: map[string]any{"path": "main.go"},
+					}},
+				},
+			},
+			FinishReason: genai.FinishReasonStop,
+		}},
+	}
+	out := decodeGeminiResponse(resp)
+	if out.Text != "" {
+		t.Errorf("thought text must be dropped; Text = %q", out.Text)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("want 1 ToolCall, got %d: %+v", len(out.ToolCalls), out.ToolCalls)
+	}
+	if out.ToolCalls[0].Name != "fs.read" || out.ToolCalls[0].ID != "call-42" {
+		t.Errorf("ToolCall = %+v", out.ToolCalls[0])
+	}
+}
+
+func TestDecodeGeminiResponseThoughtPlusRealText(t *testing.T) {
+	// A thinking model that emits a thought followed by a visible text answer:
+	// the thought must be dropped and only the visible text must be captured.
+	resp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{
+					{Text: "Reasoning: 2 + 2 = 4 because...", Thought: true},
+					{Text: "The answer is 4.", Thought: false},
+				},
+			},
+			FinishReason: genai.FinishReasonStop,
+		}},
+	}
+	out := decodeGeminiResponse(resp)
+	if out.Text != "The answer is 4." {
+		t.Errorf("Text = %q, want only the non-thought part", out.Text)
+	}
+	if len(out.ToolCalls) != 0 {
+		t.Errorf("unexpected ToolCalls: %+v", out.ToolCalls)
+	}
+}
