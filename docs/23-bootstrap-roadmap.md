@@ -170,6 +170,7 @@ accepted/rejected + commit)
 | 2026-06-12 | task 2.1 attempt 4: counter lands | vertex:gemini-3.5-flash | 54 | 2,771,309 | 11,333 | $0.954 | partial accept — counter +29 lines correct sans decrement; drain killed silently by max_steps 512 (raised to 4096) |
 | 2026-06-12 | task 2.1 attempt 5: tests | vertex:gemini-3.5-flash | ~61 | — | — | ~$1 (est., log wiped) | rejected — wrote 3 good tests but spun 30 turns failing to see the missing decrement; operator interrupted |
 | 2026-06-12 | task 2.1 attempt 6 + e2e tail | vertex:gemini-3.5-flash | 19+7 | 306,338 | 1,718 | $0.098 | **accepted** — surgical prompts (exact bug, exact place): decrement landed, 3 quiescence tests + e2e filter green across ./... |
+| 2026-06-12 | advisor feature (answer_as), full design latitude | vertex:gemini-3.5-flash | 79 (interrupted) | 8,147,417 | 2,377 | $2.805 | rejected — the brain read in circles for 75+ turns and never committed to a design (+1 line total). The data point for doc-22 model-role fit: flash cannot carry open design; the planner seat exists for exactly this — and was blocked behind this very feature (kernel-completed by hand instead) |
 
 ## Open questions carried from doc 22
 
