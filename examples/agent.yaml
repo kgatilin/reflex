@@ -256,7 +256,12 @@ handlers:
     on: llm.usage
     config:
       sink: file:///tmp/reflex-agent-usage.jsonl
-      types: [llm.usage]
+      # Flight recorder, not just usage: a stalled request with a silent
+      # brain (empty completion, orphaned emission) is invisible without
+      # the failure/terminal kinds in the sink. `reflex costs` filters
+      # llm.usage; the extra kinds cost nothing.
+      types: [llm.usage, llm.failed, assistant.message, RequestHandled,
+              RequestUnhandled, EventOrphaned, HandlerFailed, SubscriptionRejected]
 
   # ── operator surface ───────────────────────────────────────────────────
   - name: out
