@@ -30,24 +30,19 @@ import (
 //     llm.calls_dropped the model sees in its next transcript. Obligation
 //     counting — self-build task #2 — retires this.)
 //   - assistant.message (terminal) + RequestHandled (terminal) when the model
-//     answers with text and no tool calls — UNLESS answer_as is set.
-//   - when answer_as is non-empty: one event of that type (non-terminal) with
-//     the same {"text":"…"} payload; no assistant.message and no RequestHandled.
-//     Use this for advisor / planner nodes whose prose answer feeds downstream
-//     nodes rather than closing the request.
+//     answers with text and no tool calls.
 //   - llm.usage (terminal) after every successful completion — the
 //     cost-tracking source of truth (tokens incl. cache, model binding,
 //     stop reason).
 //   - llm.failed (non-terminal) on transport/auth errors or an empty
 //     completion, so the topology can react or visibly orphan.
 type LLMConfig struct {
-	Model     string          `json:"model"`     // binding string, e.g. vertex:anthropic/claude-opus-4-8
-	Project   string          `json:"project"`   // Vertex project (ADC auth)
-	Location  string          `json:"location"`  // region; adapter defaults apply when empty
-	System    string          `json:"system"`    // extra instructions appended to the fixed preamble
+	Model     string          `json:"model"`    // binding string, e.g. vertex:anthropic/claude-opus-4-8
+	Project   string          `json:"project"`  // Vertex project (ADC auth)
+	Location  string          `json:"location"` // region; adapter defaults apply when empty
+	System    string          `json:"system"`   // extra instructions appended to the fixed preamble
 	MaxTokens int             `json:"max_tokens"`
 	Tools     []LLMToolSchema `json:"tools"`
-	AnswerAs  string          `json:"answer_as"` // when non-empty, text answers emit this kind (non-terminal) instead of assistant.message + RequestHandled
 }
 
 // LLMToolSchema is the YAML shape of one advertised tool. InputSchema is a
@@ -149,16 +144,14 @@ func newLLM(cfg config.HandlerConfig) (bus.Subscriber, error) {
 			if err != nil {
 				return llmFailedEvent(err)
 			}
-			return llmEmissions(lc.Model, lc.AnswerAs, resp)
+			return llmEmissions(lc.Model, resp)
 		},
 	}, nil
 }
 
 // llmEmissions translates one neutral completion into bus events. Pure —
-// unit-tested without a provider. answerAs overrides the text-answer path:
-// when non-empty a single non-terminal event of that kind is emitted instead
-// of the default assistant.message + RequestHandled pair.
-func llmEmissions(binding, answerAs string, resp provider.Response) ([]event.Event, error) {
+// unit-tested without a provider.
+func llmEmissions(binding string, resp provider.Response) ([]event.Event, error) {
 	usagePayload, err := json.Marshal(map[string]any{
 		"model":                 binding,
 		"input_tokens":          resp.Usage.InputTokens,
@@ -209,18 +202,10 @@ func llmEmissions(binding, answerAs string, resp provider.Response) ([]event.Eve
 	if err != nil {
 		return nil, err
 	}
-	if answerAs != "" {
-		// Advisor / planner mode: emit one non-terminal event of the configured
-		// kind so downstream nodes can consume the prose advice without closing
-		// the request. assistant.message and RequestHandled are intentionally
-		// suppressed — the topology decides when (and whether) to finalise.
-		out = append(out, event.New(answerAs, msgPayload))
-	} else {
-		out = append(out,
-			event.Event{Type: TypeAssistantMessage, Payload: msgPayload, Terminal: true},
-			event.Event{Type: projection.TypeRequestHandled, Terminal: true},
-		)
-	}
+	out = append(out,
+		event.Event{Type: TypeAssistantMessage, Payload: msgPayload, Terminal: true},
+		event.Event{Type: projection.TypeRequestHandled, Terminal: true},
+	)
 	return out, nil
 }
 
@@ -265,14 +250,9 @@ func llmSpec() HandlerSpec {
 // edge per configured tool plus the fixed completion/diagnostic events. This
 // keeps the static graph honest about exactly which tool kinds this node can
 // emit.
-//
-// When answer_as is set the text-answer path emits that kind (non-terminal)
-// instead of assistant.message + RequestHandled, so the graph reflects the
-// advisor topology rather than a terminating answer.
 func llmSpecResolver(cfg config.HandlerConfig, base HandlerSpec) HandlerSpec {
 	resolved := base
 	var emits []EmittedSpec
-	answerAs := ""
 	if cfg.Config != nil {
 		if tools, ok := cfg.Config["tools"].([]any); ok {
 			for _, t := range tools {
@@ -285,19 +265,10 @@ func llmSpecResolver(cfg config.HandlerConfig, base HandlerSpec) HandlerSpec {
 				}
 			}
 		}
-		if v, ok := cfg.Config["answer_as"].(string); ok {
-			answerAs = v
-		}
-	}
-	if answerAs != "" {
-		emits = append(emits, EmittedSpec{Type: answerAs, Terminal: false, Optional: true})
-	} else {
-		emits = append(emits,
-			EmittedSpec{Type: TypeAssistantMessage, Terminal: true, Optional: true},
-			EmittedSpec{Type: projection.TypeRequestHandled, Terminal: true, Optional: true},
-		)
 	}
 	emits = append(emits,
+		EmittedSpec{Type: TypeAssistantMessage, Terminal: true, Optional: true},
+		EmittedSpec{Type: projection.TypeRequestHandled, Terminal: true, Optional: true},
 		EmittedSpec{Type: TypeLLMUsage, Terminal: true, Optional: true},
 		EmittedSpec{Type: TypeLLMCallsDropped, Terminal: true, Optional: true},
 		EmittedSpec{Type: TypeLLMFailed, Terminal: false, Optional: true},
