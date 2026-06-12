@@ -27,15 +27,18 @@ type Event struct {
 	// Trace is the correlation axis, engine-stamped (§2).
 	Trace Trace
 
-	// Terminal marks a leaf of the causal DAG. Terminality governs orphan
-	// accounting only — dispatching a terminal event still opens
-	// obligations, and reactions may subscribe to terminal kinds (§8).
-	Terminal bool
-
 	// Payload is domain data plus origin ({...data, source}); the engine
 	// never branches on it (§4).
 	Payload json.RawMessage
 }
+
+// There is deliberately no terminal flag (amended 2026-06-12, superseding
+// the doc-24 §2 envelope): leaf-ness is a fact of the topology, not a
+// sender claim. A kind nobody consumes is a validation lint at Apply; a
+// dispatch that reached zero subscribers is an engine fact on the log;
+// quiescence is obligation counting; a firing whose emissions open zero
+// obligations closes its scope instantly. The envelope carries no
+// opinions.
 
 // Trace carries correlation (§2). It is stamped by the dispatcher, never
 // written by a reaction: request_id is the narrowest scope covering all
@@ -52,15 +55,14 @@ type Trace struct {
 	CausedBy []string
 }
 
-// Emit is the only thing a Reaction may produce: kind, terminality,
-// payload — and deliberately nothing else. The dispatcher stamps the
-// trace and places the subject scope; a reaction structurally cannot
-// choose its event's scope or ancestry (§2 uprightness, §5
+// Emit is the only thing a Reaction may produce: kind and payload —
+// deliberately nothing else. The dispatcher stamps the trace and places
+// the subject scope; a reaction structurally cannot choose its event's
+// scope, ancestry, or accounting treatment (§2 uprightness, §5
 // membership-is-geometry).
 type Emit struct {
 	// Kind is the kind tail of the subject; the dispatcher prepends the
 	// scope per the subject grammar (§2 handler desugar).
-	Kind     string
-	Terminal bool
-	Payload  json.RawMessage
+	Kind    string
+	Payload json.RawMessage
 }

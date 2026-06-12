@@ -76,6 +76,19 @@ Settled rules:
   span, `caused_by[0]` ≡ parent, `caused_by[1:]` ≡ links, session is an
   attribute. `otel?` is stored only to adopt an upstream `traceparent`.
   Metrics are folds over the log, never event fields.
+- **Amendment (2026-06-12, engine/ design session): the `terminal` flag
+  is removed from the envelope.** It was the last sender *opinion* in an
+  envelope of facts. Every job it did dissolves into the other pillars:
+  quiescence is obligation counting (no bit involved); scope rooting
+  needs no work/fact distinction — every firing of a scoped node roots
+  an instance, and an instance opening zero obligations closes instantly
+  (the 18-doc degenerate case); orphan-ness is a property of the
+  *topology* — an emitted kind nobody consumes is a changeset-validation
+  lint, a dispatch that reached zero subscribers is an engine fact on
+  the log for a watcher to judge; a body emitting outside its allowlist
+  (hallucinated tool) is the body's own `.failed`, not an envelope
+  concern. `Terminal ≠ no reaction` (§8) becomes vacuous. The envelope
+  is three parts: subject, trace, payload.
 - **Session resolution**: an adapter emits a session-less ingress event;
   a resolver maps it to a session via the `sys.state.updated.session.binding.*`
   registry (itself a kv fold) and emits the scoped `request.received`.

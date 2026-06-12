@@ -40,6 +40,6 @@ func reaction(name string, fn Func) engine.Reaction {
 			p, _ := json.Marshal(map[string]string{"error": err.Error()})
 			return []engine.Emit{{Kind: "tool." + name + ".failed", Payload: p}}, nil
 		}
-		return []engine.Emit{{Kind: "tool." + name + ".result", Terminal: true, Payload: out}}, nil
+		return []engine.Emit{{Kind: "tool." + name + ".result", Payload: out}}, nil
 	})
 }

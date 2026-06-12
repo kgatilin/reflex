@@ -28,10 +28,11 @@ type Node struct {
 	// concern, not a dispatch decision (§A.4).
 	Emits []string
 
-	// Scope, when non-empty, makes this a scope-rooting node (§5): a
-	// firing that emits work (≥1 non-terminal Emit) roots an instance of
-	// the named scope; emitting only facts roots nothing. Closure is
-	// announced as scope.{Scope}.closed, exactly once per instance (G6).
+	// Scope, when non-empty, makes this a scope-rooting node (§5): every
+	// firing roots an instance of the named scope. An instance whose
+	// emissions open zero obligations closes instantly — the degenerate
+	// case is the algebra, not a special case. Closure is announced as
+	// scope.{Scope}.closed, exactly once per instance (G6).
 	Scope string
 
 	Body Reaction
