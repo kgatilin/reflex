@@ -74,7 +74,14 @@ lanes) — and it calibrates the task size the agent can carry.
   > ./pkg/provider, go.vet.
 - **Task 1b — OpenAI-compatible adapter** (Model Garden: Llama, DeepSeek,
   Qwen) under keys like `vertex:deepseek`; same shape, Vertex's
-  OpenAI-compatible endpoint, ADC.
+  OpenAI-compatible endpoint, ADC. **Done — the first agent-built code**
+  (2026-06-12): `pkg/provider/maas_vertex.go` + tests, written by the
+  agent in one request (21 turns, $0.26, see cost log), accepted after
+  operator review with zero corrections. Keys `vertex:meta`,
+  `vertex:deepseek-ai`, `vertex:qwen`; dotted tool names transcoded via
+  the shared `WireToolName` helpers. Live probe: the project serves
+  `deepseek-ai/deepseek-r1-0528-maas` in `us-central1` (the doc-22 R1
+  no-tools seat is wirable today); Llama and Qwen are not enabled.
 - **Adopt:** nothing in the topology changes yet; the adapters are
   inventory for iterations 3+ (cheap lanes, R1 no-tools seats).
 
@@ -157,6 +164,7 @@ accepted/rejected + commit)
 | date | task | model | turns | in tok | out tok | $ | verdict |
 |---|---|---|---|---|---|---|---|
 | 2026-06-12 | smoke: locate factory registry (read-only) | vertex:gemini-3.5-flash | 10 | 101,813 | 357 | $0.032 | accepted — first live run; answer exact, incl. fresh gemini_vertex.go |
+| 2026-06-12 | task 1b: MaaS OpenAI-compat adapter + tests | vertex:gemini-3.5-flash | 21 | 828,469 | 4,939 | $0.264 | accepted — first agent-built code, zero corrections; build/test/vet green independently re-run |
 
 ## Open questions carried from doc 22
 
