@@ -42,7 +42,11 @@
 #   - loop cap on the brain instead of a request-scope budget (doc 16)
 
 settings:
-  max_steps: 512
+  # One llm turn costs ~10 dispatched events through the pump topology, so
+  # 512 silently killed task 2.1 attempt 4 at turn 54 — a third silent-death
+  # mode (drain abort with no terminal event in the fold). Sized for the
+  # 96-turn brain cap with headroom; doc-16 budgets will make this per-scope.
+  max_steps: 4096
 
 handlers:
   # ── kickoff ────────────────────────────────────────────────────────────
