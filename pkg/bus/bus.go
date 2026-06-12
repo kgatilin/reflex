@@ -466,6 +466,7 @@ func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 	// the drain so we can emit DrainQuiesced for each at the end.
 	requestsSeen := []string{}
 	seenSet := map[string]bool{}
+	obl := map[string]int{}
 
 	for len(queue) > 0 {
 		if err := ctx.Err(); err != nil {
@@ -495,10 +496,20 @@ func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 		// Snapshot once per dispatch step so concurrent Register from
 		// remote-handler connections doesn't race with the fan-out loop.
 		subsSnap := b.snapshotSubscribers()
+		var matchingSubs []Subscriber
 		for _, sub := range subsSnap {
-			if !sub.Match(ev) {
-				continue
+			if sub.Match(ev) {
+				matchingSubs = append(matchingSubs, sub)
 			}
+		}
+		N := len(matchingSubs)
+		obl[ev.RequestID] += N
+
+		if N == 0 && !ev.Terminal && obl[ev.RequestID] == 0 {
+			b.emitScopeQuiesced(ev)
+		}
+
+		for _, sub := range matchingSubs {
 
 			// Loop cap enforcement happens BEFORE the React call.
 			if cap, capped := b.loopCaps[sub.Name()]; capped {
@@ -555,6 +566,10 @@ func (b *Bus) Run(ctx context.Context, seed event.Event) error {
 				ne.TS = b.clock()
 				b.store.Append(ne)
 				queue = append(queue, ne)
+			}
+			obl[ev.RequestID] -= 1
+			if obl[ev.RequestID] == 0 {
+				b.emitScopeQuiesced(ev)
 			}
 		}
 
@@ -629,6 +644,22 @@ func (b *Bus) emitDrainQuiesced(requestID string) {
 		RequestID: requestID,
 		TS:        b.clock(),
 		Source:    "bus",
+		Terminal:  true,
+		Payload:   payload,
+	}
+	b.store.Append(ne)
+}
+
+// emitScopeQuiesced records that a scope has quiesced.
+func (b *Bus) emitScopeQuiesced(trigger event.Event) {
+	payload := []byte(fmt.Sprintf(`{"request_id":%q}`, trigger.RequestID))
+	ne := event.Event{
+		ID:        uuid.NewString(),
+		Type:      projection.TypeScopeQuiesced,
+		RequestID: trigger.RequestID,
+		TS:        b.clock(),
+		Source:    "bus",
+		CausedBy:  trigger.ID,
 		Terminal:  true,
 		Payload:   payload,
 	}

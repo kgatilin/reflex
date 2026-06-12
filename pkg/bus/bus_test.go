@@ -34,7 +34,7 @@ func nonMeta(snap []event.Event) []string {
 	out := []string{}
 	for _, e := range snap {
 		switch e.Type {
-		case EventDispatchedType, DrainQuiescedType, HandlerFailedType:
+		case EventDispatchedType, DrainQuiescedType, HandlerFailedType, "scope.quiesced":
 			continue
 		}
 		out = append(out, e.Type)
@@ -116,5 +116,122 @@ func TestDispatcherMaxStepsAborts(t *testing.T) {
 	err := b.Run(context.Background(), event.Event{Type: "X", RequestID: "r"})
 	if err == nil || !strings.Contains(err.Error(), "max steps") {
 		t.Fatalf("expected max steps error, got %v", err)
+	}
+}
+
+func TestQuiescenceOneSubscriberEmitsOneWithNoSubscribers(t *testing.T) {
+	store := event.NewStore()
+	b := New(store)
+	sub := &recordingSub{
+		name:    "A",
+		matches: "SeedEvent",
+		emit: []event.Event{
+			{Type: "ChildEvent"},
+		},
+	}
+	b.Register(sub)
+
+	err := b.Run(context.Background(), event.Event{Type: "SeedEvent", RequestID: "r-test1"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Check store for scope.quiesced event
+	var foundQuiesced bool
+	for _, ev := range store.Snapshot() {
+		if ev.Type == "scope.quiesced" {
+			if ev.RequestID != "r-test1" {
+				t.Errorf("expected request_id r-test1, got %q", ev.RequestID)
+			}
+			foundQuiesced = true
+		}
+	}
+	if !foundQuiesced {
+		t.Error("expected to find scope.quiesced event in store")
+	}
+}
+
+func TestQuiescenceTwoSubscribersEmittingTerminal(t *testing.T) {
+	store := event.NewStore()
+	b := New(store)
+	sub1 := &recordingSub{
+		name:    "A",
+		matches: "SeedEvent",
+		emit: []event.Event{
+			{Type: "Term1", Terminal: true},
+		},
+	}
+	sub2 := &recordingSub{
+		name:    "B",
+		matches: "SeedEvent",
+		emit: []event.Event{
+			{Type: "Term2", Terminal: true},
+		},
+	}
+	b.Register(sub1)
+	b.Register(sub2)
+
+	err := b.Run(context.Background(), event.Event{Type: "SeedEvent", RequestID: "r-test2"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Verify scope.quiesced is present
+	var quiescedEvs []event.Event
+	for _, ev := range store.Snapshot() {
+		if ev.Type == "scope.quiesced" {
+			quiescedEvs = append(quiescedEvs, ev)
+		}
+	}
+	if len(quiescedEvs) != 1 {
+		t.Fatalf("expected exactly 1 scope.quiesced event, got %d", len(quiescedEvs))
+	}
+	if quiescedEvs[0].RequestID != "r-test2" {
+		t.Errorf("expected request_id r-test2, got %q", quiescedEvs[0].RequestID)
+	}
+
+	// Also assert that scope.quiesced is emitted AFTER both Term1 and Term2 are in the store
+	var term1Idx, term2Idx, quiescedIdx int = -1, -1, -1
+	for i, ev := range store.Snapshot() {
+		if ev.Type == "Term1" {
+			term1Idx = i
+		}
+		if ev.Type == "Term2" {
+			term2Idx = i
+		}
+		if ev.Type == "scope.quiesced" {
+			quiescedIdx = i
+		}
+	}
+	if term1Idx == -1 || term2Idx == -1 || quiescedIdx == -1 {
+		t.Fatalf("missing events: Term1=%d, Term2=%d, quiesced=%d", term1Idx, term2Idx, quiescedIdx)
+	}
+	if quiescedIdx < term1Idx || quiescedIdx < term2Idx {
+		t.Errorf("expected scope.quiesced to be appended after both Term1 and Term2, got indices: Term1=%d, Term2=%d, quiesced=%d", term1Idx, term2Idx, quiescedIdx)
+	}
+}
+
+func TestQuiescenceNonTerminalSeedZeroSubscribers(t *testing.T) {
+	store := event.NewStore()
+	b := New(store)
+
+	// Zero subscribers registered
+
+	err := b.Run(context.Background(), event.Event{Type: "SeedEvent", RequestID: "r-test3"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var quiescedEvs []event.Event
+	for _, ev := range store.Snapshot() {
+		if ev.Type == "scope.quiesced" {
+			quiescedEvs = append(quiescedEvs, ev)
+		}
+	}
+	if len(quiescedEvs) != 1 {
+		t.Fatalf("expected exactly 1 scope.quiesced event for orphan seed, got %d", len(quiescedEvs))
+	}
+	if quiescedEvs[0].RequestID != "r-test3" {
+		t.Errorf("expected request_id r-test3, got %q", quiescedEvs[0].RequestID)
 	}
 }

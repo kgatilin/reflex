@@ -78,6 +78,7 @@ func TestEndToEndCalcScenario(t *testing.T) {
 		switch e.Type {
 		case projection.TypeEventDispatched,
 			projection.TypeDrainQuiesced,
+				projection.TypeScopeQuiesced,
 			projection.TypeHandlerFailed:
 			continue
 		}
