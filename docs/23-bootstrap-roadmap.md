@@ -166,6 +166,10 @@ accepted/rejected + commit)
 | 2026-06-12 | smoke: locate factory registry (read-only) | vertex:gemini-3.5-flash | 10 | 101,813 | 357 | $0.032 | accepted — first live run; answer exact, incl. fresh gemini_vertex.go |
 | 2026-06-12 | task 1b: MaaS OpenAI-compat adapter + tests | vertex:gemini-3.5-flash | 21 | 828,469 | 4,939 | $0.264 | accepted — first agent-built code, zero corrections; build/test/vet green independently re-run |
 | 2026-06-12 | task 2.1 attempt 1: obligation counter in bus | vertex:gemini-3.5-flash | 48 | 2,655,494 | 5,189 | $0.881 | rejected — loop cap hit; turns eaten by mandated doc reads at one call/turn; kept the 1-line partial (TypeScopeQuiesced). Lessons: cap 48→96, spec inline instead of doc reads |
+| 2026-06-12 | task 2.1 attempts 2–3 | vertex:gemini-3.5-flash | 4+4 | ~32k | ~110 | ~$0.02 | both died silently at turn 4 — root cause: gemini decoder passed thought parts as text (kernel repair d70663f); also exposed the missing flight recorder |
+| 2026-06-12 | task 2.1 attempt 4: counter lands | vertex:gemini-3.5-flash | 54 | 2,771,309 | 11,333 | $0.954 | partial accept — counter +29 lines correct sans decrement; drain killed silently by max_steps 512 (raised to 4096) |
+| 2026-06-12 | task 2.1 attempt 5: tests | vertex:gemini-3.5-flash | ~61 | — | — | ~$1 (est., log wiped) | rejected — wrote 3 good tests but spun 30 turns failing to see the missing decrement; operator interrupted |
+| 2026-06-12 | task 2.1 attempt 6 + e2e tail | vertex:gemini-3.5-flash | 19+7 | 306,338 | 1,718 | $0.098 | **accepted** — surgical prompts (exact bug, exact place): decrement landed, 3 quiescence tests + e2e filter green across ./... |
 
 ## Open questions carried from doc 22
 
