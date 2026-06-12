@@ -5,12 +5,16 @@ reflex — an event-sourced agent runtime in which every component (handlers,
 control plane, audit, analysis, permissions, human feedback) lives as a
 subscriber on a single bus, with no synchronous primitives.
 
-Start with [`01-mental-model.md`](./01-mental-model.md). For a one-page
-cheat sheet of the settled model (envelope, subjects, event catalog, node
-types) see [`00-reference.md`](./00-reference.md). If you just want to drive
-reflex from another application, jump to
+**Start with [`24-concept.md`](./24-concept.md)** — the consolidated
+concept document: every settled decision and every open question, with
+the legacy→converged supersession table. The per-topic documents below
+are the "why" behind each section. For a one-page cheat sheet of the
+legacy-era model see [`00-reference.md`](./00-reference.md) (partially
+superseded; its own warning applies). If you just want to drive reflex
+from another application, jump to
 [`09-embedding-api.md`](./09-embedding-api.md). For phase status, see
-[`10-phase-roadmap.md`](./10-phase-roadmap.md).
+[`10-phase-roadmap.md`](./10-phase-roadmap.md); for the live bootstrap
+queue, [`23-bootstrap-roadmap.md`](./23-bootstrap-roadmap.md).
 
 ## Recommended reading order
 
@@ -103,6 +107,12 @@ reflex from another application, jump to
     adapters → scopes/obligations → projections → changesets → onward),
     and the cost tracking/optimisation protocol (`llm.usage` →
     `reflex costs`, the lever order, the per-task cost log).
+24. [`24-concept.md`](./24-concept.md) *(consolidation)* —
+    the single normative index: the settled model (three concepts, the
+    envelope, two primitives, the engine and its guarantees, projections,
+    changesets, conventions, the coding-agent/bootstrap stance, the
+    legacy→converged supersession table) and the open questions (ranked
+    design gaps, recorded leans, explicit deferrals).
 
 ## Convention
 

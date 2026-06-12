@@ -8,6 +8,11 @@ naming. Each section is the *what*; the design docs are the *why*
 coding-agent target). Where a name is mid-migration the legacy form is noted as
 `(was X)`.
 
+> ⚠ **Partially superseded.** The consolidated settled-vs-open picture now
+> lives in [24-concept.md](./24-concept.md); this page's node section
+> predates the two-primitive reduction (see the warning below). Read 24
+> first; use this page only for the envelope/subject tables, which stand.
+
 Events do not float free: every kind is the **emit of some node and the consume
 of another** — the graph is the subscription table. So the catalog is organised
 by node, not as a flat list.
