@@ -14,12 +14,14 @@
 
 | Piece | Where | State |
 |---|---|---|
-| Engine contracts (skeleton): `Event`/`Trace`/`Emit`, `Reaction`/`Views`/`KV`, `Decl` (`Node`/`Scope`/`Projection`), `tool.Node` | `engine/`, `nodes/` | defined; `llm.New` still panics |
+| Engine contracts: `Event`/`Trace`/`Emit`, `Reaction`/`Views`/`KV`, `Decl` (`Node`/`Scope`/`Projection`/`EventKind`), `tool.Node`, `llm` | `engine/`, `nodes/` | **done** (llm body shipped, stage 3) |
 | **Step 1 — connectivity validation** (doc 27 §7) | `engine/` + ArchMotif `pkg/graphval` | **done, verified** |
 | **Stage 2a — `Append` + `Drain` to quiescence** (deterministic) | `engine/` | **done, verified** |
 | **Stage 2b — scope instances, obligation counting, `scope.closed`, budget cap** (docs 24 §5 / 26 §3d/§3f) | `engine/scope.go` + `engine/engine.go` + `validate.go` | **done, verified** (`306fc6e`); co-rooting reject (`47dcf3d`) |
 | **Stage 2c — projection evaluation (backward-walk views) + per-scope state + closure carries snapshot** (docs 26 §2a / 24 §6) | `engine/projection.go` + `engine.go` + `scope.go` | **done, verified** (`e8f5c55`); also fixed a latent multi-ingress drain defect (frontier → per-index dispatched) |
 | **Stage 2d — event catalog (`kind → schema`) self-hosted over `event.registered`; unknown-kind / dead-subscription / payload-conformance checks** (doc 26 §4a) | `engine/catalog.go` + `topology.go` + `validate.go` + `engine.go` | **done, verified** (`2fdee6e`); catalog opt-in-until-adopted |
+| **Stage 3a — open the projection view type** (`Shape`→`Type` registry; `RegisterType`/`Views.Value`/`ViewAs[T]`; validate unknown-type & dangling-reads) (doc 26 §4b) | `engine/topology.go` + `projection.go` + `reaction.go` + `subject.go` + `validate.go` | **done, verified** (`fd794d3`); `KindOf`/`MatchKind` exported for builders |
+| **Stage 3b — `llm.history` view type (positional system/message split) + `llm` body (provider call → allowlisted emits + `llm.usage`)** (doc 26 §4/§4b) | `nodes/llm/llm.go` (+ history/run tests) | **done, verified** (`8b04898`); a doc-27-style run reconciles `new→…→task.answered`, scope closed once, usage per seat, on a stub provider (`-race`) |
 
 **Step 1 detail.** `engine.Validate(decls...) → Report{Connected, DeadEnds,
 UnreachableNodes, Fragments, UnboundedCycles, Suggestions}`; `Apply` routes
@@ -146,7 +148,7 @@ The doc-24 §5 / doc-26 runtime.
 - **Proves**: the type axis is self-hosted (Event + Projection, one seed),
   and the `llm` body can advertise `Emits` + schema with no "tool" concept.
 
-### Stage 3 — `llm` body + run the reconciler
+### Stage 3 — `llm` body + run the reconciler — **DONE** (`fd794d3`, `8b04898`)
 
 - **Prerequisite — the event catalog** ([26 §4a](./26-bare-substrate.md), built
   in Stage 2d): an `llm` body advertises to the model *its `Emits` allowlist,
@@ -221,6 +223,23 @@ The doc-24 §5 / doc-26 runtime.
   tool_result block pairing): tool results flatten into user text. Fine for the
   stub run; proper tool-calling needs a richer `provider.Message` (provider
   layer, not engine).
+- **Ingress-root detection vs dispatch match diverge** (found wiring the stage-3
+  run): the validator marks a node an ingress root only if its `On` contains
+  `app.ingress.*`/`.>` (`isIngressRoot`), but the dispatcher matches `On`
+  against the **kind tail** (`cli.task` for `app.ingress.cli.task`), so an
+  ingress pattern that satisfies the validator does NOT actually dispatch. The
+  stage-3 run works around it by giving the resolver BOTH patterns
+  (`["app.ingress.*", "cli.task"]`). Reconcile: either dispatch matches ingress
+  `On` against the full subject, or `isIngressRoot` keys off the ingress
+  *class* of the appended subject, not the `On` pattern.
+- **Tool schemas not yet wired into the llm body**: tools are advertised by
+  name only (`provider.ToolSchema{Name}`), schema empty — the catalog→tool-param
+  schema wiring (a catalog kv-view the body reads) is deferred; the stub ignores
+  schemas. Couple to the LLM-tool-compatible subset (above) when adding a real
+  provider.
+- **`historyParams.Answer` is carried but unused by the builder** (role is by
+  Emits-membership); kept for a future richer role model (e.g. source-based
+  perspective for multi-agent cones).
 - `pkg/graphval` vs `graph` naming (chose `graphval` — ArchMotif already
   has `internal/graph`); reflex-side import could alias to `graph` if
   preferred.
