@@ -9,18 +9,30 @@ package engine
 //   - Tool nodes subscribe to tool.{name}.> so a single fs node consumes both
 //     tool.fs.read.call and tool.fs.search.call (the subcalls understand/gather
 //     emit), matching "fs (tool) on: tool.X.call" with the real subject space.
-//   - The two loops carry a deterministic *-guard subscribed to the same
-//     re-trigger edges (doc 27 §3 "*-guard (deterministic)"): this is the node
-//     that makes the work SCC bounded.
+//   - The work region is one cyclic SCC (gather/plan/execute loop through the
+//     tools). Termination is a scope property, not a node property (doc 24 §5
+//     "loops are budgets"): the "request" scope carries a Budget bounding the
+//     per-kind tool-call count within the cone, and every node in the SCC sits
+//     within it, so the validator reports no unbounded cycle.
 //   - State-field updates (state.updated.*) are consumed by projections, not
 //     by node subscriptions — folding a fact into a view IS consuming it, so
 //     they are not dead-ends.
 func exampleTopology() []Decl {
 	return []Decl{
+		// request scope: rooted by request.received (resolver), Budget bounds the
+		// loop kinds within the cone so the work SCC terminates (doc 24 §5).
+		Scope{
+			Name: "request",
+			Root: "request.received",
+			Budget: map[string]int{
+				"tool.fs.read.call":      32,
+				"tool.fs.search.call":    32,
+				"tool.gotool.build.call": 32,
+			},
+		},
 		// resolver: ingress → request.received (roots the request scope).
 		Node{
 			Name:  "resolver",
-			Kind:  KindDeterministic,
 			On:    []string{"app.ingress.*"},
 			In:    "global",
 			Emits: []string{"request.received"},
@@ -30,7 +42,6 @@ func exampleTopology() []Decl {
 		// first read/search tool calls.
 		Node{
 			Name: "understand",
-			Kind: KindLLM,
 			On:   []string{"request.received"},
 			In:   "request",
 			Emits: []string{
@@ -44,7 +55,6 @@ func exampleTopology() []Decl {
 		// plan.requested / task.needs_clarification.
 		Node{
 			Name: "gather",
-			Kind: KindLLM,
 			On: []string{
 				"tool.fs.read.result",
 				"tool.fs.search.result",
@@ -61,11 +71,11 @@ func exampleTopology() []Decl {
 				"task.needs_clarification",
 			},
 		},
-		// gather-guard (deterministic): same re-trigger edges; forces the exit
-		// (plan.requested) at budget. The deterministic node in the work SCC.
+		// gather-guard: an extra consumer on the re-trigger edges that can emit
+		// the exit (plan.requested). It is an ordinary SCC member; the loop is
+		// bounded by the request scope's budget, not by this node (doc 24 §5).
 		Node{
 			Name: "gather-guard",
-			Kind: KindDeterministic,
 			On: []string{
 				"tool.fs.read.result",
 				"tool.fs.search.result",
@@ -76,7 +86,6 @@ func exampleTopology() []Decl {
 		// plan (llm): writes the plan and flips status to executing.
 		Node{
 			Name: "plan",
-			Kind: KindLLM,
 			On:   []string{"plan.requested"},
 			In:   "request",
 			Emits: []string{
@@ -88,7 +97,6 @@ func exampleTopology() []Decl {
 		// the plan is complete.
 		Node{
 			Name: "execute",
-			Kind: KindLLM,
 			On: []string{
 				"state.updated.plan",
 				"tool.gotool.build.result",
@@ -105,20 +113,20 @@ func exampleTopology() []Decl {
 				"task.answered",
 			},
 		},
-		// execute-guard (deterministic): forces task.answered at budget.
+		// execute-guard: an extra consumer that can emit task.answered. Like
+		// gather-guard, it is a plain SCC member; the budget bounds the loop.
 		Node{
 			Name:  "execute-guard",
-			Kind:  KindDeterministic,
 			On:    []string{"tool.gotool.build.result"},
 			In:    "request",
 			Emits: []string{"task.answered"},
 		},
-		// fs (tool): tool.fs.* island.
+		// fs (tool): tool.fs.* island. In the request scope so it is inside the
+		// budgeted cone that bounds the work SCC (doc 24 §5).
 		Node{
 			Name: "fs",
-			Kind: KindTool,
 			On:   []string{"tool.fs.>"},
-			In:   "global",
+			In:   "request",
 			Emits: []string{
 				"tool.fs.read.result",
 				"tool.fs.search.result",
@@ -126,12 +134,12 @@ func exampleTopology() []Decl {
 				"tool.fs.search.failed",
 			},
 		},
-		// gotool (tool): tool.gotool.* island.
+		// gotool (tool): tool.gotool.* island. In the request scope for the same
+		// reason as fs — inside the budgeted cone (doc 24 §5).
 		Node{
 			Name: "gotool",
-			Kind: KindTool,
 			On:   []string{"tool.gotool.>"},
-			In:   "global",
+			In:   "request",
 			Emits: []string{
 				"tool.gotool.build.result",
 				"tool.gotool.build.failed",
@@ -141,7 +149,6 @@ func exampleTopology() []Decl {
 		// user. Emits nothing — a legitimate sink, not a dead-end.
 		Node{
 			Name: "notify",
-			Kind: KindDeterministic,
 			On: []string{
 				"task.answered",
 				"task.needs_clarification",

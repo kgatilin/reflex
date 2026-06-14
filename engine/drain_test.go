@@ -14,7 +14,6 @@ import (
 func toolNoop() Node {
 	return Node{
 		Name:  "noop",
-		Kind:  KindTool,
 		On:    []string{"tool.noop.call"},
 		Emits: []string{"tool.noop.result", "tool.noop.failed"},
 		Body: ReactionFunc(func(_ context.Context, _ Event, _ Views) ([]Emit, error) {

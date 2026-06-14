@@ -17,9 +17,9 @@ var ingressPatterns = []string{
 	"app.ingress.>",
 }
 
-// nodeKind tags the kind attribute carried on graph nodes; the SCC-guard
-// predicate reads it back.
-const attrKind = "kind"
+// attrBudgeted tags whether a graph node sits within a budgeted scope; the
+// unbounded-cycle check reads it back per node ("true"/"false").
+const attrBudgeted = "budgeted"
 
 // Report is the connectivity validator's structured output (doc 27 §5). It is
 // the read-only result of folding a subscriber list into a graph and checking
@@ -44,9 +44,11 @@ type Report struct {
 	// "unreachable node" — and its grouping — "disconnected fragment".)
 	Fragments []string
 
-	// UnboundedCycles are non-trivial SCCs (by node name) that contain no
-	// deterministic guard node (doc 26 §3a): a real cycle with nothing in it
-	// to force an exit. Each inner slice is one SCC.
+	// UnboundedCycles are non-trivial SCCs (by node name) not covered by a
+	// budgeted scope (doc 24 §5 "loops are budgets"): a real cycle with no
+	// scope budget to bound the count of a kind within its cone, so nothing
+	// forces an exit. Termination is a scope property, not a node property.
+	// Each inner slice is one SCC.
 	UnboundedCycles [][]string
 
 	// Suggestions are human-readable bridge proposals (doc 27 §1/§5), e.g.
@@ -66,14 +68,19 @@ func Validate(decls ...Decl) (Report, error) {
 	consumers := foldConsumers(decls, nodes)
 
 	// Build the node graph (doc 27 §4): one graphval node per reaction node,
-	// carrying its kind and an ingress-root marker; a directed edge X→Y iff a
-	// kind X emits is matched by a pattern Y subscribes to.
+	// carrying a "budgeted" marker (is its scope budget-bounded?); a directed
+	// edge X→Y iff a kind X emits is matched by a pattern Y subscribes to.
+	budgeted := budgetedScopes(decls)
 	gvNodes := make([]graphval.Node, 0, len(nodes))
 	for _, n := range nodes {
+		mark := "false"
+		if _, ok := budgeted[n.In]; ok {
+			mark = "true"
+		}
 		gvNodes = append(gvNodes, graphval.Node{
 			Name: n.Name,
 			Attrs: map[string]string{
-				attrKind: string(n.Kind.orDefault()),
+				attrBudgeted: mark,
 			},
 		})
 	}
@@ -265,21 +272,53 @@ func unreachable(g *graphval.Graph, nodes []Node, roots []string) []string {
 	return out
 }
 
-// unboundedCycles returns the non-trivial SCCs that lack a deterministic guard
-// (doc 27 §5, doc 26 §3a). It intersects NonTrivialSCCsAsNames with
-// SCCsMissingAttrAsNames(pred) where pred = "the SCC contains a node with
-// kind == deterministic"; SCCsMissingAttr already returns the non-trivial SCCs
-// failing the predicate, so it IS the intersection.
+// unboundedCycles returns the non-trivial SCCs not covered by a budgeted scope
+// (doc 24 §5 "loops are budgets"): termination is a scope property, not a node
+// property. A cycle terminates because a scope budget bounds the count of a
+// kind within its cone; determinism of a node never gave termination (two
+// deterministic nodes A: on Y → emit X and B: on X → emit Y ping-pong
+// X→Y→X… forever). So the basis is scope-budget coverage, not node kind.
 //
-// TODO(doc 26 §3a): this enforces only the "a deterministic guard is present"
-// half of the guard check. The "monotone exit" half — that the guard actually
-// drives a budget/counter monotonically toward an exit edge — is not yet
-// enforced; a deterministic node in the cycle is currently accepted on faith.
+// It walks NonTrivialSCCsAsNames and reports each SCC that contains any node
+// whose "budgeted" attr is "false" — i.e. a node outside every budgeted scope.
+// graphval's SCCsMissingAttr has the wrong orientation here (it returns SCCs
+// where NO node satisfies a predicate, an all-fail test; this is an any-fail
+// test), so the per-node budgeted lookup is folded reflex-side over the SCCs.
+//
+// APPROXIMATION (refinement TODO, doc 24 §5): the precise rule is that the
+// budget must bound a kind that actually appears on the cycle's edges. Step 1
+// approximates that with the coarser "every cycle node is within a budgeted
+// scope" — a node in a budgeted scope whose budget bounds an unrelated kind is
+// still treated as bounded here. Tightening this to match the cycle's edge
+// kinds against the scope's Budget keys is left as future work.
 func unboundedCycles(g *graphval.Graph) [][]string {
-	pred := func(attrs map[string]string) bool {
-		return attrs[attrKind] == string(KindDeterministic)
+	var out [][]string
+	for _, scc := range g.NonTrivialSCCsAsNames() {
+		for _, name := range scc {
+			i, ok := g.Index(name)
+			if !ok {
+				continue
+			}
+			if g.Attrs(i)[attrBudgeted] != "true" {
+				out = append(out, scc)
+				break
+			}
+		}
 	}
-	return g.SCCsMissingAttrAsNames(pred)
+	return out
+}
+
+// budgetedScopes collects the names of declared Scopes carrying a non-empty
+// Budget (doc 24 §5): the scopes that actually bound a per-kind count within a
+// cone. A node is "bounded" iff its (defaulted) In names one of these.
+func budgetedScopes(decls []Decl) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, d := range decls {
+		if s, ok := d.(Scope); ok && len(s.Budget) > 0 {
+			out[s.Name] = struct{}{}
+		}
+	}
+	return out
 }
 
 // suggestions renders human-readable bridge proposals for the gaps (doc 27
@@ -299,7 +338,7 @@ func suggestions(rep Report) []string {
 	}
 	for _, scc := range rep.UnboundedCycles {
 		out = append(out, fmt.Sprintf(
-			"cycle %v is unbounded — add a deterministic guard node inside it with a monotone exit (doc 26 §3a)",
+			"cycle %v is unbounded — declare a budgeted scope covering its nodes so a budget bounds the loop (doc 24 §5)",
 			scc))
 	}
 	return out

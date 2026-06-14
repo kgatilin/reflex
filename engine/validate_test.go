@@ -50,28 +50,27 @@ func TestValidate_RemovingNotifyMakesTaskAnsweredADeadEnd(t *testing.T) {
 	}
 }
 
-func TestValidate_LLMOnlyCycleIsUnbounded(t *testing.T) {
-	// An ingress root reaches a two-node llm↔llm loop with no deterministic
-	// guard: the SCC {a,b} is a real cycle with nothing to force an exit, so it
-	// must be reported as unbounded (doc 26 §3a / doc 27 §5).
+func TestValidate_UnbudgetedCycleIsUnbounded(t *testing.T) {
+	// An ingress root reaches a two-node loop whose nodes sit in a scope with no
+	// declared budget (here "request", which no Scope budgets): the SCC {a,b} is
+	// a real cycle with no scope budget to force an exit, so it must be reported
+	// as unbounded (doc 24 §5 "loops are budgets"). Node determinism is
+	// irrelevant — termination is a scope property, not a node property.
 	decls := []Decl{
 		Node{
 			Name:  "in",
-			Kind:  KindDeterministic,
 			On:    []string{"app.ingress.*"},
 			In:    "global",
 			Emits: []string{"kind.a"},
 		},
 		Node{
 			Name:  "a",
-			Kind:  KindLLM,
 			On:    []string{"kind.a", "kind.b"},
 			In:    "request",
 			Emits: []string{"kind.b"},
 		},
 		Node{
 			Name:  "b",
-			Kind:  KindLLM,
 			On:    []string{"kind.b"},
 			In:    "request",
 			Emits: []string{"kind.a"},
@@ -83,7 +82,7 @@ func TestValidate_LLMOnlyCycleIsUnbounded(t *testing.T) {
 		t.Fatalf("Validate: %v", err)
 	}
 	if len(rep.UnboundedCycles) == 0 {
-		t.Fatal("expected an unbounded cycle for the llm↔llm loop")
+		t.Fatal("expected an unbounded cycle for the unbudgeted loop")
 	}
 	found := false
 	for _, scc := range rep.UnboundedCycles {
@@ -99,25 +98,24 @@ func TestValidate_LLMOnlyCycleIsUnbounded(t *testing.T) {
 	}
 }
 
-func TestValidate_DeterministicGuardBoundsTheCycle(t *testing.T) {
-	// Same loop, but add a deterministic guard inside the SCC: now it is bounded
-	// and not reported.
+func TestValidate_BudgetedScopeBoundsTheCycle(t *testing.T) {
+	// Same loop, but declare a budgeted scope "loop" covering the cycle nodes:
+	// the scope budget bounds a kind's count within the cone, so the SCC is
+	// bounded and not reported (doc 24 §5 "loops are budgets").
 	decls := []Decl{
-		Node{Name: "in", Kind: KindDeterministic, On: []string{"app.ingress.*"}, In: "global", Emits: []string{"kind.a"}},
-		Node{Name: "a", Kind: KindLLM, On: []string{"kind.a", "kind.b"}, In: "request", Emits: []string{"kind.b"}},
-		Node{Name: "b", Kind: KindLLM, On: []string{"kind.b"}, In: "request", Emits: []string{"kind.a", "kind.done"}},
-		// guard sits in the SCC: consumes kind.b, re-emits kind.a (the loop
-		// edge), so it is mutually reachable with a and b.
-		Node{Name: "guard", Kind: KindDeterministic, On: []string{"kind.b"}, In: "request", Emits: []string{"kind.a"}},
+		Scope{Name: "loop", Root: "kind.a", Budget: map[string]int{"kind.a": 8}},
+		Node{Name: "in", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"kind.a"}},
+		Node{Name: "a", On: []string{"kind.a", "kind.b"}, In: "loop", Emits: []string{"kind.b"}},
+		Node{Name: "b", On: []string{"kind.b"}, In: "loop", Emits: []string{"kind.a", "kind.done"}},
 		// done is consumed so it is not a dead-end.
-		Node{Name: "sink", Kind: KindDeterministic, On: []string{"kind.done"}, In: "request"},
+		Node{Name: "sink", On: []string{"kind.done"}, In: "loop"},
 	}
 	rep, err := Validate(decls...)
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 	if len(rep.UnboundedCycles) != 0 {
-		t.Fatalf("expected no unbounded cycles with a deterministic guard; got %v", rep.UnboundedCycles)
+		t.Fatalf("expected no unbounded cycles within a budgeted scope; got %v", rep.UnboundedCycles)
 	}
 }
 
@@ -130,7 +128,7 @@ func TestApply_RoutesThroughValidate(t *testing.T) {
 	// A topology with a dead-end fails Apply with a ValidationError carrying the
 	// Report.
 	bad := []Decl{
-		Node{Name: "in", Kind: KindDeterministic, On: []string{"app.ingress.*"}, In: "global", Emits: []string{"orphan.kind"}},
+		Node{Name: "in", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"orphan.kind"}},
 	}
 	err := e.Apply(context.Background(), bad...)
 	var ve *ValidationError
