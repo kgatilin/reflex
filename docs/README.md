@@ -12,6 +12,7 @@ when an older doc disagrees, `CONCEPT.md` wins.
 | [`26-bare-substrate.md`](./26-bare-substrate.md) | The "why" for the substrate: scope as a projection, termination as a budget, events-not-tools, the catalog, view types. |
 | [`27-state-defined-agent.md`](./27-state-defined-agent.md) | The "why" for the agent: state model → subscriber list → engine-validated connectivity. |
 | [`28-substrate-rebuild-roadmap.md`](./28-substrate-rebuild-roadmap.md) | **LIVE** build tracker — what shipped, what is next. |
+| [`29-swebench-target.md`](./29-swebench-target.md) | **TARGET** — one SWE-bench Lite instance on the new stack: the goal, the agent topology, the framework plan. |
 
 ## History
 

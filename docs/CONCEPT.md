@@ -54,9 +54,12 @@ last sender *opinion* in an envelope of facts):
 - **State paths live in the subject:** `state.updated.goal`,
   `state.updated.plan` — you subscribe to a *field's change*, not to a blob;
   the value is in the payload.
-- **A `Reaction` returns `Emit{Kind, Payload}` only.** The dispatcher stamps the
-  trace and places the scope — a reaction structurally cannot choose its
-  event's scope, ancestry, or accounting.
+- **A `Reaction` returns `[]Emit` — zero, one, or many events.** Each `Emit`
+  carries *only* `{Kind, Payload}`; the dispatcher stamps the trace and places
+  the scope, so a reaction structurally cannot choose an event's scope,
+  ancestry, or accounting. Multiple emits from one firing **fan out into
+  parallel cones** — that *is* the parallelism (the `llm` body emits all its
+  decoded function-calls at once this way).
 - **Errors are events:** a reaction error becomes `{node}.failed` (non-terminal)
   into the cone; the drain continues, nothing unwinds (G3).
 
