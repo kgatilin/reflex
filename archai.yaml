@@ -1,11 +1,21 @@
 # Reflex architecture overlay for Archai.
 #
-# The source model is intentionally small: immutable event/config primitives,
-# runtime graph/bus/handler mechanics, and CLI/embedding adapters.
+# Two strata coexist during the substrate rebuild (docs 24/26/28):
+#   - kernel + nodes: the converged substrate being built (engine/, nodes/).
+#   - domain/runtime/adapters: the legacy shipped packages (pkg/*), retired
+#     incrementally per doc 24 §10.
 
 module: github.com/kgatilin/reflex
 
 layers:
+  # Converged substrate (the rebuild).
+  kernel:
+    - engine
+  nodes:
+    - nodes/llm
+    - nodes/tool
+
+  # Legacy shipped packages (being retired).
   domain:
     - pkg/event
     - pkg/config
@@ -24,11 +34,19 @@ layers:
     - pkg/sdk
 
 layer_rules:
+  kernel: []
+  nodes: [kernel]
   domain: []
   runtime: [domain]
   adapters: [domain, runtime]
 
 aggregates:
+  engine:
+    root: github.com/kgatilin/reflex/engine.Engine
+  llm:
+    root: github.com/kgatilin/reflex/nodes/llm.Config
+  tool:
+    root: github.com/kgatilin/reflex/nodes/tool.Func
   event:
     root: github.com/kgatilin/reflex/pkg/event.Event
   config:
@@ -49,6 +67,18 @@ aggregates:
     root: github.com/kgatilin/reflex/pkg/sdk.Handler
 
 bounded_contexts:
+  kernel:
+    name: Kernel
+    description: The converged substrate — Event/Reaction/Projection primitives and the append/dispatch engine (docs 24/26).
+    aggregates: [engine]
+    downstream: [nodes]
+    relationship: shared-kernel
+  nodes:
+    name: Nodes
+    description: Built-in reaction bodies (llm, tool) over the kernel.
+    aggregates: [llm, tool]
+    upstream: [kernel]
+    relationship: shared-kernel
   domain:
     name: Domain
     description: Event envelope, YAML configuration, and cycle primitives.
