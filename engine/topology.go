@@ -1,10 +1,36 @@
 package engine
 
+import "encoding/json"
+
 // Decl is a managed topology object (doc 20 via §7): nodes,
 // subscriptions (carried on the node), scopes, and projections — the
 // four kinds a changeset may create or remove. Declarations pin at the
 // instance root; interventions on live instances are ordinary events.
+//
+// EventKind is also a Decl, but it is not a fourth wiring-kind: it is the
+// *bootstrap* form of the event catalog's type axis (doc 26 §4a), a static
+// registration of kind→schema that changeset validation can see. The catalog
+// is recomputable from EventKind decls + event.registered facts (G8); the decl
+// is the seed form, the fact is the runtime form (see catalog.go).
 type Decl interface{ isDecl() }
+
+// EventKind registers one catalog entry — a kind paired with its payload
+// schema (doc 26 §4a). It is the static/bootstrap form of catalog population,
+// visible to Validate so the unknown-kind / dead-subscription checks can run
+// over the topology before any event is appended; the runtime form is the
+// event.registered fact folded by the same catalog projection.
+//
+// Schema is JSON Schema as raw bytes, reusing the shape of
+// provider.ToolSchema.InputSchema (doc 26 §4: "the payload IS the event's
+// type"). It may be nil/empty — a registered kind with no declared schema is
+// still a known kind (it makes the kind valid/advertisable), it just imposes
+// no payload-conformance constraint at runtime.
+type EventKind struct {
+	Kind   string
+	Schema json.RawMessage
+}
+
+func (EventKind) isDecl() {}
 
 // Node wires a Reaction into the topology: what it hears, what views it
 // reads, what it may emit, and whether its firings root a scope.

@@ -69,6 +69,19 @@ type Report struct {
 	// slice is sorted.
 	CoRootedScopes [][]string
 
+	// UnknownKinds are kinds in some node's Emits that are absent from the event
+	// catalog (doc 26 §4a / 27 §5): a node declares it produces a kind the type
+	// layer has never registered, so the kind has no schema and is not
+	// advertisable. DORMANT when the catalog is empty (opt-in-until-adopted).
+	// Sorted ascending.
+	UnknownKinds []string
+
+	// DeadSubscriptions are On patterns that match NO catalog kind (doc 26 §4a /
+	// 27 §5): a subscription that can never fire because the type layer carries
+	// no kind it could match. DORMANT when the catalog is empty. Sorted
+	// ascending by pattern.
+	DeadSubscriptions []string
+
 	// Suggestions are human-readable bridge proposals (doc 27 §1/§5), e.g.
 	// "kind X is a dead-end — add an llm node that consumes X …".
 	Suggestions []string
@@ -138,13 +151,33 @@ func Validate(decls ...Decl) (Report, error) {
 	rep.StalledClosures = stalledClosures(decls, nodes)
 	rep.CoRootedScopes = coRootedScopes(decls, nodes)
 
+	// Catalog checks (doc 26 §4a). The catalog is folded from the EventKind decls
+	// alone here — Validate is pure over decls, with no log (dynamic
+	// event.registered facts are folded at runtime, and a changeset that adds
+	// them re-runs Validate against the grown catalog). These two checks are the
+	// STATIC type-layer gates; payload-conformance is runtime (engine.go).
+	//
+	// OPT-IN-UNTIL-ADOPTED (doc 26 §4a, the critical non-breaking rule): the
+	// catalog is a type layer a topology grows into. When NO catalog is declared
+	// (no EventKind decls, no event.registered facts), it is empty and the two
+	// checks are DORMANT — an unadopted catalog must not fail every existing
+	// topology. Only a NON-empty catalog gates Connected. The operator may
+	// tighten this to "always required" later.
+	cat := foldCatalog(decls, nil)
+	if !cat.empty() {
+		rep.UnknownKinds = unknownKinds(nodes, cat)
+		rep.DeadSubscriptions = deadSubscriptions(consumers, cat)
+	}
+
 	rep.Suggestions = suggestions(rep)
 	rep.Connected = len(rep.DeadEnds) == 0 &&
 		len(rep.UnreachableNodes) == 0 &&
 		len(rep.Fragments) == 0 &&
 		len(rep.UnboundedCycles) == 0 &&
 		len(rep.StalledClosures) == 0 &&
-		len(rep.CoRootedScopes) == 0
+		len(rep.CoRootedScopes) == 0 &&
+		len(rep.UnknownKinds) == 0 &&
+		len(rep.DeadSubscriptions) == 0
 
 	// allowlistLint is a runtime check, not a static one: it compares an
 	// observed emit against the node's declared Emits and can only be made on
@@ -264,16 +297,27 @@ func ingressRoots(nodes []Node) []string {
 	return out
 }
 
+// isIngressPattern reports whether a subscription pattern is an ingress-root
+// pattern: it literally is one of the ingress namespace patterns, or it matches
+// a representative ingress subject. Such a pattern subscribes to pre-resolution
+// inbound (doc 27 §3) and is never a dead subscription — its producers are
+// adapters appending ingress events, not topology nodes / catalog kinds.
+func isIngressPattern(pat string) bool {
+	for _, ing := range ingressPatterns {
+		if pat == ing || subjectMatch(pat, "app.ingress.surface") {
+			return true
+		}
+	}
+	return false
+}
+
 func isIngressRoot(n Node) bool {
+	// A node is an ingress root if any subscription matches the ingress namespace
+	// — either by literally carrying an app.ingress.* / .> pattern or by matching
+	// a representative ingress subject.
 	for _, pat := range n.On {
-		for _, ing := range ingressPatterns {
-			// A node is an ingress root if its subscription matches the
-			// ingress namespace — either by literally subscribing under
-			// app.ingress (pat matches a representative ingress subject) or
-			// by carrying an app.ingress.* / .> pattern itself.
-			if pat == ing || subjectMatch(pat, "app.ingress.surface") {
-				return true
-			}
+		if isIngressPattern(pat) {
+			return true
 		}
 	}
 	return false
@@ -534,6 +578,76 @@ func patternsOverlap(a, b string) bool {
 	}
 }
 
+// unknownKinds returns the kinds a node declares in Emits that are absent from
+// the event catalog (doc 26 §4a / 27 §5). A kind not in the catalog has no
+// schema and is not advertisable — the node claims to produce a type the
+// vocabulary has never registered. The engine-emitted scope.{name}.closed
+// kinds are NOT in Emits (they are produced by the engine, not declared), so
+// this check is exactly "declared Emits vs catalog". Called only over a
+// non-empty catalog (opt-in dormancy is the caller's gate). Sorted ascending,
+// de-duplicated across nodes.
+func unknownKinds(nodes []Node, cat catalog) []string {
+	seen := map[string]struct{}{}
+	for _, n := range nodes {
+		for _, k := range n.Emits {
+			if cat.has(k) {
+				continue
+			}
+			seen[k] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// deadSubscriptions returns the On patterns (across nodes and projections) that
+// match NO catalog kind (doc 26 §4a / 27 §5): a subscription that can never
+// fire because the type layer carries no kind it could match. A pattern is a
+// family matcher (subjectMatch over the catalog's concrete kinds); if no
+// catalog kind matches, the subscription is dead. Engine-emitted lifecycle
+// kinds (scope.{name}.closed) are not catalog entries unless registered, so a
+// scope.X.closed subscription is dead under a catalog that omits it — which is
+// correct: a topology that adopts the catalog should register the closure kinds
+// it consumes. Called only over a non-empty catalog. Sorted ascending,
+// de-duplicated across consumers.
+func deadSubscriptions(consumers []consumer, cat catalog) []string {
+	kinds := cat.kinds()
+	seen := map[string]struct{}{}
+	for _, c := range consumers {
+		for _, pat := range c.on {
+			// An ingress-root pattern (app.ingress.*) is NOT dead: it matches
+			// externally-appended ingress events (pre-resolution inbound, doc 27
+			// §3), which are not produced catalog kinds — there is no internal
+			// producer, by design. The reachability check already treats these as
+			// entry points (ingressPatterns / isIngressRoot); the catalog check
+			// must agree, else adopting a catalog would flag every entry point.
+			if isIngressPattern(pat) {
+				continue
+			}
+			matched := false
+			for _, k := range kinds {
+				if subjectMatch(pat, k) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				seen[pat] = struct{}{}
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // budgetedScopes collects the names of declared Scopes carrying a non-empty
 // Budget (doc 24 §5): the scopes that actually bound a per-kind count within a
 // cone. A node is "bounded" iff its (defaulted) In names one of these.
@@ -576,6 +690,16 @@ func suggestions(rep Report) []string {
 		out = append(out, fmt.Sprintf(
 			"scopes %q and %q can root on the same event — a span roots at most one scope; merge them into one scope and put both budgets in its Budget map (doc 24 §5)",
 			pair[0], pair[1]))
+	}
+	for _, k := range rep.UnknownKinds {
+		out = append(out, fmt.Sprintf(
+			"kind %q is emitted but not in the event catalog — register it (an EventKind decl, or emit an \"event.registered\" fact carrying {kind: %q, schema}) or fix the name (doc 26 §4a)",
+			k, k))
+	}
+	for _, pat := range rep.DeadSubscriptions {
+		out = append(out, fmt.Sprintf(
+			"subscription pattern %q matches no catalog kind — it can never fire; fix the pattern or register a producer kind it matches (an EventKind / \"event.registered\", doc 26 §4a)",
+			pat))
 	}
 	return out
 }

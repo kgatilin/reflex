@@ -282,6 +282,28 @@ func (e *Engine) fanOut(ctx context.Context, idx int, cls, scope, kind string, n
 			continue
 		}
 		for _, em := range emits {
+			// Payload-conformance (doc 26 §4a runtime half): this is the ONE place
+			// the engine reads an emit's payload, and only to validate it against
+			// the emit kind's declared catalog schema — it never interprets
+			// meaning. The catalog is re-folded from the log as it stands (decls +
+			// event.registered facts appended so far this drain), so a dynamic
+			// registration earlier in the drain is in scope; folding it here keeps
+			// the engine payload-blind everywhere else and replay-stable (the fold
+			// is deterministic over the log). OPT-IN: a kind not in the catalog is
+			// skipped (the type layer is dormant until adopted, doc 26 §4a). A
+			// non-conforming payload becomes the BODY'S OWN .failed (an event, not a
+			// crash — G3 / doc 26 §4), and the drain continues.
+			if schema, known := e.catalogSchema(em.Kind); known {
+				if err := conforms(em.Payload, schema); err != nil {
+					p, _ := json.Marshal(map[string]string{
+						"error": fmt.Sprintf("payload does not conform to schema for kind %q: %v", em.Kind, err),
+						"kind":  em.Kind,
+					})
+					child := e.appendEmit(ev, cls, Emit{Kind: n.Name + ".failed", Payload: p})
+					e.process(ctx, child, nodes, sr)
+					continue
+				}
+			}
 			child := e.appendEmit(ev, cls, em)
 			e.process(ctx, child, nodes, sr)
 		}
@@ -356,6 +378,18 @@ func (e *Engine) emitScopeFact(ctx context.Context, inst *scopeInstance, reason,
 	}
 	e.log = append(e.log, ev)
 	e.process(ctx, idx, sr.nodes, sr)
+}
+
+// catalogSchema returns the declared catalog schema for a kind and whether the
+// kind is in the catalog at all (doc 26 §4a). It folds the catalog from the
+// recorded decls (EventKind bootstrap form) plus the log so far (event.registered
+// dynamic form) — recomputable from the log (G8), no privileged store. A known
+// kind with no declared schema returns (nil, true): known, no payload constraint
+// (conforms treats a nil schema as conforming). An unknown kind returns
+// (nil, false), and the caller skips the conformance check (opt-in dormancy).
+func (e *Engine) catalogSchema(kind string) (json.RawMessage, bool) {
+	cat := foldCatalog(e.decls, e.log)
+	return cat.schemaOf(kind)
 }
 
 // liveNodes returns the reaction nodes from the recorded decls, with scope
