@@ -132,7 +132,13 @@ func (sr *scopeRuntime) narrowestRequest(spanID string) string {
 }
 
 // closedPayload is the body of a scope.{name}.closed / .budget_exhausted fact:
-// the instance id so a join/barrier/bridge consumer can correlate (doc 26 §2).
+// the instance id so a join/barrier/bridge consumer can correlate (doc 26 §2),
+// plus the closing instance's FINAL STATE SNAPSHOT — the one-state-per-scope kv
+// at quiescence (doc 26 §2a). The engine attaches its own maintained fold,
+// payload-blind on the way out (exactly as it attaches the obligation-driven
+// closure); a parent-scope consumer reads State to fold chosen fields up. This
+// is the ONLY request→global promotion path: state flows up through closures,
+// never sideways (doc 26 §2a).
 type closedPayload struct {
 	Instance string `json:"instance"`
 	Scope    string `json:"scope"`
@@ -140,6 +146,10 @@ type closedPayload struct {
 	// (obligations hit zero) or "budget" (a counted kind hit its ceiling).
 	Reason string `json:"reason,omitempty"`
 	Kind   string `json:"kind,omitempty"`
+	// State is the closing cone's per-scope state at close: path → payload bytes
+	// (the §2a fold of the cone's state.updated.{path} events). nil when the cone
+	// wrote no state. The engine stays payload-blind — it carries the bytes.
+	State map[string]json.RawMessage `json:"state,omitempty"`
 }
 
 func mustMarshal(v any) json.RawMessage {

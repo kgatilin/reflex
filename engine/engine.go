@@ -19,6 +19,17 @@ type Engine struct {
 	// advances it as it dispatches; re-running Drain resumes from here, so a
 	// crash mid-drain recovers by simply calling Drain again (G5).
 	frontier int
+	// dispatched[i] records that log[i] was driven by process (dispatched to
+	// its subscribers and its caused subtree). Depth-first dispatch appends a
+	// reaction's children at the END of the log and drives them immediately, so
+	// the dispatched set is NOT a contiguous prefix when several ingress events
+	// are appended before one Drain (each ingress roots its own cone; the first
+	// cone's children sit past the later ingress roots). Tracking dispatch
+	// per-index — instead of a single high-water frontier — lets Drain still
+	// reach every un-driven ingress root, so N parallel request cones in one
+	// Drain all run (doc 26 §2a isolation needs N cones to exist). It is a fold
+	// over the log (rebuildScopes recomputes it), not a privileged store.
+	dispatched []bool
 }
 
 // New returns an empty engine: no topology, no events. Everything it
@@ -113,17 +124,41 @@ func (e *Engine) Drain(ctx context.Context) error {
 	nodes := e.liveNodes()
 	sr := e.rebuildScopes(nodes)
 
-	// Drive each undispatched frontier event depth-first to quiescence. process
-	// dispatches the event AND its whole caused subtree, appending as it goes;
-	// the appended children sit past the frontier, so the loop's own cursor
-	// skips over them (process already handled them). Quiescence is the
-	// frontier reaching the end of the log with no open obligation.
-	for e.frontier < len(e.log) {
-		idx := e.frontier
-		e.frontier++
+	// Drive each undispatched event depth-first to quiescence. process dispatches
+	// the event AND its whole caused subtree (marking each dispatched), appending
+	// as it goes; the loop's cursor skips events process already drove. The
+	// cursor scans the whole log — not a contiguous frontier — so a later ingress
+	// root that an earlier cone's depth-first dispatch jumped over is still
+	// reached: N parallel cones in one Drain all run. Quiescence is every event
+	// dispatched with no open obligation.
+	for idx := 0; idx < len(e.log); idx++ {
+		if e.isDispatched(idx) {
+			continue
+		}
 		e.process(ctx, idx, nodes, sr)
 	}
 	return nil
+}
+
+// isDispatched reports whether log[idx] has been driven by process. The
+// dispatched slice grows lazily with the log; an index past its end is
+// undispatched.
+func (e *Engine) isDispatched(idx int) bool {
+	return idx < len(e.dispatched) && e.dispatched[idx]
+}
+
+// markDispatched records that log[idx] was driven by process, growing the
+// dispatched slice to cover it. It also advances frontier to the high-water
+// mark so rebuildScopes (which replays the dispatched prefix) sees every driven
+// event on a re-drive.
+func (e *Engine) markDispatched(idx int) {
+	for len(e.dispatched) <= idx {
+		e.dispatched = append(e.dispatched, false)
+	}
+	e.dispatched[idx] = true
+	if e.frontier <= idx {
+		e.frontier = idx + 1
+	}
 }
 
 // rebuildScopes reconstructs the scope-runtime cache from the log up to the
@@ -135,11 +170,16 @@ func (e *Engine) Drain(ctx context.Context) error {
 // resumes exactly.
 func (e *Engine) rebuildScopes(nodes []Node) *scopeRuntime {
 	sr := newScopeRuntime(declaredScopes(e.decls), nodes)
-	// Replay dispatched events in order, re-rooting and re-stamping membership.
-	// Obligations are not replayed (they are an in-flight quantity of a drain
-	// in progress); a fresh drain re-derives them as it dispatches. Closed
-	// instances are marked so closure is not re-emitted.
+	// Replay DISPATCHED events in log order, re-rooting and re-stamping
+	// membership. Obligations are not replayed (they are an in-flight quantity of
+	// a drain in progress); a fresh drain re-derives them as it dispatches. Closed
+	// instances are marked so closure is not re-emitted. Un-dispatched ingress
+	// roots interleaved below the high-water frontier are skipped — they have no
+	// dispatched descendants yet, so they contribute nothing to the resumed fold.
 	for i := 0; i < e.frontier && i < len(e.log); i++ {
+		if !e.isDispatched(i) {
+			continue
+		}
 		ev := e.log[i]
 		_, scope, kind := splitSubject(ev.Subject)
 		sr.admit(ev, scope, kind)
@@ -163,6 +203,7 @@ func (e *Engine) rebuildScopes(nodes []Node) *scopeRuntime {
 // false-zero guard), and finally leaves the cones (−1 each), closing any whose
 // count crossed to zero.
 func (e *Engine) process(ctx context.Context, idx int, nodes []Node, sr *scopeRuntime) {
+	e.markDispatched(idx)
 	ev := e.log[idx]
 	cls, scope, kind := splitSubject(ev.Subject)
 
@@ -221,7 +262,19 @@ func (e *Engine) fanOut(ctx context.Context, idx int, cls, scope, kind string, n
 			// leaves the cone — there is no reaction to run.
 			continue
 		}
-		emits, err := n.Body.React(ctx, ev, emptyViews{})
+		// Attach the real Views (doc 24 §6): the node's declared projections,
+		// each evaluated at THIS trigger's causal position (the backward
+		// caused_by walk to the projection's horizon). The evaluator indexes the
+		// log as it stands now, so the view sees exactly the trigger's causal
+		// past — "in context" ≡ "in the causal past" (reaction.go Views doc).
+		views := Views(emptyViews{})
+		if len(n.Reads) > 0 {
+			views = projectionViews{
+				eval:        newProjectionEval(e.log, e.decls, sr),
+				triggerSpan: ev.Trace.SpanID,
+			}
+		}
+		emits, err := n.Body.React(ctx, ev, views)
 		if err != nil {
 			p, _ := json.Marshal(map[string]string{"error": err.Error()})
 			child := e.appendEmit(ev, cls, Emit{Kind: n.Name + ".failed", Payload: p})
@@ -239,8 +292,8 @@ func (e *Engine) fanOut(ctx context.Context, idx int, cls, scope, kind string, n
 // index. The dispatcher owns scope placement (§2 uprightness): the new subject
 // is the emit's kind under the triggering event's class+scope, never a scope
 // the reaction chose. Trace inherits the session, mints a fresh span, and
-// records the trigger as the single cause. The frontier is advanced past it
-// because process drives the child directly (depth-first), not the Drain loop.
+// records the trigger as the single cause. process drives the child directly
+// (depth-first) and marks it dispatched, so the Drain cursor skips it.
 func (e *Engine) appendEmit(trigger Event, cls string, em Emit) int {
 	idx := len(e.log)
 	ev := Event{
@@ -254,9 +307,6 @@ func (e *Engine) appendEmit(trigger Event, cls string, em Emit) int {
 		},
 	}
 	e.log = append(e.log, ev)
-	if e.frontier <= idx {
-		e.frontier = idx + 1
-	}
 	return idx
 }
 
@@ -280,6 +330,15 @@ func (e *Engine) emitClosure(ctx context.Context, inst *scopeInstance, sr *scope
 func (e *Engine) emitScopeFact(ctx context.Context, inst *scopeInstance, reason, kind string, sr *scopeRuntime) {
 	idx := len(e.log)
 	subjectKind := "scope." + inst.name + "." + reason
+	// Snapshot the closing instance's final per-scope state (doc 26 §2a): the
+	// engine's own maintained fold of the cone's state.updated.{path} events,
+	// frozen at quiescence and carried in the closure payload so a parent-scope
+	// consumer can promote chosen fields up. Computed over the cone as it stands
+	// now (the closure is appended just below, so the snapshot excludes it —
+	// correct: the closed fact is not part of the state it seals). Payload-blind:
+	// path → payload bytes.
+	pe := newProjectionEval(e.log, e.decls, sr)
+	state := pe.scopeState(inst.name, inst.rootSpan)
 	ev := Event{
 		Subject: placeSubject(inst.placeClass, subjectKind),
 		Payload: mustMarshal(closedPayload{
@@ -287,6 +346,7 @@ func (e *Engine) emitScopeFact(ctx context.Context, inst *scopeInstance, reason,
 			Scope:    inst.name,
 			Reason:   reason,
 			Kind:     kind,
+			State:    state,
 		}),
 		Trace: Trace{
 			SpanID:    e.mintSpan(),
@@ -295,9 +355,6 @@ func (e *Engine) emitScopeFact(ctx context.Context, inst *scopeInstance, reason,
 		},
 	}
 	e.log = append(e.log, ev)
-	if e.frontier <= idx {
-		e.frontier = idx + 1
-	}
 	e.process(ctx, idx, sr.nodes, sr)
 }
 
