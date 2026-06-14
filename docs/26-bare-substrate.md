@@ -3,9 +3,10 @@
 > **Status: DRAFT / proposed.** Converged in a design session. It pushes the
 > [24](./24-concept.md) reduction one level deeper and *subtracts* in three
 > places: it removes "scope" as a fourth managed kind, moves cycle-bounding
-> off a per-event dispatch gate onto a scope budget (the per-scope cap at the
-> threshold is an open 2b question, §3d), and removes "tool" as a capability
-> the LLM holds. All three become conventions over the three primitives. This
+> off a per-event dispatch gate onto a scope budget (enforced by a per-scope
+> cap, with a terminal `budget_exhausted` fact for graceful shutdown — §3d),
+> and removes "tool" as a capability the LLM holds. All three become
+> conventions over the three primitives. This
 > supersedes specific clauses of [24 §4/§5/§7](./24-concept.md) and restates
 > one assumption of [25 §6](./25-regulation-concept.md); the supersession
 > table is §5. It adds no primitive — every move is the standing test
@@ -68,7 +69,29 @@ progress-projection reaching its *final value*, announced as an event. The
 "state finality" intuition is exactly right: a region is final when its
 accumulating state stops changing because no pending reaction will write
 into it again — which is quiescence, which is the obligation count hitting
-zero. Closure and state-fixpoint are one thing observed twice.
+zero.
+
+**But closure is not the same as completion.** An earlier draft said
+"closure and state-fixpoint are one thing observed twice"; that holds *only
+when the reconciler converged*. Pull them apart:
+
+- **Quiescence** — the cone froze: obligations are zero, no further event
+  will arrive.
+- **Terminality** — the frozen value is a *terminal* value (`done` /
+  `needs_clarification`).
+
+A cone can freeze on a **non-terminal** value (`gathering`, no answer yet) —
+that is a **stall**: mechanically quiet, but the reconciliation did not
+converge. "State stopped changing" ≠ "state reached a terminal value." The
+gap between *frozen* and *done* is exactly where an LLM bridge attaches:
+`scope.X.closed` is an engine-emitted kind, and a stalled close is a
+**dead-end in the connectivity sense** ([27 §5](./27-state-defined-agent.md)) —
+its bridge reads the frozen state and either emits a terminal event or
+**re-drives** (emits the next work event). Re-drive does **not** reopen the
+closed cone (closure is monotone, or the fold drifts): the bridge's emission
+lives in the parent cone (the sealing row above) and opens a **new child
+cone**. The "follow-up loop" `cone₁ closes (stall) → bridge → cone₂ opens →
+…` *is* the cycle that a budget bounds (§3f).
 
 **What does *not* dissolve.** The *region itself*. "Final" is meaningless
 without "final over **what**" — and the answer is the cone: a root event
@@ -129,20 +152,55 @@ covering scope. Nothing is delegated to the reactions the bound constrains —
 it lives one level up, on the scope. This is *why* `Node.Kind` does not
 exist: the engine never needs to know whether a reaction reasons or computes.
 
-### 3d. The open question: how the budget bites at the threshold
+### 3d. How the budget bites at the threshold — resolved: cap is the guarantee, the fact is graceful
 
 What the budget *counts* is settled (a scope fold); how it *acts* at the
-threshold is left to stage 2b. Two shapes, both scope-level:
+threshold has two shapes — and they are **not either/or**, they have
+different jobs:
 
-- **Scope cap** — the engine stops admitting the bounded kind into the cone
-  past the threshold. A small, principled enforcement that *partially walks
-  back* this document's "no runtime gate at all": the per-event gate is gone,
-  but a per-scope budget cap may be the one enforcement worth keeping.
-- **Terminal `budget_exhausted`** — the threshold emits a fact no node feeds
-  back into the loop, so the cone quiesces on its own.
+- **Scope cap** (per-scope) — past the threshold the engine stops *admitting*
+  the bounded kind into the cone: dispatch reads the scope-state and a
+  budget-exhausted cone delivers no more of the counted kind. This is the
+  **guarantee**. It is the one runtime gate kept, and it *partially walks
+  back* "no gate at all" honestly: the per-event gate is gone; a per-scope
+  cap remains.
+- **Terminal `budget_exhausted`** (a fact) — the threshold drops a fact no
+  node in the cycle consumes. This is **graceful shutdown**, not the
+  guarantee: a loop node may subscribe and emit an honest
+  `needs_clarification` instead of going dark, and the cone records *why* it
+  closed.
 
-Choosing is a 2b decision; the basis (termination is a scope budget) and the
-static check (3a) hold either way.
+Why not terminal-only: a fact a node must *honor* to stop the loop is exactly
+the delegation §3c forbids — the node can ignore it and loop on. Only the cap
+(the engine ceasing to deliver) is structural. So the cap floors the
+guarantee; the fact decorates it.
+
+This unifies with closure (§2): `closed` now has **two predicates** into its
+final value — `obligations == 0` (natural quiescence) or
+`counted_kind == budget` (forced). Same final state, two roads; dispatch
+reads the result and a final scope admits nothing. There is no moment of
+decision, only two computed predicates over the cone.
+
+### 3f. The compile-time termination guarantee: connectivity × budget
+
+A closed scope must lead **somewhere** — a continuation or a terminal event;
+no quiescence in the void. This is checkable statically, and it is the
+composition of the two checks the model already has:
+
+| Check | Guarantees | When |
+|---|---|---|
+| **connectivity** (`scope.X.closed` treated as an emitted kind) | every closed scope has an **exit** — a consumer of `scope.closed` (an LLM bridge / a deterministic terminator), or a provably terminal close | compile ([27 §5](./27-state-defined-agent.md)) |
+| **budget** (§3a) | that exit is **reached in bounded steps** — the follow-up loop `scope.closed → bridge → re-drive → scope.closed` is itself a cycle, so it must be covered by a budgeted scope | compile (coverage) + runtime (fold) |
+
+Neither suffices alone: connectivity alone admits an unbounded follow-up
+loop; a budget alone admits a freeze in the void. **Together they prove
+every scope reaches a terminal event in finite steps** — the termination
+guarantee for the whole reconciler. The engine never introspects "is the
+state terminal" (it stays payload-blind); the bridge judges "done?" as it
+judges everything, and the *wiring* that a judgment-or-terminal exists is
+what compilation checks. Default: treat `scope.closed` as a dead-end needing
+a bridge unless a close is provably terminal-only (a liveness optimisation,
+stronger than reachability — not the base case).
 
 ### 3e. The residue — what a gate would buy that a budget doesn't
 
@@ -201,7 +259,7 @@ is the whole contract.
 | Clause | Before | After (this doc) |
 |---|---|---|
 | [24 §4](./24-concept.md) dispatch | "consulting the progress projection … **enforcing budgets**" | dispatch = stamp trace + deliver; the *per-event* budget enforcement leaves dispatch — cycle-bounding moves to a scope budget (§3) |
-| [24 §5](./24-concept.md) budget hard-stop | `scope.budget_exhausted` = **refused dispatch** | a compile-mandated scope budget covering every cycle (§3a); how it bites at the threshold (scope cap vs terminal `budget_exhausted`) is open (§3d) |
+| [24 §5](./24-concept.md) budget hard-stop | `scope.budget_exhausted` = **refused dispatch** | a compile-mandated scope budget covering every cycle (§3a), enforced by a per-scope **cap** (the guarantee) with a terminal `budget_exhausted` fact for graceful shutdown (§3d); plus a compile check that every `scope.closed` has a continuation or terminal exit (§3f) |
 | [24 §5](./24-concept.md) cancellation | "refused dispatch read off the cone" | the covering scope closes early + idempotent consumer; in-flight result recorded then deduped (§3b/§3e) |
 | [24 §5/§7](./24-concept.md) managed kinds | **four**: nodes, subscriptions, **scopes**, projections | **three**: nodes, subscriptions, projections; scope = built-in projection instance (§2) |
 | [24 §3](./24-concept.md) LLM/menu | "emits typed actions from an allowlist; menu is a projection of consumers" | strengthened: the LLM has **no tools**, only allowlisted emissions; tool-call = emission with a tool-node consumer; function-calling = transport encoding (§4) |

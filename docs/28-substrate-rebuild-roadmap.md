@@ -76,13 +76,24 @@ The doc-24 §5 / doc-26 runtime.
 
 - Scope rooting (declared + node-rooted), obligation counting per cone,
   `scope.X.closed` emitted exactly once at quiescence (G6), and **scope
-  budgets that bound cycles** — plus the open decision of how the budget
-  bites at the threshold: a scope cap (engine stops admitting the bounded
-  kind) vs a terminal `budget_exhausted` ([26 §3d](./26-bare-substrate.md)).
+  budgets that bound cycles**. The threshold decision is **resolved**
+  ([26 §3d](./26-bare-substrate.md)): a per-scope **cap** is the guarantee
+  (dispatch stops admitting the bounded kind into an exhausted cone), with a
+  terminal `budget_exhausted` fact for graceful shutdown. `closed` thus has
+  two predicates into its final value — `obligations == 0` or
+  `counted_kind == budget`.
+- The validator's **stalled-closure check** ([26 §3f](./26-bare-substrate.md),
+  [27 §5](./27-state-defined-agent.md)): `scope.X.closed` is an emitted kind;
+  a close that can land non-terminal needs a continuation (LLM bridge) or a
+  provably terminal-only close. Connectivity (exit exists) × budget (exit
+  reached in bounded steps) = the reconciler's termination guarantee.
 - **Acceptance**: a loop topology (`gather ↔ fs`) covered by a budgeted scope
-  runs to a `scope.X.closed` and terminates; a join (N tool calls) closes
-  once when all results are in (N=1 is the degenerate case).
-- **Proves**: loops, joins, scope budgets — the heart of the model.
+  runs to a `scope.X.closed` and terminates; a stalled close re-drives via a
+  bridge into a new child cone and still converges under its covering budget;
+  a join (N tool calls) closes once when all results are in (N=1 is the
+  degenerate case).
+- **Proves**: loops, joins, scope budgets, stall→bridge re-drive — the heart
+  of the model.
 
 ### Stage 2c — projections (declared folds over causal horizons)
 
@@ -118,8 +129,6 @@ The doc-24 §5 / doc-26 runtime.
 
 ## Open / deferred (carried)
 
-- How a scope budget bites at the threshold — scope cap vs terminal
-  `budget_exhausted` (doc 26 §3d); decided in 2b.
 - Cycle budget-coverage is approximated as "every SCC node is `in:` a
   budgeted scope"; the precise rule (budget bounds a kind on the cycle's
   edges) is a refinement.
@@ -136,7 +145,8 @@ The doc-24 §5 / doc-26 runtime.
 - [27-state-defined-agent.md](./27-state-defined-agent.md) — the design and
   the subscriber-list compilation this roadmap builds out.
 - [26-bare-substrate.md](./26-bare-substrate.md) — scope as projection,
-  enforcement as graph shape, the LLM emits events.
+  termination as a scope budget (cap + graceful fact, §3d) with the
+  connectivity×budget closure guarantee (§3f), the LLM emits events.
 - [24-concept.md](./24-concept.md) — the settled model; §5 (scopes/
   quiescence), §6 (projections).
 - [23-bootstrap-roadmap.md](./23-bootstrap-roadmap.md) — the prior-generation

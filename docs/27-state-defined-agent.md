@@ -159,6 +159,11 @@ folds the subscriber list into a graph and reports:
 - **disconnected fragments** — islands with no path from an ingress root;
 - **unbounded cycles** — a non-trivial SCC not covered by a scope that
   declares a budget ([26 §3a](./26-bare-substrate.md)) → reject;
+- **stalled closures** — `scope.X.closed` is an engine-emitted kind; a scope
+  whose close can land on a non-terminal state needs a consumer of
+  `scope.X.closed` (an LLM bridge or a deterministic terminator) or a
+  provably terminal-only close — otherwise the cone can freeze in the void
+  ([26 §3f](./26-bare-substrate.md)) → suggest a bridge;
 - **allowlist lints** — a node emitting outside its declared `Emits`
   ([24 §A.4](./24-concept.md)).
 
