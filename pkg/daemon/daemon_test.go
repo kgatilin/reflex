@@ -80,12 +80,15 @@ func TestDaemon_ApplyEmitReconciles(t *testing.T) {
 	}
 }
 
-// TestDaemon_ApplyProbesPluginAndPopulatesCatalog drives the dynamic-plugin path
-// end-to-end: a plugin node declares NO emits in the document — the daemon spawns
-// `reflexd plugin echo`, reads its announced self-description, and fills the
-// node's emits AND registers the kind+schema in the catalog. Then one ingress
-// drives a reconciliation that reaches the plugin's emit and closes the scope.
-func TestDaemon_ApplyProbesPluginAndPopulatesCatalog(t *testing.T) {
+// TestDaemon_LaunchPluginSelfRegisters drives the self-registering-plugin path
+// end-to-end: the daemon launches `reflexd plugin echo`, which announces "I
+// handle echo.request, I emit echo.reply" (both with schemas). The daemon turns
+// that announcement into a GLOBAL subscriber node + two catalog kinds — the
+// operator document never mentions the plugin. The operator topology wires who
+// emits echo.request (resolver) and who consumes echo.reply (notify); folded with
+// the plugin's self-registration it is a connected graph. One ingress then drives
+// a reconciliation that reaches the plugin's emit and closes the scope.
+func TestDaemon_LaunchPluginSelfRegisters(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the reflexd binary; skipped under -short")
 	}
@@ -96,24 +99,28 @@ func TestDaemon_ApplyProbesPluginAndPopulatesCatalog(t *testing.T) {
 	d := daemon.New()
 	defer d.Close()
 
+	// The plugin self-registers its handler (echo.request) + result (echo.reply)
+	// and their schemas — no operator plugin node, no host-side catalog wiring.
+	name, err := d.LaunchPlugin(ctx, []string{reflexd, "plugin", "echo"})
+	if err != nil {
+		t.Fatalf("LaunchPlugin: %v", err)
+	}
+	if name != "echo" {
+		t.Fatalf("plugin announced name %q, want echo", name)
+	}
+
+	// The operator graph: who EMITS echo.request and who CONSUMES echo.reply —
+	// the separate wiring concern. scope.request.closed is registered because a
+	// non-empty catalog (grown by the plugin) gates full catalog enforcement and
+	// lifecycle subscribes to it.
 	doc := topology.Document{
-		Scopes: []topology.ScopeSpec{{Name: "request", Root: "request.received"}},
-		// Registering the plugin's echo.reply grows the catalog, which flips on
-		// full catalog enforcement (validate.go: a non-empty catalog gates
-		// Connected) — so every kind must be declared. echo.reply comes from the
-		// plugin; the rest are declared here.
-		Events: []topology.EventSpec{
-			{Kind: "cli.task"},
-			{Kind: "request.received"},
-			{Kind: "scope.request.closed"},
-		},
+		Scopes: []topology.ScopeSpec{{Name: "request", Root: "echo.request"}},
+		Events: []topology.EventSpec{{Kind: "cli.task"}, {Kind: "scope.request.closed"}},
 		Nodes: []topology.NodeSpec{
-			{Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global", Emits: []string{"request.received"},
-				Body: topology.BodySpec{Kind: "emit", Config: map[string]any{"kind": "request.received"}}},
-			// The plugin node: on/in from the document, but NO emits — those come
-			// from the plugin's announced self-description (echo.reply).
-			{Name: "echoer", On: []string{"request.received"}, In: "request",
-				Body: topology.BodySpec{Kind: "plugin", Config: map[string]any{"command": []string{reflexd, "plugin", "echo"}}}},
+			// app.ingress.* marks the ingress root; cli.task is the kind tail of
+			// app.ingress.cli.task, the pattern that actually delivers the ingress.
+			{Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global", Emits: []string{"echo.request"},
+				Body: topology.BodySpec{Kind: "emit", Config: map[string]any{"kind": "echo.request"}}},
 			{Name: "notify", On: []string{"echo.reply"}, In: "request"},
 			{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
 		},
@@ -122,10 +129,12 @@ func TestDaemon_ApplyProbesPluginAndPopulatesCatalog(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	// The catalog gained echo.reply from the plugin, recorded as a fact (G8):
-	// schemas come from the plugin, never hardcoded in the host.
-	if !hasEventRegistered(d.Events(), "echo.reply") {
-		t.Errorf("no sys.event.registered fact for echo.reply — catalog was not populated from the plugin")
+	// The catalog gained echo.request and echo.reply from the plugin, recorded as
+	// facts (G8): schemas come from the plugin, never hardcoded in the host.
+	for _, kind := range []string{"echo.request", "echo.reply"} {
+		if !hasEventRegistered(d.Events(), kind) {
+			t.Errorf("no sys.event.registered fact for %q — catalog was not populated from the plugin", kind)
+		}
 	}
 
 	produced, err := d.Emit(ctx, "app.ingress.cli.task", []byte(`{}`), true)
@@ -142,7 +151,7 @@ func TestDaemon_ApplyProbesPluginAndPopulatesCatalog(t *testing.T) {
 		}
 	}
 	if replied != 1 {
-		t.Errorf("echo.reply = %d, want 1 (plugin emitted via the wired-from-spec emit set)", replied)
+		t.Errorf("echo.reply = %d, want 1 (the launched plugin handled echo.request)", replied)
 	}
 	if closed != 1 {
 		t.Errorf("scope.request.closed = %d, want 1 (G6)", closed)

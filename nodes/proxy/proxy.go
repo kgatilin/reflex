@@ -1,16 +1,18 @@
 // Package proxy is the engine adapter for the out-of-process plugin seam (doc 29
-// Iteration 3): it registers the "plugin" body kind. A node declaring
-// body_kind: plugin carries a spawn command in its body_config; the Factory
-// spawns that child process (stdio transport) and returns an engine.Reaction
-// that, on each firing, forwards the triggering event to the plugin and returns
-// the emits it produces. The engine binds those emits to the node's declared
-// emit set as usual — out-of-process is not out-of-bounds.
+// Iteration 3): it backs the "plugin" body kind. The subscriber node for a plugin
+// is NOT operator-declared — the daemon launches a plugin, reads its self-
+// description, and generates a node whose body_config carries the spawn command
+// (proxy.Manager.Launch). That body descriptor (kind "plugin" + config) rides on
+// sys.node.registered, so the Factory can rebuild the engine.Reaction from it: on
+// each firing the reaction forwards the triggering event to the plugin process
+// (stdio transport) and returns the emits it produces. The engine binds those
+// emits to the node's declared emit set as usual — out-of-process is not
+// out-of-bounds.
 //
-// The plugin process is spawned at Apply time (Factory call): applying a
-// topology that references a missing/broken plugin binary fails the changeset,
-// and engine.Load re-spawns the plugins on restart from the body descriptors on
-// the log (G8 — the wiring is recoverable; the live process is not, exactly like
-// a live Body closure).
+// engine.Load re-spawns the plugins on restart from those descriptors (G8 — the
+// wiring is recoverable; the live process is not, exactly like a live Body
+// closure). A descriptor referencing a missing/broken plugin binary fails the
+// load (or the changeset that introduces it).
 package proxy
 
 import (
@@ -47,7 +49,7 @@ func ParseConfig(name string, config json.RawMessage) (Config, error) {
 
 // Factory is a standalone engine.BodyResolver entry for the "plugin" kind: it
 // spawns a fresh process per call. The daemon uses a Manager instead (spawn-once
-// + reuse across the apply-time probe and the resolver); Factory is for direct
+// at launch + reuse when the resolver rebuilds the body); Factory is for direct
 // and test use where no manager is needed.
 func Factory(name string, config json.RawMessage) (engine.Reaction, error) {
 	cfg, err := ParseConfig(name, config)

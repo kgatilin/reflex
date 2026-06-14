@@ -171,28 +171,44 @@ special cases. The only true in-process body is `llm` (the reasoning core); ever
 - the proxy is built so a **socket** transport drops in later (for plugins with
   an independent lifecycle); stdio is the simpler start.
 
-**The catalog is populated dynamically from the plugin, never hardcoded.** A
-plugin announces its self-description in the `hello` — `events: [{kind, schema,
-role: in|out}]`. The daemon **probes** each plugin node at `apply` (spawns it
-once via a per-daemon `proxy.Manager`, reads the spec) and **expands the
-changeset**: the node's `On`/`Emits` gain the plugin's consumed/emitted kinds,
-and one `EventKind` decl is added per declared kind+schema. So the schemas come
-from the plugin and land on the log as `sys.event.registered` facts — `reflexd`
-hardcodes nothing. `engine.Load` rebuilds the catalog from those facts and
-re-spawns the process without re-probing (G8).
+**A plugin self-registers; it is NOT an operator-declared topology node.** Two
+concerns, kept separate (operator correction, `b95f75a`→this iteration): a
+*plugin* just exposes "I handle these kinds (with schemas), I emit these kinds
+(with schemas)" and subscribes to handle them — full stop; the *node* concern
+(who emits what, who subscribes to what) is the operator's graph wiring, a
+separate layer. The daemon **launches** a plugin (`Daemon.LaunchPlugin`,
+e.g. from `serve --root`), reads its `hello` self-description — `events: [{kind,
+schema, role: in|out}]` — and turns that announcement into a **global subscriber
+node** (`On` = the kinds it handles, `Emits` = the kinds it produces, body = a
+`plugin` descriptor carrying the spawn command) **plus one `EventKind` per
+declared kind+schema, in AND out**. The operator topology never writes a
+`body_kind: plugin` node; it just emits the kinds a hand consumes and consumes
+the kinds it produces. These plugin decls are folded into the next
+`apply`/`validate` alongside the operator document, so the **resulting graph is
+validated as a whole** — a launched-but-unwired plugin is correctly a gap
+(unreachable / dead-end), and connectivity is a property of the assembled graph,
+never of a lone handler. The schemas come from the plugin and land on the log as
+`sys.event.registered` facts; `reflexd` hardcodes nothing.
+
+The subscriber's scope is **`global`** on purpose: a plugin is scope-agnostic —
+it handles its kinds wherever they occur, and the engine places its emits in the
+trigger's cone by causality (a reaction never chooses its emit's scope, doc 24
+§5). `engine.Load` rebuilds the subscriber node from `sys.node.registered` and
+re-spawns the process from its descriptor without re-launching (G8).
 
 Properties this preserves: the engine's **emit-allowlist still binds the plugin**
 (out-of-process is not out-of-bounds); the body descriptor (`kind` + spawn
-config) rides on `sys.node.registered`, so the wiring is **recoverable from the
-log** (G8); and **hot-plug** ("agent writes a plugin, applies a node, uses it, no
-daemon restart") is a property of live `apply`, not the transport.
+command) rides on `sys.node.registered`, so the wiring is **recoverable from the
+log** (G8); and **hot-plug** ("agent launches a plugin, applies a topology that
+emits its kinds, uses it, no daemon restart") is a property of live `apply`, not
+the transport.
 
 **Plugins ship in-repo as a multi-call binary** — `reflexd plugin fs`,
 `reflexd plugin pytest` are subcommands the daemon spawns as separate child
 processes over stdio. Code lives in one binary ("built-in"), each plugin runs as
 its own process ("launchable separately"). Composability falls out: the daemon
-only spawns what the applied topology references — a non-filesystem agent simply
-never wires an `fs` node, so no fs process is launched. The protocol is
+only launches the hands it is told to (`serve --root` brings up `fs`+`pytest`;
+a non-filesystem agent simply launches neither). The protocol is
 language-agnostic (a plugin can be native Python).
 
 *Finding (3a):* adopting the catalog — a plugin contributing even one kind —
@@ -220,9 +236,10 @@ accessor — no `Reads`, no wiring) and the `llm` body sets each function's
 `Emits` + have the plugin announce the schema → the catalog carries it → the
 `llm` advertises it. Schemas must be the LLM-tool-compatible subset.
 
-A plugin's **root** (e.g. the fs sandbox dir) comes from its node `body_config`,
-so one daemon can host several fs plugins rooted at different dirs — config, not
-code.
+A plugin's **root** (e.g. the fs sandbox dir) is a **host concern**: `reflexd`
+determines it and passes it at launch (`reflexd plugin fs --root <dir>`, wired
+from `serve --root`), never an operator topology config. The root confines the
+process; it is not part of the graph the operator declares.
 
 **Iteration 4 — The coding-agent topology + verification flow, run locally.**
 Express §4 as a changeset/YAML; wire the real model (Gemini, `iow-uagent`,

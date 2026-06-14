@@ -40,19 +40,40 @@ func root() *cobra.Command {
 	return cmd
 }
 
-// serveCmd hosts the daemon until interrupted.
+// serveCmd hosts the daemon until interrupted. --root, when set, launches the
+// out-of-process hands (fs, pytest) confined to that workspace root: the root is
+// a host concern — reflexd determines it and passes it at plugin init (`reflexd
+// plugin fs --root <dir>`), it is never an operator topology config. Each plugin
+// self-registers its handler + catalog kinds on connect; the operator then
+// applies a topology that emits the kinds those hands consume.
 func serveCmd(socket *string) *cobra.Command {
-	return &cobra.Command{
+	var root string
+	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "host the engine behind the unix-socket API",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			d := daemon.New()
+			defer d.Close()
+			if root != "" {
+				self, err := os.Executable()
+				if err != nil {
+					return fmt.Errorf("locating the reflexd binary to launch plugins: %w", err)
+				}
+				for _, name := range []string{"fs", "pytest"} {
+					if _, err := d.LaunchPlugin(ctx, []string{self, "plugin", name, "--root", root}); err != nil {
+						return fmt.Errorf("launching %q plugin: %w", name, err)
+					}
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "launched fs, pytest plugins (root %s)\n", root)
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "reflexd serving on %s\n", *socket)
 			return daemon.Serve(ctx, d, *socket)
 		},
 	}
+	cmd.Flags().StringVar(&root, "root", "", "workspace root; when set, launch the fs and pytest plugins confined to it")
+	return cmd
 }
 
 // applyCmd sends a topology document (YAML/JSON file) to the daemon.

@@ -28,7 +28,15 @@ type pluginOpts struct {
 // separate process.
 var builtinPlugins = map[string]builtin{
 	"echo": {build: func(pluginOpts) (plugin.Spec, plugin.Handler, error) {
-		spec := plugin.Spec{Name: "echo", Events: []plugin.EventDecl{{Kind: "echo.reply", Role: plugin.RoleOut}}}
+		// echo handles echo.request and produces echo.reply — the minimal shape of
+		// the plugin contract: a kind it subscribes to (in, with schema) and a kind
+		// it emits (out, with schema). The daemon turns this announcement into a
+		// global subscriber node + two catalog entries; the operator graph decides
+		// who emits echo.request and who consumes echo.reply.
+		spec := plugin.Spec{Name: "echo", Events: []plugin.EventDecl{
+			{Kind: "echo.request", Role: plugin.RoleIn, Schema: json.RawMessage(`{"type":"object"}`)},
+			{Kind: "echo.reply", Role: plugin.RoleOut, Schema: json.RawMessage(`{"type":"object","properties":{"subject":{"type":"string"}},"required":["subject"]}`)},
+		}}
 		return spec, echoHandler, nil
 	}},
 	"fs":     {build: func(o pluginOpts) (plugin.Spec, plugin.Handler, error) { return buildFS(o.root) }},
