@@ -156,11 +156,28 @@ log (the daemon is in-memory; `Load` proves replay works), and the richer
 `scopes`/`diff` read surface.
 
 **Iteration 3 — The hands: file/test subscriber nodes + catalog schemas.**
-`fs.{read,edit,write,search}` (port the legacy fs logic, in-process,
-root-confined), `py.test` (shell out to pytest), `go.*` if useful — each a
-subscriber node. **Register their event kinds + parameter schemas in the catalog**
-so the `llm` body advertises real function schemas (closes the `CONCEPT.md` §12
-"tool schemas from catalog" gap). Schemas must be the LLM-tool-compatible subset.
+Two seats, decided this line of work:
+- **`fs.{read,edit,write,search}` is *in the `reflexd` binary*** — a built-in body
+  kind in `daemon.registerFactories()` next to `llm` (port the legacy fs logic
+  from git history, in-process, root-confined).
+- **Everything else is an *out-of-process plugin*** (`py.test`, `go.*`, …). Build
+  the plugin seam: a generic in-binary `"plugin"` body (a proxy `Reaction`) +
+  a small plugin SDK (the legacy `pkg/sdk` transport-adapter shape is the
+  template). **3a** ships the **stdio** transport (daemon `exec`s the plugin on
+  `apply`, NDJSON `hello/deliver/emit/ack` over stdin/stdout); the proxy is
+  designed so a **socket** transport drops in later for plugins with an
+  independent lifecycle. The protocol is language-agnostic (a plugin can be
+  Python). The engine's emit-allowlist still binds the plugin — out-of-process
+  is not out-of-bounds — and the body descriptor on the log keeps it recoverable
+  (G8). Hot-plug ("agent writes a plugin, applies it, uses it, no daemon
+  restart") is a property of live `apply`, not the transport — stdio already
+  delivers it.
+
+**3b — the hands themselves:** `fs.*` in-binary + `py.test` as a stdio plugin
+binary on that SDK. **Register their event kinds + parameter schemas in the
+catalog** so the `llm` body advertises real function schemas (closes the
+`CONCEPT.md` §12 "tool schemas from catalog" gap). Schemas must be the
+LLM-tool-compatible subset.
 
 **Iteration 4 — The coding-agent topology + verification flow, run locally.**
 Express §4 as a changeset/YAML; wire the real model (Gemini, `iow-uagent`,
@@ -175,8 +192,10 @@ instance image, `docker cp` the linux daemon+agent in, run the agent against
 
 ## 7. Settled decisions (do not relitigate)
 
-- **New stack only.** Legacy (`pkg/handler`, `pkg/bus`, `pkg/sdk`, `cmd/reflex`,
-  `plugins/*`) is **frozen** — reuse logic by porting, never extend it.
+- **New stack only.** The legacy stratum (`pkg/handler`, `pkg/bus`, `pkg/sdk`,
+  `cmd/reflex`, `plugins/*`, `internal/runtime`, `examples/`, the retired
+  `pkg/event`/`config`/`cost`/`cycle`/`graph`/`analyzer`/`projection`) has been
+  **deleted** — it lives only in git history; reuse logic by porting from there.
 - **All-in-container** for env; **Gemini on `iow-uagent`** first (Claude is an
   access question).
 - **Events + subscribers**, no "tools/menu" concept.

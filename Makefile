@@ -1,4 +1,4 @@
-# reflex — single-binary build. `make install` puts `reflex` on your PATH
+# reflex — single-binary build. `make install` puts `reflexd` on your PATH
 # (GOBIN, falling back to GOPATH/bin).
 
 .PHONY: build test vet install
@@ -13,4 +13,4 @@ vet:
 	go vet ./...
 
 install:
-	go install ./cmd/reflex
+	go install ./cmd/reflexd

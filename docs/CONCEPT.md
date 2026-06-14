@@ -227,17 +227,18 @@ subscribers**; the engine validates connectivity
 
 - **Go.** Module `github.com/kgatilin/reflex`. Single binary surface; cobra for
   CLIs; zsh completions where a CLI ships.
-- **Two strata — do not confuse them:**
-  - **The new kernel (where all new work goes):** `engine/` (the three
-    primitives + scopes + projections + catalog + view types + validator +
-    dispatch), `nodes/llm` (the `llm` body), `nodes/tool` (`tool.Node`). It is an
-    **in-process library** today: `New() → Apply(decls) → Append(ingress) →
-    Drain(ctx) → Events()`. No daemon/bus/socket yet.
-  - **The frozen legacy stratum (do NOT build on it):** `pkg/bus`, `pkg/handler`,
-    `pkg/sdk`, `cmd/reflex`, `internal/runtime`, `plugins/fs`, `plugins/gotool`,
-    `examples/agent.yaml`. This is the old shipped agent (daemon, socket plugins,
-    eight-node-era handlers). The new kernel **replaces** it; reuse its *patterns*
-    and *logic by porting*, never extend it in place.
+- **The stack (legacy removed — only the converged substrate remains):**
+  - **The kernel:** `engine/` (the three primitives + scopes + projections +
+    catalog + view types + validator + dispatch + the changeset-fold control
+    plane), `nodes/` (the body-factory registry), `nodes/llm` (the `llm` body),
+    `nodes/tool` (`tool.Node`).
+  - **The host (runtime shell):** `pkg/daemon` (the long-lived engine host +
+    composition root + unix-socket HTTP API), `pkg/topology` (the declarative
+    topology document), `cmd/reflexd` (the daemon + control-plane CLI).
+  - **The legacy stratum was deleted** (`pkg/bus`, `pkg/handler`, `pkg/sdk`,
+    `pkg/event`/`config`/`cost`/`cycle`/`graph`/`analyzer`/`projection`,
+    `cmd/reflex`, `internal/runtime`, `plugins/*`, `examples/`). The old shipped
+    agent lives only in git history; reuse its *patterns* and *logic by porting*.
   - **Shared:** `pkg/provider` — the neutral model interface and the real Vertex
     adapters (Gemini via `google.golang.org/genai`; Anthropic Claude via
     `anthropics/anthropic-sdk-go` + Vertex backend; OSS via Vertex

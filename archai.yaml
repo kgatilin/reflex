@@ -1,44 +1,38 @@
 # Reflex architecture overlay for Archai.
 #
-# Two strata coexist during the substrate rebuild (docs 24/26/28):
-#   - kernel + nodes: the converged substrate being built (engine/, nodes/).
-#   - domain/runtime/adapters: the legacy shipped packages (pkg/*), retired
-#     incrementally per doc 24 §10.
+# The legacy stratum (pkg/bus, pkg/handler, pkg/sdk, cmd/reflex, plugins/*,
+# internal/runtime, …) was removed — only the converged substrate remains.
 
 module: github.com/kgatilin/reflex
 
 layers:
-  # Converged substrate (the rebuild).
+  # The kernel: the three primitives + scopes + projections + catalog + view
+  # types + validator + dispatch + the changeset-fold control plane.
   kernel:
     - engine
+
+  # Built-in reaction bodies over the kernel. The engine is body-agnostic;
+  # bodies are resolved by name from the nodes registry.
   nodes:
+    - nodes
     - nodes/llm
     - nodes/tool
 
-  # Legacy shipped packages (being retired).
-  domain:
-    - pkg/event
-    - pkg/config
-    - pkg/cycle
-    - pkg/projection
-
-  runtime:
-    - pkg/bus
-    - pkg/handler
-    - pkg/graph
-    - pkg/analyzer
-    - internal/runtime
-
-  adapters:
+  # The runtime shell + declarative surface around the kernel.
+  host:
+    - pkg/daemon
+    - pkg/topology
     - cmd/...
-    - pkg/sdk
+
+  # Shared: the neutral model interface + real Vertex adapters.
+  adapters:
+    - pkg/provider
 
 layer_rules:
   kernel: []
   nodes: [kernel]
-  domain: []
-  runtime: [domain]
-  adapters: [domain, runtime]
+  adapters: []
+  host: [kernel, nodes, adapters]
 
 aggregates:
   engine:
@@ -47,53 +41,35 @@ aggregates:
     root: github.com/kgatilin/reflex/nodes/llm.Config
   tool:
     root: github.com/kgatilin/reflex/nodes/tool.Func
-  event:
-    root: github.com/kgatilin/reflex/pkg/event.Event
-  config:
-    root: github.com/kgatilin/reflex/pkg/config.File
-  cycle:
-    root: github.com/kgatilin/reflex/pkg/cycle.Edge
-  projection:
-    root: github.com/kgatilin/reflex/pkg/projection.Store
-  bus:
-    root: github.com/kgatilin/reflex/pkg/bus.Bus
-  handler:
-    root: github.com/kgatilin/reflex/pkg/handler.Handler
-  graph:
-    root: github.com/kgatilin/reflex/pkg/graph.HandlerGraph
-  runtime:
-    root: github.com/kgatilin/reflex/internal/runtime.Result
-  sdk:
-    root: github.com/kgatilin/reflex/pkg/sdk.Handler
+  daemon:
+    root: github.com/kgatilin/reflex/pkg/daemon.Daemon
+  topology:
+    root: github.com/kgatilin/reflex/pkg/topology.Document
+  provider:
+    root: github.com/kgatilin/reflex/pkg/provider.Provider
 
 bounded_contexts:
   kernel:
     name: Kernel
-    description: The converged substrate — Event/Reaction/Projection primitives and the append/dispatch engine (docs 24/26).
+    description: The converged substrate — Event/Reaction/Projection primitives, the append/dispatch engine, and the changeset-fold control plane (docs CONCEPT/28).
     aggregates: [engine]
-    downstream: [nodes]
+    downstream: [nodes, host]
     relationship: shared-kernel
   nodes:
     name: Nodes
-    description: Built-in reaction bodies (llm, tool) over the kernel.
+    description: Built-in reaction bodies (llm, tool) over the kernel, resolved by name from the registry.
     aggregates: [llm, tool]
     upstream: [kernel]
     relationship: shared-kernel
-  domain:
-    name: Domain
-    description: Event envelope, YAML configuration, and cycle primitives.
-    aggregates: [event, config, cycle]
-    downstream: [runtime, adapters]
-    relationship: shared-kernel
-  runtime:
-    name: Runtime
-    description: Event bus, subscription graph, handlers, projections, and drain execution.
-    aggregates: [bus, handler, graph, runtime, projection]
-    upstream: [domain]
-    relationship: shared-kernel
+  host:
+    name: Host
+    description: The runtime shell — the daemon, the declarative topology document, and the reflexd CLI.
+    aggregates: [daemon, topology]
+    upstream: [kernel, nodes, adapters]
+    relationship: open-host
   adapters:
     name: Adapters
-    description: CLI commands and embeddable SDK entrypoints into the event runtime.
-    aggregates: [sdk]
-    upstream: [runtime, domain]
+    description: Neutral completion interface + real Vertex model adapters (Gemini, Claude, OSS).
+    aggregates: [provider]
+    downstream: [host, nodes]
     relationship: open-host
