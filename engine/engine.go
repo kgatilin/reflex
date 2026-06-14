@@ -21,6 +21,10 @@ type Engine struct {
 	// commits a node's body here on a successful apply; foldTopology reattaches
 	// it by name. The wiring itself is fully recomputable from the log (G8).
 	bodies map[string]Reaction
+	// resolver builds descriptor-based node bodies (BodyKind + BodyConfig) into
+	// Reactions (resolver.go). nil for the in-process path (live Body closures);
+	// the daemon/YAML path installs one via WithBodyResolver.
+	resolver BodyResolver
 	// live is the cached live topology — a memoisation of foldTopology(log,
 	// bodies), nothing more (G8: it is recomputed from the log, never the truth).
 	// Apply rebuilds it after writing the changeset's facts; liveDecls lazily
@@ -44,9 +48,53 @@ type Engine struct {
 }
 
 // New returns an empty engine: no topology, no events. Everything it
-// will ever hold arrives through Apply and Append.
-func New() *Engine {
-	return &Engine{bodies: map[string]Reaction{}}
+// will ever hold arrives through Apply and Append. Options configure the
+// engine (e.g. WithBodyResolver for the declarative/daemon path).
+func New(opts ...Option) *Engine {
+	e := &Engine{bodies: map[string]Reaction{}}
+	for _, o := range opts {
+		o(e)
+	}
+	return e
+}
+
+// Load reconstructs an engine from a persisted or replayed log (the daemon's
+// crash-recovery / restart path): it adopts the log and rebuilds every
+// descriptor-based node body from the recorded sys.node.registered facts via the
+// resolver. This is the proof of G8 for behaviour wiring — only the body kind +
+// config are facts; the resolver rebuilds the code. A descriptor whose body
+// cannot be resolved is a fatal load error (the daemon refuses to start on a log
+// it cannot fully reconstitute). Load does NOT drain; the caller drives recovery
+// by calling Drain (rebuildScopes re-derives any in-flight cones).
+func Load(log []Event, opts ...Option) (*Engine, error) {
+	e := New(opts...)
+	e.log = log
+	for _, ev := range log {
+		if ev.Subject != subjNodeRegistered {
+			continue
+		}
+		var s nodeSpec
+		if json.Unmarshal(ev.Payload, &s) != nil || s.Name == "" || s.BodyKind == "" {
+			continue
+		}
+		r, err := e.resolveBody(s.Name, s.BodyKind, s.BodyConfig)
+		if err != nil {
+			return nil, fmt.Errorf("engine: load: node %q: %w", s.Name, err)
+		}
+		e.bodies[s.Name] = r
+	}
+	e.live = foldTopology(e.log, e.bodies)
+	return e, nil
+}
+
+// resolveBody builds one descriptor body through the installed resolver (or
+// reports that none is installed — a descriptor node with no resolver is a
+// configuration error, surfaced as a rejected changeset / failed load).
+func (e *Engine) resolveBody(name, kind string, config json.RawMessage) (Reaction, error) {
+	if e.resolver == nil {
+		return nil, fmt.Errorf("node %q declares body kind %q but no body resolver is installed (pass engine.WithBodyResolver)", name, kind)
+	}
+	return e.resolver(name, kind, config)
 }
 
 // Apply runs the changeset pipeline (doc 20 / CONCEPT §8): it is the in-process
@@ -77,17 +125,45 @@ func (e *Engine) Apply(ctx context.Context, decls ...Decl) error {
 		return err
 	}
 
+	// Resolve every descriptor-based body up front (a body that cannot be built
+	// is a rejection, never a silent nil): a live Body is taken as-is, a
+	// BodyKind descriptor is run through the resolver. Failures join the
+	// connectivity gaps in the single reject reason list.
+	resolved := map[string]Reaction{}
+	var bodyErrs []string
+	for _, d := range decls {
+		n, ok := d.(Node)
+		if !ok {
+			continue
+		}
+		if n.Body != nil {
+			resolved[n.Name] = n.Body
+			continue
+		}
+		if nodeBodyDescriptor(n) {
+			r, rerr := e.resolveBody(n.Name, n.BodyKind, n.BodyConfig)
+			if rerr != nil {
+				bodyErrs = append(bodyErrs, rerr.Error())
+				continue
+			}
+			resolved[n.Name] = r
+		}
+	}
+
 	req := e.appendSys("", SubjChangesetRequested, mustMarshal(changesetPayload{
 		Ops:       opsOf(decls),
 		Principal: "apply",
 	}))
 
-	if !rep.Connected {
+	if !rep.Connected || len(bodyErrs) > 0 {
 		e.appendSys(req.Trace.SpanID, SubjChangesetRejected, mustMarshal(rejectedPayload{
 			Changeset: req.Trace.SpanID,
-			Reasons:   rep.Suggestions,
+			Reasons:   append(append([]string(nil), rep.Suggestions...), bodyErrs...),
 		}))
-		return &ValidationError{Report: rep}
+		if !rep.Connected {
+			return &ValidationError{Report: rep}
+		}
+		return fmt.Errorf("engine: changeset rejected — %d node body(ies) failed to resolve: %v", len(bodyErrs), bodyErrs)
 	}
 
 	for _, op := range opsOf(decls) {
@@ -95,10 +171,8 @@ func (e *Engine) Apply(ctx context.Context, decls ...Decl) error {
 			e.appendSys(req.Trace.SpanID, subject, payload)
 		}
 	}
-	for _, d := range decls {
-		if n, ok := d.(Node); ok && n.Body != nil {
-			e.bodies[n.Name] = n.Body
-		}
+	for name, r := range resolved {
+		e.bodies[name] = r
 	}
 	e.appendSys(req.Trace.SpanID, SubjChangesetApplied, mustMarshal(appliedPayload{
 		Changeset: req.Trace.SpanID,

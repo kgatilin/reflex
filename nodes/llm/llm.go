@@ -234,6 +234,41 @@ func NewWithProvider(cfg Config, p provider.Provider) (engine.Node, engine.Proje
 	return node, proj
 }
 
+// Declare builds the DESCRIPTOR form of an llm seat (doc 20 / CONCEPT §8): a
+// node carrying body kind "llm" + this Config as its serialized descriptor
+// (BodyConfig), plus its paired llm.history projection — no provider is resolved
+// here. This is what the declarative/daemon path applies: the body is rebuilt
+// from the descriptor by llm.Factory through the engine's resolver, so the seat
+// is recoverable from the log (G8). The in-process analog is NewWithProvider
+// (a live Body, no descriptor). The Config round-trips through the descriptor by
+// field name (it is both marshalled here and unmarshalled in Factory).
+func Declare(cfg Config) (engine.Node, engine.Projection) {
+	cfg = cfg.defaults()
+	node := engine.Node{
+		Name:       cfg.Name,
+		On:         cfg.On,
+		In:         cfg.In,
+		Scope:      cfg.Scope,
+		Emits:      cfg.Emits,
+		Reads:      []string{cfg.HistoryName},
+		BodyKind:   "llm",
+		BodyConfig: mustMarshal(cfg),
+	}
+	proj := engine.Projection{
+		Name: cfg.HistoryName,
+		On:   cfg.HistoryOn,
+		In:   cfg.HistoryIn,
+		Type: "llm.history",
+		Params: mustMarshal(historyParams{
+			System:    cfg.System,
+			Emits:     cfg.Emits,
+			Answer:    cfg.Answer,
+			TaskKinds: cfg.TaskKinds,
+		}),
+	}
+	return node, proj
+}
+
 // New resolves the provider from the model binding (pkg/provider) and builds the
 // seat. The returned model id replaces the binding in completion requests.
 func New(cfg Config) (engine.Node, engine.Projection, error) {
@@ -244,6 +279,40 @@ func New(cfg Config) (engine.Node, engine.Projection, error) {
 	cfg.Model = model
 	n, pr := NewWithProvider(cfg, p)
 	return n, pr, nil
+}
+
+// Reaction resolves the provider and returns JUST the seat's body Reaction —
+// the factory path (doc 20 / CONCEPT §8): a declarative node carries body kind
+// "llm" + this Config as its descriptor, and the resolver builds the Reaction
+// from it. The paired llm.history projection (NewWithProvider's second return)
+// is declared SEPARATELY in the topology — the body only reads it by name
+// (cfg.HistoryName), so the descriptor path needs the projection decl alongside
+// the node decl, both on the log.
+func Reaction(cfg Config) (engine.Reaction, error) {
+	cfg = cfg.defaults()
+	p, model, err := provider.For(cfg.Model, provider.Config{Project: cfg.Project, Location: cfg.Location})
+	if err != nil {
+		return nil, err
+	}
+	cfg.Model = model
+	return body(cfg, p), nil
+}
+
+// Factory is the nodes.Factory for body kind "llm" (CONCEPT §8): it decodes the
+// node's body config into an llm.Config, stamps the node name, and builds the
+// body Reaction via Reaction. A composition root wires it with
+// nodes.Register("llm", llm.Factory). Kept as a plain func value so this package
+// does not import the registry (no import cycle; the registry imports engine
+// only).
+func Factory(name string, config json.RawMessage) (engine.Reaction, error) {
+	var cfg Config
+	if len(config) > 0 {
+		if err := json.Unmarshal(config, &cfg); err != nil {
+			return nil, err
+		}
+	}
+	cfg.Name = name
+	return Reaction(cfg)
 }
 
 // body is the seat's Reaction: read the history view, call the model once,

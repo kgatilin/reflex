@@ -61,7 +61,22 @@ type Node struct {
 	// scope.{Scope}.closed, exactly once per instance (G6).
 	Scope string
 
+	// Body is the node's live Reaction — the in-process form, an arbitrary Go
+	// closure. It is NOT serializable, so it is held by name in a process
+	// registry (Engine.bodies), never written to the log. In-process callers set
+	// it directly.
 	Body Reaction
+
+	// BodyKind + BodyConfig are the SERIALIZABLE body descriptor (doc 20 / the
+	// daemon path): instead of a live closure, a declarative node names a body
+	// kind ("llm", a tool, …) and carries its opaque config. Apply resolves them
+	// through the engine's BodyResolver into a Reaction (and caches it in the
+	// registry); both ride on the sys.node.registered fact, so a daemon restart
+	// rebuilds the body from the log via the resolver (G8). A node sets EITHER a
+	// live Body (in-process) OR a BodyKind descriptor (declarative), never both;
+	// a node with neither is a sink.
+	BodyKind   string
+	BodyConfig json.RawMessage
 }
 
 func (Node) isDecl() {}

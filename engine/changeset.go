@@ -110,6 +110,12 @@ type nodeSpec struct {
 	Reads []string `json:"reads,omitempty"`
 	Emits []string `json:"emits,omitempty"`
 	Scope string   `json:"scope,omitempty"`
+	// BodyKind + BodyConfig are the serializable body descriptor (resolver.go).
+	// A live in-process Body is never serialized (it is code held by name in the
+	// engine's registry); a declarative node serializes its kind + config so the
+	// body is rebuildable from the log via the resolver.
+	BodyKind   string          `json:"body_kind,omitempty"`
+	BodyConfig json.RawMessage `json:"body_config,omitempty"`
 }
 
 type scopeSpec struct {
@@ -149,7 +155,10 @@ func opsOf(decls []Decl) []Op {
 }
 
 func nodeSpecOf(n Node) nodeSpec {
-	return nodeSpec{Name: n.Name, On: n.On, In: n.In, Reads: n.Reads, Emits: n.Emits, Scope: n.Scope}
+	return nodeSpec{
+		Name: n.Name, On: n.On, In: n.In, Reads: n.Reads, Emits: n.Emits, Scope: n.Scope,
+		BodyKind: n.BodyKind, BodyConfig: n.BodyConfig,
+	}
 }
 
 func projectionSpecOf(p Projection) projectionSpec {
@@ -267,6 +276,7 @@ func foldTopology(log []Event, bodies map[string]Reaction) []Decl {
 		}
 		out = append(out, Node{
 			Name: s.Name, On: s.On, In: s.In, Reads: s.Reads, Emits: s.Emits, Scope: s.Scope,
+			BodyKind: s.BodyKind, BodyConfig: s.BodyConfig,
 			Body: bodies[s.Name],
 		})
 	}
