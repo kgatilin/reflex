@@ -14,8 +14,10 @@
 
 | Piece | Where | State |
 |---|---|---|
-| Engine contracts (skeleton): `Event`/`Trace`/`Emit`, `Reaction`/`Views`/`KV`, `Decl` (`Node`/`Scope`/`Projection`), `tool.Node` | `engine/`, `nodes/` | defined; `Append`/`Drain`/`llm.New` still panic |
+| Engine contracts (skeleton): `Event`/`Trace`/`Emit`, `Reaction`/`Views`/`KV`, `Decl` (`Node`/`Scope`/`Projection`), `tool.Node` | `engine/`, `nodes/` | defined; `llm.New` still panics |
 | **Step 1 — connectivity validation** (doc 27 §7) | `engine/` + ArchMotif `pkg/graphval` | **done, verified** |
+| **Stage 2a — `Append` + `Drain` to quiescence** (deterministic) | `engine/` | **done, verified** |
+| **Stage 2b — scope instances, obligation counting, `scope.closed`, budget cap** (docs 24 §5 / 26 §3d/§3f) | `engine/scope.go` + `engine/engine.go` + `validate.go` | **done, verified** (`306fc6e`) |
 
 **Step 1 detail.** `engine.Validate(decls...) → Report{Connected, DeadEnds,
 UnreachableNodes, Fragments, UnboundedCycles, Suggestions}`; `Apply` routes
@@ -132,6 +134,15 @@ The doc-24 §5 / doc-26 runtime.
 - Cycle budget-coverage is approximated as "every SCC node is `in:` a
   budgeted scope"; the precise rule (budget bounds a kind on the cycle's
   edges) is a refinement.
+- **2b closure ordering** is correct under depth-first dispatch (every
+  ancestor cone holds an obligation until its own root leaves, so nested
+  cones never quiesce on the same event — narrowest closes first). The one
+  unhandled exotic: **two scopes co-rooted on a single span** with an
+  inter-closure dependency close in `rootsOf` order within one `leave` loop;
+  no topology needs this yet — add a test before relying on it.
+- 2b leaves `request_id` keyed on the literal scope name `request`
+  (`narrowestRequest`); a broader "request-class" notion would need a
+  convention.
 - Static allowlist lint (`emit ⊆ Emits`) — runtime-only today, a stub.
 - `pkg/graphval` vs `graph` naming (chose `graphval` — ArchMotif already
   has `internal/graph`); reflex-side import could alias to `graph` if
