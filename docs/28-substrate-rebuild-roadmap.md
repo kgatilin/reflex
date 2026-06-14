@@ -20,14 +20,16 @@
 **Step 1 detail.** `engine.Validate(decls...) → Report{Connected, DeadEnds,
 UnreachableNodes, Fragments, UnboundedCycles, Suggestions}`; `Apply` routes
 through it (returns `*ValidationError` on a gap, never touches the log).
-Added `Node.Kind` (`llm`/`tool`/`deterministic`), scope-defaulting (empty
-`In` → `global`), and the domain matcher `subjectMatch` (hierarchical
+Added scope-defaulting (empty `In` → `global`) and the domain matcher
+`subjectMatch` (hierarchical
 dotted tokens, `*` one token, `>` tail — **no technology name in the
 domain**). The topology graph is built from `[]Decl` (edge `X→Y` iff a kind
 in `X.Emits` is `subjectMatch`-ed by a pattern in `Y.On`) and all five
 checks run as **matrix algebra over a graph in ArchMotif's `pkg/graphval`**
 (closure / reachable-from-roots / SCC / dead-items) — reflex builds the
-graph, never sees the matrix.
+graph, never sees the matrix. The unbounded-cycle check is **scope-budget
+coverage** (every cycle within a budgeted scope); a `Node.Kind` tag was added
+then removed — determinism does not give termination (doc 26 §3).
 
 **Branches (local only, not pushed/merged):** reflex
 `feat/connectivity-validation` (`057489b`); ArchMotif
@@ -38,9 +40,9 @@ graph-in contract, matrix internal). reflex depends on it via
 ## What this roadmap rests on (decisions, with pointers)
 
 - **Substrate = events + states (projections) + reactions**; scope is a
-  built-in projection, not a fourth kind; enforcement is **graph shape**
-  (deterministic guard nodes + a compile-time SCC check), not a dispatch
-  gate ([26](./26-bare-substrate.md)).
+  built-in projection, not a fourth kind; **termination is a scope budget**
+  (a static cycle-coverage check, no node attribute), not a dispatch gate
+  ([26](./26-bare-substrate.md)).
 - **The LLM has no tools** — it emits allowlisted events; a tool-call is an
   emission with a tool-node consumer ([26 §4](./26-bare-substrate.md)).
 - **Validation is the engine's job**, expressed as matrix algebra over a
@@ -73,13 +75,14 @@ The smallest runnable slice — make a reaction chain actually flow.
 The doc-24 §5 / doc-26 runtime.
 
 - Scope rooting (declared + node-rooted), obligation counting per cone,
-  `scope.X.closed` emitted exactly once at quiescence (G6), budgets, and
-  guard-enforced cycle termination — **including the deferred "monotone
-  exit" half of the guard check** ([26 §3a](./26-bare-substrate.md)).
-- **Acceptance**: a loop topology (`gather ↔ fs`) bounded by a deterministic
-  guard runs to a `scope.X.closed` and terminates; a join (N tool calls)
-  closes once when all results are in (N=1 is the degenerate case).
-- **Proves**: loops, joins, budgets, guards — the heart of the model.
+  `scope.X.closed` emitted exactly once at quiescence (G6), and **scope
+  budgets that bound cycles** — plus the open decision of how the budget
+  bites at the threshold: a scope cap (engine stops admitting the bounded
+  kind) vs a terminal `budget_exhausted` ([26 §3d](./26-bare-substrate.md)).
+- **Acceptance**: a loop topology (`gather ↔ fs`) covered by a budgeted scope
+  runs to a `scope.X.closed` and terminates; a join (N tool calls) closes
+  once when all results are in (N=1 is the degenerate case).
+- **Proves**: loops, joins, scope budgets — the heart of the model.
 
 ### Stage 2c — projections (declared folds over causal horizons)
 
@@ -115,7 +118,11 @@ The doc-24 §5 / doc-26 runtime.
 
 ## Open / deferred (carried)
 
-- Monotone-exit half of the SCC-guard check (lands in 2b).
+- How a scope budget bites at the threshold — scope cap vs terminal
+  `budget_exhausted` (doc 26 §3d); decided in 2b.
+- Cycle budget-coverage is approximated as "every SCC node is `in:` a
+  budgeted scope"; the precise rule (budget bounds a kind on the cycle's
+  edges) is a refinement.
 - Static allowlist lint (`emit ⊆ Emits`) — runtime-only today, a stub.
 - `pkg/graphval` vs `graph` naming (chose `graphval` — ArchMotif already
   has `internal/graph`); reflex-side import could alias to `graph` if

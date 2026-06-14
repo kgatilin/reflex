@@ -1,10 +1,11 @@
-# 26 — The bare substrate: scope as a built-in projection, enforcement as graph shape, the LLM emits events not tool-calls
+# 26 — The bare substrate: scope as a built-in projection, termination is a scope budget, the LLM emits events not tool-calls
 
 > **Status: DRAFT / proposed.** Converged in a design session. It pushes the
 > [24](./24-concept.md) reduction one level deeper and *subtracts* in three
-> places: it removes "scope" as a fourth managed kind, removes the
-> dispatch-time enforcement gate, and removes "tool" as a capability the LLM
-> holds. All three become conventions over the three primitives. This
+> places: it removes "scope" as a fourth managed kind, moves cycle-bounding
+> off a per-event dispatch gate onto a scope budget (the per-scope cap at the
+> threshold is an open 2b question, §3d), and removes "tool" as a capability
+> the LLM holds. All three become conventions over the three primitives. This
 > supersedes specific clauses of [24 §4/§5/§7](./24-concept.md) and restates
 > one assumption of [25 §6](./25-regulation-concept.md); the supersession
 > table is §5. It adds no primitive — every move is the standing test
@@ -79,79 +80,79 @@ causal region a finality condition ranges over" need not be a *primitive* —
 it is a projection's horizon. The word "scope" survives only as a name for
 that region; it leaves the list of primitives and the list of managed kinds.
 
-## 3. Enforcement is graph shape, not a runtime gate
+## 3. Termination is a scope budget, not a node property
 
-The one piece that looked irreducible — the dispatcher *refusing delivery*
-for `budget_exhausted` / cancellation — is not. It reduces to
-**deterministic guard nodes + a compile-time check on graph shape.** After
-this move, `dispatch` sheds its "enforcing budgets" clause
-([24 §4](./24-concept.md)): dispatch = stamp the trace + deliver. Both
-mechanisms become pure of enforcement.
+The one piece that looked irreducible — bounding cycles so the system
+provably halts — does **not** rest on classifying nodes. An earlier draft of
+this section hung it on "deterministic guard nodes"; that was wrong.
+**Determinism does not give termination.** Two deterministic reactions
+`A: on Y → emit X` and `B: on X → emit Y` ping-pong `X → Y → X → …` forever —
+a cycle of deterministic nodes is no more bounded than a cycle through an
+LLM. The node's nature is irrelevant.
 
-### 3a. Termination (G7) is a static graph property
+What bounds a cycle is a **scope budget** ([24 §5](./24-concept.md), "loops
+are budgets"): a fold counts a kind's occurrences within a cone, and the
+loop *is* that count. Termination is a property of the **scope that covers
+the cycle**, never of a node on it. `dispatch` still sheds its *per-event*
+"enforcing budgets" clause ([24 §4](./24-concept.md)) — but the bound moves
+up to the scope, not out to node attributes.
 
-A cycle terminates iff **every path that re-triggers it passes through a
-deterministic node that reads a monotone counter and exits at a threshold.**
-Per-firing work is already finite (an LLM response is finite; a deterministic
-body emits a finite set). Only *re-triggering* — a cycle in the topology —
-can run unbounded. So bound the cycles, structurally:
+### 3a. The static check: every cycle is covered by a budgeted scope
 
 > **Check.** Compute the SCCs of the static topology graph (Tarjan). Every
-> non-trivial SCC must contain a deterministic node that (a) reads a monotone
-> counter projection scoped to the cone, and (b) has an emit-edge to an
-> exit/terminal kind gated on that counter.
+> non-trivial SCC must be **covered by a scope that declares a budget**
+> bounding a kind on the cycle — otherwise reject.
 
 This *upgrades [24's](./24-concept.md) "Tarjan survives as a lint" from a
-warning to the mechanism*: it is no longer "this cycle is not covered by a
-tight budget" advice — it is what *replaces* the gate, a hard reject at
-changeset validation. The LLM can emit as much as it wants in one firing,
-but it can re-trigger itself **only through the guard**, and the guard is
-deterministic and monotone. Decidable for the monotone-fold +
-constant-threshold shape — which is exactly what a budget is. Richer
-predicates fall back to a lint (the halting problem, named honestly).
+warning to the mechanism*: "this cycle is not covered by a tight budget"
+stops being advice and becomes a hard reject at changeset validation.
+Decidable (SCCs + scope coverage), and it needs **no node attribute** —
+there is no `llm`/`deterministic` tag in the model (`Node.Kind` does not
+exist). The reflex step-1 validator approximates "covered" as "every SCC
+node is `in:` a budgeted scope"; the precise rule — the budget bounds a kind
+on the cycle's edges — is a documented refinement.
 
-### 3b. Deadlines and cancellation are guards over `clock.tick`
+### 3b. Deadlines are the same mechanism over `clock.tick`
 
-- **Deadline.** Time is `clock.tick` events ([24 §1](./24-concept.md)). A
-  deterministic guard subscribes to `clock.tick` plus the cone's open state;
-  on a tick past the deadline it routes to the exit kind. Events + state, no
-  gate.
-- **Cancellation / "cancel the rest".** Stopping *new* work is a guard on
-  the re-trigger edge (the same edge §3a guards). Early closure (race,
-  quorum) routes the continuation by predicate.
+Time is `clock.tick` events ([24 §1](./24-concept.md)); a deadline is a
+wall-clock budget crossed by ticks — the same scope property as 3a.
+Cancellation ("cancel the rest" in a race/quorum) is the covering scope
+closing early; stopping *new* work is its budget ceasing to admit the
+bounded kind.
 
 ### 3c. Why this is a guarantee, not delegation
 
-In a prior framing the objection was: "a guarantee cannot be delegated to
-the reactions it constrains." This move defeats that objection precisely —
-enforcement is delegated **not to the constrained node (the LLM) but to a
-separate deterministic guard**, and *the guard's presence on every critical
-edge is compile-verified*. So **well-formed graph ⇒ terminating runtime**:
-the guarantee is structural, established statically, never contingent on the
-constrained node's goodwill. This is the ranking-function termination proof
-of program verification, recast as a graph-shape check. The failure mode it
-forbids — an `llm → llm` cycle with no deterministic guard — is exactly what
-the check rejects; the LLM is never on a critical enforcement edge.
+The bound is structural because the **count is a fold the engine maintains**
+(the progress projection, §2), not a number a node computes and might ignore.
+An LLM cycle and an all-deterministic cycle are bounded identically, by the
+covering scope. Nothing is delegated to the reactions the bound constrains —
+it lives one level up, on the scope. This is *why* `Node.Kind` does not
+exist: the engine never needs to know whether a reaction reasons or computes.
 
-### 3d. The residue — what the gate bought that guards don't
+### 3d. The open question: how the budget bites at the threshold
 
-A node acts *after* an event exists, never before. So a node cannot prevent
-the dispatch of an **already-in-flight** result. This leaves exactly two
-things the gate did that guards do not:
+What the budget *counts* is settled (a scope fold); how it *acts* at the
+threshold is left to stage 2b. Two shapes, both scope-level:
 
-1. **Wasted in-flight compute** on early cancellation — not reclaimable from
-   the event plane. Already accepted: [24 §B](./24-concept.md) leans
-   *"Quorum/race cancellation: accept (log records results)."*
-2. **Double-continuation** when a late result lands after an early close —
-   handled by an **idempotent join-consumer** (a guard on an "already fired"
-   state). Idempotency is already required for effectful tools (G5,
-   idempotency keys, intent-before-effect).
+- **Scope cap** — the engine stops admitting the bounded kind into the cone
+  past the threshold. A small, principled enforcement that *partially walks
+  back* this document's "no runtime gate at all": the per-event gate is gone,
+  but a per-scope budget cap may be the one enforcement worth keeping.
+- **Terminal `budget_exhausted`** — the threshold emits a fact no node feeds
+  back into the loop, so the cone quiesces on its own.
 
-Net: **the gate is required for no guarantee.** Soundness holds without it.
-Its only value was efficiency (reclaim compute) and ergonomics (spare
-consumers from idempotency) — both already-accepted compromises. The
-in-flight result, when it lands, is *recorded* (G1: the log keeps what
-happened) and *deduped* by the consumer; it never re-fires the continuation.
+Choosing is a 2b decision; the basis (termination is a scope budget) and the
+static check (3a) hold either way.
+
+### 3e. The residue — what a gate would buy that a budget doesn't
+
+A reaction acts *after* an event exists, never before, so it cannot prevent
+the dispatch of an **already-in-flight** result. Two consequences, both
+already accepted: **wasted in-flight compute** on early cancellation (not
+reclaimable; [24 §B](./24-concept.md) leans "accept — the log records
+results"), and **double-continuation** when a late result lands after early
+close (handled by an idempotent join-consumer; idempotency is already
+required for effectful tools, G5). The bound itself needs none of this.
 
 ## 4. The LLM has no tools — it has events it may emit
 
@@ -199,10 +200,10 @@ is the whole contract.
 
 | Clause | Before | After (this doc) |
 |---|---|---|
-| [24 §4](./24-concept.md) dispatch | "consulting the progress projection … **enforcing budgets**" | dispatch = stamp trace + deliver; enforcement is graph shape (§3) |
-| [24 §5](./24-concept.md) budget hard-stop | `scope.budget_exhausted` = **refused dispatch** | a compile-mandated deterministic guard node on the cone's re-trigger edges (§3a) |
-| [24 §5](./24-concept.md) cancellation | "refused dispatch read off the cone" | guard on the re-trigger edge + idempotent consumer; in-flight result recorded then deduped (§3b/§3d) |
-| [24 §5/§7](./24-concept.md) managed kinds | **four**: nodes, subscriptions, **scopes**, projections | **three**: nodes, subscriptions, projections; scope = built-in projection instance + guard nodes (§2) |
+| [24 §4](./24-concept.md) dispatch | "consulting the progress projection … **enforcing budgets**" | dispatch = stamp trace + deliver; the *per-event* budget enforcement leaves dispatch — cycle-bounding moves to a scope budget (§3) |
+| [24 §5](./24-concept.md) budget hard-stop | `scope.budget_exhausted` = **refused dispatch** | a compile-mandated scope budget covering every cycle (§3a); how it bites at the threshold (scope cap vs terminal `budget_exhausted`) is open (§3d) |
+| [24 §5](./24-concept.md) cancellation | "refused dispatch read off the cone" | the covering scope closes early + idempotent consumer; in-flight result recorded then deduped (§3b/§3e) |
+| [24 §5/§7](./24-concept.md) managed kinds | **four**: nodes, subscriptions, **scopes**, projections | **three**: nodes, subscriptions, projections; scope = built-in projection instance (§2) |
 | [24 §3](./24-concept.md) LLM/menu | "emits typed actions from an allowlist; menu is a projection of consumers" | strengthened: the LLM has **no tools**, only allowlisted emissions; tool-call = emission with a tool-node consumer; function-calling = transport encoding (§4) |
 | [25 §6/§7.1](./25-regulation-concept.md) | "the engine refuses dispatch on an exhausted budget" | per-cone hard-stop is a guard node (§3a); **resolver admission control is unaffected** — it is already a guard-style reaction, not the dispatcher gate |
 
@@ -216,12 +217,12 @@ gate needs the restatement above.
 
 - **The progress projection survives.** Obligation counting is still how the
   barrier knows a cone has quiesced and when to fire `scope.closed`. It is
-  now a *pure projection*, read by guard nodes and the barrier reaction —
-  not by a gate.
+  now a *pure projection*, read by the barrier reaction and consulted by the
+  scope-budget coverage check — not by a gate.
 - **`caused_by` stamping survives** (uprightness, [24 §2](./24-concept.md)):
   membership-is-geometry depends on it; without engine-stamped causality the
   cone has no definition.
-- **The validator gains teeth, not a primitive.** The SCC-guard check (§3a)
+- **The validator gains teeth, not a primitive.** The SCC budget-coverage check (§3a)
   becomes a hard reject where [24](./24-concept.md) had a lint. New
   *validation*, same three primitives.
 - **The clock is load-bearing.** `clock.tick` as an event source (already
@@ -236,7 +237,7 @@ convention over Event / Reaction / Projection?*
 | Move | Effect on the concept count | Verdict |
 |---|---|---|
 | scope → built-in projection | removes a managed kind (4 → 3) | subtracts; passes |
-| enforcement → graph shape | replaces a runtime privilege with a static check + deterministic guards (ordinary nodes) | no new primitive, a stronger validator; passes |
+| termination → scope budget | replaces a per-event runtime gate with a scope budget + a static cycle-coverage check (no node attribute) | no new primitive, a stronger validator; passes |
 | LLM emits events, not tool-calls | removes "tool" as a held capability | subtracts; passes |
 
 All three **subtract**. The reduction direction the whole model is built on
@@ -258,10 +259,10 @@ primitives — none of them a fourth thing.
 - [17-quiescence-prior-art.md](./17-quiescence-prior-art.md) — obligation
   counting, the progress projection that survives as a pure projection.
 - [16-engine-architecture.md](./16-engine-architecture.md) — dispatch and
-  the closure algebra the guards re-express.
+  the closure algebra scope budgets re-express.
 - [15-primitive-reduction.md](./15-primitive-reduction.md) — the two-body
   vocabulary; the `router` reaction the value-fork rides on.
 - [19-projections.md](./19-projections.md) — the fold grammar a scope is now
   an instance of; horizons.
 - [20-topology-management.md](./20-topology-management.md) — changeset
-  validation, where the SCC-guard check lands; per-instance interventions.
+  validation, where the SCC budget-coverage check lands; per-instance interventions.

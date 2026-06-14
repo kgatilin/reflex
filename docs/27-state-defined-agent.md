@@ -99,7 +99,7 @@ read-only**):
 | `plan` (llm) | `plan.requested` | `request` | `goal`, context views | `state.updated.plan`, `state.updated.status{executing}` |
 | `execute` (llm) | `state.updated.plan`, `tool.*.result` | `request` | `plan`, `task_context` | next step `tool.*.call`, `state.updated.plan.{i}.status`; when no `pending` → `state.updated.status{done}`, `task.answered` |
 | `fs`, `gotool` (tool) | `tool.X.call` | `global` | — | `tool.X.result` / `.failed` |
-| `*-guard` (deterministic) | re-trigger edges of `gather` / `execute` | `request` | counter | forced exit at budget |
+| *(no guard node)* | — | — | — | the `gather` / `execute` loops are bounded by the **budget on their covering `request` scope** (§3a), not by a node |
 | `notify` (sink) | `task.answered`, `task.needs_clarification` | `request` | — | reply to the user |
 
 **Cycles.** A cycle is a node subscribing to the *result of work it itself
@@ -107,8 +107,9 @@ emitted*: `gather` emits `tool.fs.read.call`, the `fs` island answers
 `tool.fs.read.result`, `gather` consumes it and either loops (emit another
 read) or exits via a different kind (`plan.requested` — a dead-end where the
 next bridge attaches). The SCC `{gather, fs}` is a real cycle and **must**
-contain a deterministic guard with a monotone exit ([26 §3a](./26-bare-substrate.md)) —
-the validator enforces it.
+be covered by a scope that declares a budget ([26 §3a](./26-bare-substrate.md)) —
+the validator enforces it. Determinism is irrelevant; the budget on the
+covering scope is what bounds the loop.
 
 ## 4. Scopes — always one; the daemon model
 
@@ -156,8 +157,8 @@ folds the subscriber list into a graph and reports:
 - **unreachable nodes** — a node whose `On` kinds are emitted by nobody and
   are not an ingress root;
 - **disconnected fragments** — islands with no path from an ingress root;
-- **unbounded cycles** — a non-trivial SCC with no deterministic guard
-  carrying a monotone exit ([26 §3a](./26-bare-substrate.md)) → reject;
+- **unbounded cycles** — a non-trivial SCC not covered by a scope that
+  declares a budget ([26 §3a](./26-bare-substrate.md)) → reject;
 - **allowlist lints** — a node emitting outside its declared `Emits`
   ([24 §A.4](./24-concept.md)).
 
@@ -182,9 +183,9 @@ suggestions**. Add the suggested subscriber, re-run, converge.
 | Need | Status | Note |
 |---|---|---|
 | `Engine.Apply` validation path | `panic` | must fold decls → live table and validate the resulting graph, **without** Append/Drain |
-| a **connectivity validator** | absent | the §5 checks: dead-ends, unreachable, fragments, SCC+guard, allowlist lint |
+| a **connectivity validator** | absent | the §5 checks: dead-ends, unreachable, fragments, SCC budget-coverage, allowlist lint |
 | **scope defaulting** | absent | `Node.In` empty → `global`; never scope-less (this session's correction) |
-| a **node-type tag** (`llm` / `tool` / `deterministic`) | absent | the SCC-guard check needs to know which nodes may be guards (deterministic) and which may not be on a critical enforcement edge (`llm`); add e.g. `Node.Kind` |
+| ~~a node-type tag~~ | **superseded** | a `Node.Kind` tag was added here, then removed: determinism does not give termination, so the cycle check is scope-budget coverage, not a node attribute (doc 26 §3) |
 | a **dry-run entry point** | absent | `reflex validate` returns the report without mutating |
 | the **example topology** as decls | absent | the §3/§4 subscriber list, expressed as `[]Decl`, including the global config/`project_context` projections |
 
@@ -196,7 +197,8 @@ The whole reconciler chain stays un-run.
 
 Implement, in order:
 
-1. `Node.Kind` (or equivalent) + scope-defaulting to `global`.
+1. Scope-defaulting to `global`. (A `Node.Kind` tag was added here and then
+   removed — see doc 26 §3; the cycle check is scope-budget coverage.)
 2. `Engine.Apply` validation path: fold `[]Decl` → live table.
 3. The connectivity validator (§5) over the live table.
 4. A dry-run surface returning the report (connected / gaps + bridge
@@ -215,8 +217,8 @@ gaps when it is not.
 - [24-concept.md](./24-concept.md) — three primitives, subject grammar (§2),
   config-as-facts (§A.4), changeset validation (§7), the standing test (§D).
 - [26-bare-substrate.md](./26-bare-substrate.md) — scope as a built-in
-  projection, enforcement as graph shape (the SCC-guard check, §3a), the LLM
-  emits allowlisted events not tool-calls (§4).
+  projection, termination as a scope budget (the cycle budget-coverage
+  check, §3a), the LLM emits allowlisted events not tool-calls (§4).
 - [25-regulation-concept.md](./25-regulation-concept.md) — global state as
   `sys.` facts outside cones (the `project_context` pattern).
 - [20-topology-management.md](./20-topology-management.md) — the changeset
