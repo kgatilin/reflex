@@ -136,10 +136,15 @@ The doc-24 §5 / doc-26 runtime.
   edges) is a refinement.
 - **2b closure ordering** is correct under depth-first dispatch (every
   ancestor cone holds an obligation until its own root leaves, so nested
-  cones never quiesce on the same event — narrowest closes first). The one
-  unhandled exotic: **two scopes co-rooted on a single span** with an
-  inter-closure dependency close in `rootsOf` order within one `leave` loop;
-  no topology needs this yet — add a test before relying on it.
+  cones never quiesce on the same event — narrowest closes first). The only
+  case left is benign: **two scopes co-rooted on one span** (both `Root` the
+  same kind) share an *identical* cone — same root, same membership, same
+  obligation count — so they quiesce in lockstep and both `closed` facts fire
+  in the same `leave` loop. The only real use of co-rooting is **two budgets
+  over one cone** (e.g. an `llm.call` ceiling and a `tool.pay.call` ceiling),
+  which has no inter-closure dependency: an inter-closure dependency between
+  two geometrically-identical cones is vacuous (B closes iff A closes), so
+  the `rootsOf` order within that loop never matters. No test or fix needed.
 - 2b leaves `request_id` keyed on the literal scope name `request`
   (`narrowestRequest`); a broader "request-class" notion would need a
   convention.
