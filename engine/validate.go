@@ -59,6 +59,16 @@ type Report struct {
 	// Sorted ascending.
 	StalledClosures []string
 
+	// CoRootedScopes are pairs of distinct scope names that can root on the
+	// same event (their root triggers overlap), so one span would open two
+	// scope instances — a degenerate co-rooting forbidden by the model (doc 24
+	// §5 / doc 26 §3d): a span roots at most one scope. Two scopes rooted on one
+	// span share an identical cone (same root, same membership, same obligation
+	// count) and add nothing over a single scope carrying both budgets in its
+	// Budget map. Each inner slice is the two scope names, sorted; the outer
+	// slice is sorted.
+	CoRootedScopes [][]string
+
 	// Suggestions are human-readable bridge proposals (doc 27 §1/§5), e.g.
 	// "kind X is a dead-end — add an llm node that consumes X …".
 	Suggestions []string
@@ -126,13 +136,15 @@ func Validate(decls ...Decl) (Report, error) {
 	rep.Fragments = append([]string(nil), rep.UnreachableNodes...)
 	rep.UnboundedCycles = unboundedCycles(g)
 	rep.StalledClosures = stalledClosures(decls, nodes)
+	rep.CoRootedScopes = coRootedScopes(decls, nodes)
 
 	rep.Suggestions = suggestions(rep)
 	rep.Connected = len(rep.DeadEnds) == 0 &&
 		len(rep.UnreachableNodes) == 0 &&
 		len(rep.Fragments) == 0 &&
 		len(rep.UnboundedCycles) == 0 &&
-		len(rep.StalledClosures) == 0
+		len(rep.StalledClosures) == 0 &&
+		len(rep.CoRootedScopes) == 0
 
 	// allowlistLint is a runtime check, not a static one: it compares an
 	// observed emit against the node's declared Emits and can only be made on
@@ -423,6 +435,105 @@ func stalledClosures(decls []Decl, nodes []Node) []string {
 	return out
 }
 
+// coRootedScopes returns the pairs of distinct scope names that can root on the
+// same event — a span opening two scope instances, forbidden by the model (doc
+// 24 §5 / doc 26 §3d). A span roots at most one scope: two scopes rooted on one
+// span share an identical cone, so the only legitimate "two budgets over one
+// cone" need is served by a single scope with two entries in its Budget map,
+// never by co-rooting.
+//
+// A scope's root triggers come from both rooting sources (doc 24 §5): a declared
+// Scope's Root, and a node-rooted scope's On (the node roots when it fires).
+// Two scope names collide if any of their triggers can match a common event.
+//
+// APPROXIMATION: trigger overlap is decided token-wise by patternsOverlap, which
+// treats a ">" tail as conservatively overlapping (it may report a collision for
+// patterns that share no concrete subject). Erring toward rejection is correct
+// for a hard constraint — a false positive is a topology made to name its scopes
+// disjointly, never a co-rooting slipping through.
+func coRootedScopes(decls []Decl, nodes []Node) [][]string {
+	triggers := rootTriggers(decls, nodes)
+
+	names := make([]string, 0, len(triggers))
+	for name := range triggers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var out [][]string
+	for i := 0; i < len(names); i++ {
+		for j := i + 1; j < len(names); j++ {
+			if triggersOverlap(triggers[names[i]], triggers[names[j]]) {
+				out = append(out, []string{names[i], names[j]})
+			}
+		}
+	}
+	return out
+}
+
+// rootTriggers maps each scope name to the kind patterns whose dispatch roots an
+// instance of it (doc 24 §5): a declared Scope contributes its Root; a
+// node-rooted scope contributes the node's On patterns (the node roots on the
+// events it fires on). A declared Scope with an empty Root is budget-only
+// (rooted by a same-named node) and contributes no trigger.
+func rootTriggers(decls []Decl, nodes []Node) map[string][]string {
+	out := map[string][]string{}
+	for _, d := range decls {
+		if s, ok := d.(Scope); ok && s.Name != "" && s.Root != "" {
+			out[s.Name] = append(out[s.Name], s.Root)
+		}
+	}
+	for _, n := range nodes {
+		if n.Scope != "" {
+			out[n.Scope] = append(out[n.Scope], n.On...)
+		}
+	}
+	return out
+}
+
+// triggersOverlap reports whether any pattern in a can match a common event with
+// any pattern in b.
+func triggersOverlap(a, b []string) bool {
+	for _, pa := range a {
+		for _, pb := range b {
+			if patternsOverlap(pa, pb) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// patternsOverlap reports whether two subject-kind patterns can match a common
+// concrete subject, under the subject grammar (doc 24 §2: "*" one token, ">"
+// tail of one or more tokens, a literal token exact). Token-wise: a ">" in
+// either pattern makes the remaining tails overlap (conservative — ">" matches
+// any non-empty tail); a "*" matches any single token; two literals must be
+// equal; and patterns that run out at different lengths (without a ">") cannot
+// share a subject.
+func patternsOverlap(a, b string) bool {
+	ta, tb := splitTokens(a), splitTokens(b)
+	for i := 0; ; i++ {
+		aEnd, bEnd := i >= len(ta), i >= len(tb)
+		if aEnd && bEnd {
+			return true // same length, every token compatible
+		}
+		if aEnd || bEnd {
+			return false // different length, no ">" reached — no common subject
+		}
+		x, y := ta[i], tb[i]
+		if x == ">" || y == ">" {
+			return true // tail matches the rest (≥1 token) on both sides
+		}
+		if x == "*" || y == "*" {
+			continue // one token each, compatible
+		}
+		if x != y {
+			return false
+		}
+	}
+}
+
 // budgetedScopes collects the names of declared Scopes carrying a non-empty
 // Budget (doc 24 §5): the scopes that actually bound a per-kind count within a
 // cone. A node is "bounded" iff its (defaulted) In names one of these.
@@ -460,6 +571,11 @@ func suggestions(rep Report) []string {
 		out = append(out, fmt.Sprintf(
 			"scope %q can close on a non-terminal state with no consumer of \"scope.%s.closed\" — add an llm bridge (or a deterministic terminator) that consumes \"scope.%s.closed\" and emits a terminal event or re-drives into a new child cone (doc 26 §3f)",
 			name, name, name))
+	}
+	for _, pair := range rep.CoRootedScopes {
+		out = append(out, fmt.Sprintf(
+			"scopes %q and %q can root on the same event — a span roots at most one scope; merge them into one scope and put both budgets in its Budget map (doc 24 §5)",
+			pair[0], pair[1]))
 	}
 	return out
 }

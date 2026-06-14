@@ -181,6 +181,17 @@ final value — `obligations == 0` (natural quiescence) or
 reads the result and a final scope admits nothing. There is no moment of
 decision, only two computed predicates over the cone.
 
+**One span roots at most one scope; a scope carries many budgets.** A scope's
+`Budget` is a *map* of kind → ceiling, so several budgets live in one scope
+over one cone (e.g. `{llm.call: 10, tool.pay.call: 3}`). There is therefore
+never a reason to root two scopes on the same event: two scopes co-rooted on
+one span would share an *identical* cone — same root, same membership, same
+obligation count, quiescing in lockstep — and add nothing over the single
+scope with both budgets. So co-rooting is **rejected at validation** (a span
+roots at most one scope); "two budgets over one cone" is one scope with two
+`Budget` entries. (An inter-closure dependency between two such identical
+cones would be vacuous anyway: B closes iff A closes.)
+
 ### 3f. The compile-time termination guarantee: connectivity × budget
 
 A closed scope must lead **somewhere** — a continuation or a terminal event;

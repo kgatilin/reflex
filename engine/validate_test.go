@@ -159,6 +159,58 @@ func TestValidate_StalledClosureNeedsAConsumer(t *testing.T) {
 	}
 }
 
+func TestValidate_CoRootedScopesRejected(t *testing.T) {
+	// Two scopes rooting on the same event (both Root "request.received") would
+	// open two instances on one span — a degenerate co-rooting forbidden by the
+	// model (doc 24 §5 / 26 §3d). The validator rejects it and suggests merging
+	// into one scope with both budgets in its Budget map.
+	decls := []Decl{
+		Scope{Name: "request", Root: "request.received", Budget: map[string]int{"llm.call": 10}},
+		Scope{Name: "cost", Root: "request.received", Budget: map[string]int{"tool.pay.call": 3}},
+		Node{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}},
+		Node{Name: "work", On: []string{"request.received"}, In: "request", Emits: []string{"task.answered"}},
+		Node{Name: "notify", On: []string{"task.answered", "scope.request.closed", "scope.cost.closed"}, In: "global"},
+	}
+	rep, err := Validate(decls...)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	found := false
+	for _, pair := range rep.CoRootedScopes {
+		if contains(pair, "request") && contains(pair, "cost") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected {cost,request} reported as co-rooted; got %v", rep.CoRootedScopes)
+	}
+	if rep.Connected {
+		t.Fatal("expected Connected==false with co-rooted scopes")
+	}
+	if !anyContains(rep.Suggestions, "root on the same event") || !anyContains(rep.Suggestions, "Budget map") {
+		t.Fatalf("expected a merge suggestion for co-rooted scopes; got %v", rep.Suggestions)
+	}
+
+	// One scope carrying BOTH budgets is the sanctioned form — no co-rooting.
+	merged := []Decl{
+		Scope{Name: "request", Root: "request.received", Budget: map[string]int{"llm.call": 10, "tool.pay.call": 3}},
+		Node{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}},
+		Node{Name: "work", On: []string{"request.received"}, In: "request", Emits: []string{"task.answered"}},
+		Node{Name: "notify", On: []string{"task.answered", "scope.request.closed"}, In: "global"},
+	}
+	rep2, err := Validate(merged...)
+	if err != nil {
+		t.Fatalf("Validate (merged): %v", err)
+	}
+	if len(rep2.CoRootedScopes) != 0 {
+		t.Fatalf("expected no co-rooting with one scope carrying both budgets; got %v", rep2.CoRootedScopes)
+	}
+	if !rep2.Connected {
+		t.Fatalf("expected Connected==true for the merged scope; gaps: dead=%v unreach=%v cycles=%v stalled=%v corooted=%v",
+			rep2.DeadEnds, rep2.UnreachableNodes, rep2.UnboundedCycles, rep2.StalledClosures, rep2.CoRootedScopes)
+	}
+}
+
 func TestApply_RoutesThroughValidate(t *testing.T) {
 	e := New()
 	if err := e.Apply(context.Background(), exampleTopology()...); err != nil {

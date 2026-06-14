@@ -164,6 +164,10 @@ folds the subscriber list into a graph and reports:
   `scope.X.closed` (an LLM bridge or a deterministic terminator) or a
   provably terminal-only close — otherwise the cone can freeze in the void
   ([26 §3f](./26-bare-substrate.md)) → suggest a bridge;
+- **co-rooted scopes** — two distinct scope names whose root triggers can
+  match the same event would open two instances on one span; a span roots at
+  most one scope ([26 §3d](./26-bare-substrate.md)) → reject, suggest merging
+  into one scope with both budgets in its `Budget` map;
 - **allowlist lints** — a node emitting outside its declared `Emits`
   ([24 §A.4](./24-concept.md)).
 
