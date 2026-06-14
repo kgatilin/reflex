@@ -379,6 +379,75 @@ regardless of who produced it.
   allowlist, each kind paired with its catalog schema. No `ToolSchema`, no menu
   mechanism — a schema'd allowlist is all the model is handed (§4).
 
+## 4b. The view type — a projection carries a `Type`; `llm.history` is one
+
+The model needs two things shaped from the log: **system instructions** and
+the **message transcript**. Neither is a new mechanism — both are a *view*, and
+a view is a projection. The only addition is that **a projection carries a
+`Type`**, generalizing the kv|log `Shape` into an open registry.
+
+- **`Projection.Type` replaces `Shape`.** `Shape` was deliberately final at two
+  values ([24 §6](./24-concept.md)); we open it. `kv` and `log` are now
+  **built-in types** (their builders are the existing payload-blind folds);
+  packages register more. This **amends [24 §6](./24-concept.md)**: the old
+  escape hatch *"anything richer is a reaction emitting `state.updated`"*
+  becomes *"anything richer is a registered `Type` builder"*. The justification
+  is unchanged-in-spirit: a `Type` builder is still a **pure function of the
+  matched events** (the cone), so a view stays recomputable from the log (G8).
+- **The engine stays payload-blind; the builder may not be.** The engine does
+  the selection it always did — the backward `caused_by` walk bounded by the
+  horizon, `On`-matched → **matched `[]Event`**. A registered **type builder**
+  then turns matched events into the typed value: `kv`/`log` builders are
+  payload-blind; `llm.history`'s builder is payload-*aware* (it reads text,
+  assigns roles, splits system vs messages) — but it is still a pure fold of the
+  matched events, living in the `llm`/nodes layer, never in the engine.
+- **`Reads` is unchanged — a list of names.** A name resolves to a declared
+  projection; **the projection name *is* the implementation**. Swap the prompt
+  assembly by pointing `Reads` at a different projection (or by changing a
+  projection's `On`/`In`/`Type`). There is **no separate "view" declaration**,
+  no `(Type, Impl)` tuple, no `Over` field — a typed view is just a projection
+  with a non-builtin `Type`.
+- **Resolution.** `engine.RegisterType(name, builder)` registers a type builder;
+  `Views` gains one generic accessor `Value(name) any`; the body reads
+  type-safely through the generic helper `engine.ViewAs[T](views, name)` (=
+  `Value(name).(T)`). `KV(name)`/`Log(name)` remain as sugar over the two
+  built-in types.
+- **`llm.history` is the first registered type.** Interface
+  `History{ System() string; Messages() []provider.Message }`. The `llm`
+  package exports the node (`llm.New`), the type + its registration, **and a
+  default `llm.history` projection the node reads out of the box**. Override =
+  declare your own `llm.history`-typed projection under another name and name it
+  in `Reads`. Swapping the assembly strategy never touches the node wiring or
+  the body.
+- **Validation.** Every `Reads` name resolves to a declared projection; every
+  projection's `Type` is registered. An unknown type / a dangling read is a
+  lint at Apply (symmetric with the dead-subscription check, §4a).
+
+### The default `llm.history` builder — the system/message split
+
+The split is **positional**, keyed to prompt-cache locality (the cached prefix
+must be byte-stable turn-over-turn):
+
+- **Boundary = the first assistant turn** = the first event in the cone whose
+  kind ∈ the node's `Emits` (the model's first action — text *or* a
+  `tool.X.call`).
+- **Before the boundary:** the user task → the first **user message**;
+  everything else (memories, gathered context, files, instructions) → folded
+  into **`System()`**. It is frozen from here on (the model hasn't spoken; these
+  events have a lower log index than every future one), so it stays cached
+  across a whole tool-loop and may be served as a compact snapshot.
+- **From the boundary onward:** the append-only **message tail** — assistant
+  turns, tool results, follow-up input — rendered in **log order**, role by
+  `Emits`-membership (a kind the node emits → `assistant`, else → `user`). The
+  middle of the transcript is never rewritten, so the prefix stays cached; new
+  context arrives as a *new* appended message, never an in-place edit.
+
+What lands in `System()` vs the tail is therefore controlled by **when**
+producer nodes fire (early ⇒ pre-boundary ⇒ system) and by the projection's
+`On`/`In` — not by per-item rules. Cache breakpoints (`cache_control`) are an
+**adapter** concern; the engine/body guarantees only the invariant: system
+frozen, tail append-only-stable-prefix.
+
 ## 5. What changes in the canon
 
 | Clause | Before | After (this doc) |
@@ -388,6 +457,7 @@ regardless of who produced it.
 | [24 §5](./24-concept.md) cancellation | "refused dispatch read off the cone" | the covering scope closes early + idempotent consumer; in-flight result recorded then deduped (§3b/§3e) |
 | [24 §5/§7](./24-concept.md) managed kinds | **four**: nodes, subscriptions, **scopes**, projections | **three**: nodes, subscriptions, projections; scope = built-in projection instance (§2) |
 | [24 §7](./24-concept.md) event types | implicit / untyped payloads | an **event catalog** (`kind → schema`) on a *type axis* orthogonal to wiring — self-hosted as a projection over `event.registered`, no new primitive (§4a) |
+| [24 §6](./24-concept.md) projection shape | `Shape` **final** at `kv`/`log` | `Projection.Type` — open registry of type builders; `kv`/`log` built-in, `llm.history` registered by the `llm` package; the builder is still a pure fold of matched events (§4b) |
 | [24 §3](./24-concept.md) LLM/menu | "emits typed actions from an allowlist; menu is a projection of consumers" | strengthened: the LLM has **no tools**, only allowlisted emissions; tool-call = emission with a tool-node consumer; function-calling = transport encoding (§4) |
 | [25 §6/§7.1](./25-regulation-concept.md) | "the engine refuses dispatch on an exhausted budget" | per-cone hard-stop is a guard node (§3a); **resolver admission control is unaffected** — it is already a guard-style reaction, not the dispatcher gate |
 
@@ -424,9 +494,11 @@ convention over Event / Reaction / Projection?*
 | termination → scope budget | replaces a per-event runtime gate with a scope budget + a static cycle-coverage check (no node attribute) | no new primitive, a stronger validator; passes |
 | LLM emits events, not tool-calls | removes "tool" as a held capability | subtracts; passes |
 | event catalog (kind → schema), self-hosted | adds a *type axis* over the Event primitive: registrations are Events, the catalog is a Projection, one primordial seed kind (§4a) | no new primitive; a type layer the wiring references; passes |
+| projection `Type` (open) incl. `llm.history` | opens `Shape` from a closed 2-value enum to a registry of pure-fold builders over matched events (§4b) | no new primitive; a richer Projection, still a fold of the log; passes |
 
-The first three **subtract**; the catalog **adds a type layer without a new
-primitive**. The reduction direction the whole model is built on is not just
+The first three **subtract**; the catalog and the projection `Type` **add
+without a new primitive** (a type layer, and a richer-but-still-pure
+Projection). The reduction direction the whole model is built on is not just
 preserved — it advances. The substrate is exactly what the
 lowest level should be: events, states, reactions, and one privileged
 authorship rule (the engine writes the facts it owns). Scopes, barriers,

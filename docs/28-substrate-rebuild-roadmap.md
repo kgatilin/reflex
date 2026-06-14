@@ -153,11 +153,25 @@ The doc-24 §5 / doc-26 runtime.
   each kind with its catalog schema* — there is no separate "tool menu", the
   allowlist **is** the menu, and the schema comes from the catalog. An LLM
   node is not special — it is a node with `Emits` whose body calls a model.
-- `llm.New`: read declared views, call the provider (stage-0
-  `pkg/provider`, reused), decode the completion **and** function-calls into
-  allowlisted `Emit`s ([26 §4](./26-bare-substrate.md): function-calling is
-  transport encoding, not a "tool" mechanism — every decode is an allowlisted
-  emission).
+- **Prerequisite — the view type** ([26 §4b](./26-bare-substrate.md)): a
+  projection carries a `Type` (rename `Shape` → `Type`, open registry). `kv`/`log`
+  are built-in; the `llm` package registers `llm.history` →
+  `History{ System() string; Messages() []provider.Message }`. Engine adds
+  `RegisterType(name, builder)`, `Views.Value(name) any`, generic
+  `ViewAs[T](views, name)`; `KV`/`Log` stay as sugar. `Reads` is unchanged (the
+  projection name *is* the implementation). Validation: `Reads` names resolve;
+  `Type` is registered.
+- The default `llm.history` builder does the **positional system/message split**
+  ([26 §4b](./26-bare-substrate.md)): boundary = first own-emit (kind ∈ `Emits`);
+  pre-boundary minus task → frozen `System()`; task → first user message;
+  post-boundary → append-only log-order tail, role by `Emits`-membership.
+- `llm.New`: read its declared `llm.history` view (`System()`/`Messages()`),
+  build `provider.Request` (tools = `Emits`∖answer-kind × catalog schema), call
+  the provider (stage-0 `pkg/provider`, reused), decode the completion **and**
+  function-calls into allowlisted `Emit`s ([26 §4](./26-bare-substrate.md):
+  function-calling is transport encoding, not a "tool" mechanism — every decode
+  is an allowlisted emission); answer-kind fixed = `llm.message`; always emit
+  `llm.usage`.
 - Wire the doc-27 §3/§4 topology; run a real task through
   `new → gathering → planning → executing → done`.
 - **Acceptance**: the example topology, given a task, reconciles to
@@ -193,6 +207,20 @@ The doc-24 §5 / doc-26 runtime.
   (`narrowestRequest`); a broader "request-class" notion would need a
   convention.
 - Static allowlist lint (`emit ⊆ Emits`) — runtime-only today, a stub.
+- **Catalog schema = LLM-tool-compatible JSON Schema.** A catalog kind's schema
+  is exactly what the body hands the model as function parameters, so the
+  allowed subset must be the *intersection* of what target providers accept
+  (e.g. `oneOf`/`allOf`/`$ref` often unavailable). The 2d in-package validator
+  (top-level `type:object` + `required` + one-level `properties[].type`) is a
+  start; tighten it to the provider-tool subset when wiring stage 3.
+- **`app.ingress.*` is the perimeter.** Exempt from the dead-subscription check
+  (it is a pre-resolution surface, not a catalog kind); ingress handlers convert
+  inbound into in-scope events. Revisit only if ingress needs first-class
+  catalog typing.
+- **Stage-0 `provider.Message` is coarse** (`{Role, Text}`, no tool_use/
+  tool_result block pairing): tool results flatten into user text. Fine for the
+  stub run; proper tool-calling needs a richer `provider.Message` (provider
+  layer, not engine).
 - `pkg/graphval` vs `graph` naming (chose `graphval` — ArchMotif already
   has `internal/graph`); reflex-side import could alias to `graph` if
   preferred.
