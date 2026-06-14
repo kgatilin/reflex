@@ -6,8 +6,10 @@
 > (now in [`outdated/`](./outdated/)). The deep "why" still lives in
 > [26 — bare substrate](./26-bare-substrate.md) and
 > [27 — state-defined agent](./27-state-defined-agent.md); the live build plan
-> in [28 — rebuild roadmap](./28-substrate-rebuild-roadmap.md). When an
-> `outdated/` doc disagrees with this one, this one wins.
+> in [28 — rebuild roadmap](./28-substrate-rebuild-roadmap.md). For the **shape
+> of the code as built** — domain model + sequence diagrams — see
+> [ARCHITECTURE.md](./ARCHITECTURE.md). When an `outdated/` doc disagrees with
+> this one, this one wins.
 >
 > **Vocabulary discipline (the thing that keeps drifting):** the wiring unit is a
 > **subscriber** (`engine.Subscriber`: `On`/`In`/`Emits` + a `Reaction` body) —
