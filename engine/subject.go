@@ -83,6 +83,20 @@ func splitSubject(subject string) (class, scope, kind string) {
 	}
 }
 
+// KindOf returns an event's kind tail — the part a node's On patterns match
+// (doc 24 §2). It is the exported read surface a view-type builder (doc 26 §4b)
+// uses to classify matched events without re-deriving the subject grammar.
+func KindOf(ev Event) string {
+	_, _, kind := splitSubject(ev.Subject)
+	return kind
+}
+
+// MatchKind reports whether a subscription pattern matches a kind tail — the
+// exported matcher a view-type builder uses for role/boundary classification
+// (e.g. nodes/llm: "is this event's kind one of my Emits?"). Same grammar as a
+// node's On (doc 24 §2).
+func MatchKind(pattern, kind string) bool { return subjectMatch(pattern, kind) }
+
 // placeSubject reconstructs a concrete subject from a class+scope prefix and a
 // kind tail (§2 uprightness: the dispatcher, not the reaction, places scope).
 // class already carries the resolved scope prefix produced by splitSubject

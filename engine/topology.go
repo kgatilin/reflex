@@ -105,6 +105,11 @@ type Projection struct {
 	// read them as builder params if they wish.
 	Key   string
 	Value string
+	// Params is opaque builder configuration for a richer Type (doc 26 §4b),
+	// e.g. nodes/llm encodes the static system base + answer-kind here. The
+	// engine never reads it; the registered TypeBuilder decodes it. Ignored by
+	// the kv/log built-ins.
+	Params json.RawMessage
 }
 
 func (Projection) isDecl() {}
