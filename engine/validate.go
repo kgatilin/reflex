@@ -51,6 +51,14 @@ type Report struct {
 	// Each inner slice is one SCC.
 	UnboundedCycles [][]string
 
+	// StalledClosures are scope names whose engine-emitted scope.{name}.closed
+	// has no consumer (doc 26 §3f / doc 27 §5): a close that can land on a
+	// non-terminal state with nothing to read it freezes the cone in the void.
+	// Each needs a continuation — an LLM bridge or a deterministic terminator
+	// that consumes scope.{name}.closed — or a provably terminal-only close.
+	// Sorted ascending.
+	StalledClosures []string
+
 	// Suggestions are human-readable bridge proposals (doc 27 §1/§5), e.g.
 	// "kind X is a dead-end — add an llm node that consumes X …".
 	Suggestions []string
@@ -85,10 +93,18 @@ func Validate(decls ...Decl) (Report, error) {
 		})
 	}
 
+	// emitsByNode is each node's effective produced kinds: its declared Emits
+	// plus the scope.{name}.closed kinds it roots (doc 24 §5). The closure kind
+	// is engine-emitted, but causally it is produced by the rooting node, so the
+	// reachability/cycle graph must carry an edge from the rooter to the
+	// closure's consumer — otherwise a legitimate scope.closed consumer (the
+	// lifecycle terminator of doc 26 §3f) reads as unreachable.
+	emitsByNode := effectiveEmits(decls, nodes)
+
 	var gvEdges []graphval.Edge
 	for _, x := range nodes {
 		for _, y := range nodes {
-			if edgeBetween(x, y) {
+			if producesFor(emitsByNode[x.Name], y) {
 				gvEdges = append(gvEdges, graphval.Edge{From: x.Name, To: y.Name})
 			}
 		}
@@ -109,12 +125,14 @@ func Validate(decls ...Decl) (Report, error) {
 	rep.UnreachableNodes = unreachable(g, nodes, roots)
 	rep.Fragments = append([]string(nil), rep.UnreachableNodes...)
 	rep.UnboundedCycles = unboundedCycles(g)
+	rep.StalledClosures = stalledClosures(decls, nodes)
 
 	rep.Suggestions = suggestions(rep)
 	rep.Connected = len(rep.DeadEnds) == 0 &&
 		len(rep.UnreachableNodes) == 0 &&
 		len(rep.Fragments) == 0 &&
-		len(rep.UnboundedCycles) == 0
+		len(rep.UnboundedCycles) == 0 &&
+		len(rep.StalledClosures) == 0
 
 	// allowlistLint is a runtime check, not a static one: it compares an
 	// observed emit against the node's declared Emits and can only be made on
@@ -169,10 +187,11 @@ func foldNodes(decls []Decl) []Node {
 	return out
 }
 
-// edgeBetween reports whether x produces a kind that y consumes: some kind in
-// x.Emits is matched by some pattern in y.On (doc 27 §4).
-func edgeBetween(x, y Node) bool {
-	for _, kind := range x.Emits {
+// producesFor reports whether any kind in produced is matched by some pattern
+// in y.On (doc 27 §4): the directed edge X→Y of the topology graph, generalised
+// to take X's effective produced kinds (Emits + rooted closures).
+func producesFor(produced []string, y Node) bool {
+	for _, kind := range produced {
 		for _, pat := range y.On {
 			if subjectMatch(pat, kind) {
 				return true
@@ -180,6 +199,44 @@ func edgeBetween(x, y Node) bool {
 		}
 	}
 	return false
+}
+
+// effectiveEmits maps each node to its effective produced kinds: declared
+// Emits plus the scope.{name}.closed kinds the node roots (doc 24 §5 rooting).
+// A node roots a scope two ways: it carries Node.Scope (node-rooted), or it
+// emits the declared Root kind of some Scope (kind-rooted) — in either case the
+// engine will emit scope.{name}.closed caused by that rooting, so the graph
+// edge runs from the rooter to the closure's consumer.
+func effectiveEmits(decls []Decl, nodes []Node) map[string][]string {
+	declared := declaredScopes(decls)
+	out := make(map[string][]string, len(nodes))
+	for _, n := range nodes {
+		kinds := append([]string(nil), n.Emits...)
+		seen := map[string]struct{}{}
+		addClosure := func(scopeName string) {
+			k := "scope." + scopeName + ".closed"
+			if _, ok := seen[k]; ok {
+				return
+			}
+			seen[k] = struct{}{}
+			kinds = append(kinds, k)
+		}
+		if n.Scope != "" {
+			addClosure(n.Scope)
+		}
+		for _, s := range declared {
+			if s.Root == "" {
+				continue
+			}
+			for _, k := range n.Emits {
+				if subjectMatch(s.Root, k) {
+					addClosure(s.Name)
+				}
+			}
+		}
+		out[n.Name] = kinds
+	}
+	return out
 }
 
 // ingressRoots returns the names of nodes that subscribe to an ingress kind
@@ -308,6 +365,64 @@ func unboundedCycles(g *graphval.Graph) [][]string {
 	return out
 }
 
+// stalledClosures returns the scope names whose engine-emitted
+// scope.{name}.closed kind has no consumer (doc 26 §3f / doc 27 §5). A scope
+// instance can quiesce on a non-terminal state — a stall, mechanically quiet
+// but not converged (doc 26 §2) — and the gap between "frozen" and "done" is
+// exactly a connectivity dead-end: the closure needs a bridge (an LLM node or
+// a deterministic terminator) that reads the frozen cone and either emits a
+// terminal event or re-drives into a new child cone.
+//
+// Scope names come from both rooting sources (doc 24 §5): declared Scope decls
+// and node-rooted scopes (Node.Scope). A consumer is any node whose On matches
+// scope.{name}.closed.
+//
+// APPROXIMATION (the safe default of doc 26 §3f): every declared scope's
+// scope.{name}.closed must have a consumer, full stop. The doc's stronger rule
+// exempts a "provably terminal-only" close — a scope all of whose quiescent
+// states are terminal, so no bridge is needed. Proving terminal-only is a
+// liveness property over the cone's reachable states, which the static
+// subscriber graph does not carry (the engine is payload-blind and does not
+// model state values), so this check does not attempt it: it treats every
+// closure as potentially stalling and demands a consumer. Tightening to exempt
+// provably terminal-only closes is left as future work, mirroring how
+// unboundedCycles documents its own coarser approximation.
+func stalledClosures(decls []Decl, nodes []Node) []string {
+	names := map[string]struct{}{}
+	for _, d := range decls {
+		if s, ok := d.(Scope); ok && s.Name != "" {
+			names[s.Name] = struct{}{}
+		}
+	}
+	for _, n := range nodes {
+		if n.Scope != "" {
+			names[n.Scope] = struct{}{}
+		}
+	}
+
+	var out []string
+	for name := range names {
+		closed := "scope." + name + ".closed"
+		consumed := false
+		for _, n := range nodes {
+			for _, pat := range n.On {
+				if subjectMatch(pat, closed) {
+					consumed = true
+					break
+				}
+			}
+			if consumed {
+				break
+			}
+		}
+		if !consumed {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // budgetedScopes collects the names of declared Scopes carrying a non-empty
 // Budget (doc 24 §5): the scopes that actually bound a per-kind count within a
 // cone. A node is "bounded" iff its (defaulted) In names one of these.
@@ -340,6 +455,11 @@ func suggestions(rep Report) []string {
 		out = append(out, fmt.Sprintf(
 			"cycle %v is unbounded — declare a budgeted scope covering its nodes so a budget bounds the loop (doc 24 §5)",
 			scc))
+	}
+	for _, name := range rep.StalledClosures {
+		out = append(out, fmt.Sprintf(
+			"scope %q can close on a non-terminal state with no consumer of \"scope.%s.closed\" — add an llm bridge (or a deterministic terminator) that consumes \"scope.%s.closed\" and emits a terminal event or re-drives into a new child cone (doc 26 §3f)",
+			name, name, name))
 	}
 	return out
 }

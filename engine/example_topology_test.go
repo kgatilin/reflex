@@ -155,6 +155,17 @@ func exampleTopology() []Decl {
 			},
 			In: "request",
 		},
+		// lifecycle (sink): consumes scope.request.closed — the request cone's
+		// closure is where the OTel trace ends and the audit fold runs (doc 24
+		// §5). It is the deterministic terminator the stalled-closure check
+		// requires (doc 26 §3f / 27 §5): without a consumer, a request that
+		// quiesces on a non-terminal state would freeze in the void. It lives in
+		// the parent (global) cone — closure exits the cone it seals — so it is
+		// scope-less (In defaults to global).
+		Node{
+			Name: "lifecycle",
+			On:   []string{"scope.request.closed"},
+		},
 
 		// Projections — the views nodes read; they consume state.updated facts.
 		Projection{

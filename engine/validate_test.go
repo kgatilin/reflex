@@ -119,6 +119,46 @@ func TestValidate_BudgetedScopeBoundsTheCycle(t *testing.T) {
 	}
 }
 
+func TestValidate_StalledClosureNeedsAConsumer(t *testing.T) {
+	// A declared scope whose scope.X.closed has no consumer is a stalled
+	// closure (doc 26 §3f / 27 §5): the cone can freeze in the void. The
+	// resolver roots the scope; nothing reads scope.work.closed.
+	decls := []Decl{
+		Scope{Name: "work", Root: "request.received", Budget: map[string]int{"tool.x.call": 4}},
+		Node{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}},
+		Node{Name: "doer", On: []string{"request.received"}, In: "work", Emits: []string{"tool.x.call"}},
+		Node{Name: "tool", On: []string{"tool.x.call"}, In: "work", Emits: []string{"tool.x.result"}},
+		Node{Name: "loop", On: []string{"tool.x.result"}, In: "work", Emits: []string{"tool.x.call"}},
+	}
+	rep, err := Validate(decls...)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !contains(rep.StalledClosures, "work") {
+		t.Fatalf("expected \"work\" in stalled closures; got %v", rep.StalledClosures)
+	}
+	if rep.Connected {
+		t.Fatal("expected Connected==false with a stalled closure")
+	}
+	if !anyContains(rep.Suggestions, "scope.work.closed") || !anyContains(rep.Suggestions, "bridge") {
+		t.Fatalf("expected a bridge suggestion for scope.work.closed; got %v", rep.Suggestions)
+	}
+
+	// Add a consumer of scope.work.closed (a terminator): the gap closes.
+	bridged := append(decls, Node{Name: "terminator", On: []string{"scope.work.closed"}})
+	rep2, err := Validate(bridged...)
+	if err != nil {
+		t.Fatalf("Validate (bridged): %v", err)
+	}
+	if len(rep2.StalledClosures) != 0 {
+		t.Fatalf("expected no stalled closures once scope.work.closed has a consumer; got %v", rep2.StalledClosures)
+	}
+	if !rep2.Connected {
+		t.Fatalf("expected Connected==true once bridged; gaps: dead=%v unreach=%v cycles=%v stalled=%v",
+			rep2.DeadEnds, rep2.UnreachableNodes, rep2.UnboundedCycles, rep2.StalledClosures)
+	}
+}
+
 func TestApply_RoutesThroughValidate(t *testing.T) {
 	e := New()
 	if err := e.Apply(context.Background(), exampleTopology()...); err != nil {
