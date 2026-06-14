@@ -270,23 +270,33 @@ All on branch `feat/connectivity-validation`, verified with `go test -race`
 | **Control plane as changeset facts** — topology is `foldTopology(log, bodies)`, not a slice; `Apply` = the changeset client (`requested → facts + applied \| rejected`); bodies resolved by name from a process registry | `engine/changeset.go` + `engine.go` | **done** (Iteration 1); live table round-trips as a fold of the log (G8) |
 | **Serializable body descriptors + factory registry** — a node names its body by `BodyKind` + `BodyConfig` (on the log), resolved via an injected `BodyResolver`; `engine.Load` rebuilds bodies from the log | `engine/resolver.go`, `nodes/registry.go`, `nodes/llm` (`Factory`/`Declare`) | **done** (2a); a descriptor topology recovers from the log alone and runs |
 | **Daemon + CLI/API** — long-lived engine host with a unix-socket HTTP API (apply/validate/emit/topology/events) and the `reflexd` CLI (`serve`/`apply`/`emit --wait`/`topology`/`validate`); declarative YAML/JSON topology document | `pkg/daemon`, `pkg/topology`, `cmd/reflexd` | **done** (2b); server↔client round-trip reconciles to terminal; in-memory log (disk persistence deferred) |
+| **Out-of-process plugin seam (stdio)** — everything but `llm` is a plugin: a generic `"plugin"` proxy body + NDJSON-over-stdin/stdout protocol + plugin SDK; the daemon probes a plugin at apply, wires its `On`/`Emits` and **populates the catalog from the plugin's announced schemas** (`sys.event.registered` facts). Plugins ship as `reflexd plugin <name>` multi-call subcommands the daemon spawns | `pkg/plugin`, `nodes/proxy`, `cmd/reflexd` | **done** (3a) |
+| **The hands** — `fs.{read,edit,write,search}` (root-confined, read-before-edit guard) and `py.test` (shell out, exit→result/failed) as stdio plugins; the `llm` body advertises function `InputSchema` from the catalog (`Views.Schema`) — a callable IS a kind in `Emits`, no per-tool wiring | `cmd/reflexd/fs.go`, `pytest.go`, `engine` `Views.Schema`, `nodes/llm` | **done** (3b) |
 
 **Designed, not yet built on the new kernel** (the next work — see §12 and
 [28](./28-substrate-rebuild-roadmap.md)):
 
-- **In-process agent tools** for the new engine: `fs.{read,edit,write,search}`
-  (port the legacy fs logic), and `go`/`py.test` as plugins — each a body kind
-  registered with the factory registry.
-- A **real-model agent run** (the coding agent of §9 with a verification flow),
-  and an external benchmark harness (kept as throwaway scripts outside the
-  framework).
+- A **real-model agent run** (the coding agent of §9 with a verification flow):
+  express the §9 topology (brain + fs/pytest plugins + verifier + terminal) as a
+  document, wire a real model, run a synthetic coding task end-to-end.
+- An **external benchmark harness** (kept as throwaway scripts outside the
+  framework) — one SWE-bench Lite instance (doc 29 Iterations 4–5).
 
 ## 12. Open questions (current)
 
 - **Completion via verification** (§9): the exact claim → verify → state flow and
   what the verifier checks beyond tests.
-- **Tool schemas from the catalog** into the `llm` body (today advertised
-  name-only); couple to the LLM-tool-compatible subset.
+- ~~**Tool schemas from the catalog** into the `llm` body~~ — **resolved** (3b):
+  the `llm` body fills each function's `InputSchema` from the catalog via
+  `Views.Schema(kind)`; a callable is a kind in `Emits`, the catalog (populated
+  dynamically by the plugin's announced schemas) is the schema source — no
+  per-tool wiring.
+- **Catalog adoption is all-or-nothing** (found in 3a): a non-empty catalog
+  gates `Connected` (opt-in dormancy), so the moment a plugin contributes one
+  kind the whole topology must declare every kind — including engine-internal
+  `scope.*.closed` and ingress kinds. Right end-state (we want a full catalog),
+  but a follow-up should **auto-register scope-closure + ingress kinds** to cut
+  operator boilerplate.
 - **Context budget & view compaction** — the largest standing hole (carried from
   [24 Part II](./outdated/24-concept.md)): engine budgets count *events*, agents
   die of *tokens*; a compaction event as a horizon cut is unspecified.

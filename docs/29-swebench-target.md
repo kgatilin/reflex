@@ -203,9 +203,11 @@ for the agent (we want a full catalog so the `llm` body can advertise function
 schemas), but a follow-up should **auto-register scope-closure + ingress kinds**
 to cut operator boilerplate.
 
-**3b — the hands themselves:** `fs.{read,edit,write,search}` (port the deleted fs
-logic from git history, root-confined) and `py.test` as `reflexd plugin`
-subcommands on the SDK, each announcing its kinds + parameter schemas in `hello`.
+**3b — the hands themselves. ✅ DONE (`a2cfb62`, `8f2f610`, `54c6af8`).**
+`fs.{read,edit,write,search}` (ported fs logic, root-confined, read-before-edit
+guard) and `py.test` (shell out; exit 0/1 → result, else → failed) as
+`reflexd plugin` subcommands on the SDK, each announcing its kinds + parameter
+schemas in `hello`.
 
 The `llm` body needs **no per-tool wiring** — a callable function already *is* a
 kind in the node's `Emits` ("the menu", llm.go: no separate tool-menu concept).
