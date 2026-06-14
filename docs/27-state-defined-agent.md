@@ -180,6 +180,14 @@ folds the subscriber list into a graph and reports:
   match the same event would open two instances on one span; a span roots at
   most one scope ([26 §3d](./26-bare-substrate.md)) → reject, suggest merging
   into one scope with both budgets in its `Budget` map;
+- **unknown kinds** — an `Emits` kind absent from the event catalog
+  (`kind → schema`, [26 §4a](./26-bare-substrate.md)) → reject: register the
+  kind (an `event.registered` fact) or fix the name;
+- **dead subscriptions** — an `On` pattern matching no catalog kind → reject:
+  it can never fire;
+- **payload conformance** — (runtime) an emitted payload that violates its
+  kind's catalog schema is the body's own `.failed`; this is the schema half
+  of the allowlist check, runnable only against the log;
 - **allowlist lints** — a node emitting outside its declared `Emits`
   ([24 §A.4](./24-concept.md)).
 

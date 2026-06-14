@@ -1,4 +1,4 @@
-# 26 — The bare substrate: scope as a built-in projection, termination is a scope budget, the LLM emits events not tool-calls
+# 26 — The bare substrate: scope as a built-in projection, termination is a scope budget, the LLM emits events not tool-calls, the event catalog is self-hosted
 
 > **Status: DRAFT / proposed.** Converged in a design session. It pushes the
 > [24](./24-concept.md) reduction one level deeper and *subtracts* in three
@@ -6,7 +6,11 @@
 > off a per-event dispatch gate onto a scope budget (enforced by a per-scope
 > cap, with a terminal `budget_exhausted` fact for graceful shutdown — §3d),
 > and removes "tool" as a capability the LLM holds. All three become
-> conventions over the three primitives. This
+> conventions over the three primitives. It then *adds* one thing — an **event
+> catalog** (`kind → schema`) on a type axis orthogonal to the wiring,
+> self-hosted as a projection over `event.registered` (§4a) — without a new
+> primitive. It also fixes the per-scope state model: **one state per scope**,
+> written locally, promoted to a parent only through closure (§2a). This
 > supersedes specific clauses of [24 §4/§5/§7](./24-concept.md) and restates
 > one assumption of [25 §6](./25-regulation-concept.md); the supersession
 > table is §5. It adds no primitive — every move is the standing test
@@ -298,9 +302,10 @@ is the whole contract.
   is an untyped `json.RawMessage` and `Emits` is bare kind names, so the
   schema lives nowhere in the substrate; the body cannot tell the model the
   shape to emit. The missing piece is a **kind → payload-schema** association
-  in the substrate — which is exactly what `provider.ToolSchema` was carrying
-  ad hoc. Lifting it to "the schema of an event kind" removes the last place
-  "tool" looked special: a schema'd allowlist is all the model is handed.
+  in the substrate — the **event catalog** (§4a) — which is exactly what
+  `provider.ToolSchema` was carrying ad hoc. Lifting it to "the schema of an
+  event kind" removes the last place "tool" looked special: a schema'd
+  allowlist is all the model is handed.
 - Provider-level **function-calling is transport encoding, not a
   mechanism.** The adapter decodes the model's function-call into
   `Emit{ Kind: "tool.X.call", Payload }` and decodes a text completion into
@@ -324,6 +329,56 @@ is the whole contract.
   *what a tool call is*. There was never a "call" to reimplement — only an
   emitter to swap.
 
+## 4a. The event catalog — kinds and their schemas, self-hosted
+
+Events have **types**: the type of an event is its payload schema. The
+vocabulary of `kind → schema` is the **event catalog**, a declaration surface
+distinct from the topology. Two sides, referenced against each other: declare
+*what events exist* (the catalog), declare *who reacts* (the subscribers);
+`On`/`Emits` name catalog kinds. The schema lives with the **kind**, never
+the emitter — one source of truth, because a consumer needs a kind's shape
+regardless of who produced it.
+
+- **Not a fourth primitive, not a fourth wiring-kind — a *type axis*.** The
+  catalog is the type layer over the Event primitive, orthogonal to the
+  wiring (nodes/subscriptions/projections, which say *who reacts*). The
+  catalog says *what facts mean* — the schema of the log, the data dictionary.
+  It does not compete with the three wiring-kinds; the wiring references it.
+- **Self-hosted via `event.registered`.** Registering a kind is itself an
+  event: `event.registered{kind, schema}`. The catalog is the global-horizon
+  **projection** folding these into `kind → schema`. Emit a registration → the
+  kind becomes valid / emittable / advertised; schema evolution is a later
+  registration (last-writer-wins; a "breaking-change → reject" tightening is a
+  later knob). Recomputable from the log, no privileged plane (G8). At the
+  substrate level it is **Event** (registrations) + **Projection** (the fold) —
+  the primitive count is unchanged; the standing test passes (§7).
+- **Bootstrap axiom.** `event.registered` is the one **primordial** kind whose
+  schema the engine knows natively (the schema-of-schemas, like `$schema`). It
+  cannot register itself; it is the seed. One axiom, everything else through
+  the catalog.
+- **Dynamic registration falls out.** Registering a tool plugin = emit
+  `event.registered` for its `tool.X.call` / `tool.X.result` (+ schemas) and
+  add a consumer node — both log facts / one changeset. "The menu updates when
+  a plugin registers" (§4) becomes literal: the registration grows the
+  catalog, the node decl adds the consumer, the next `llm` firing sees the new
+  `Emits` kind *with its schema*. The catalog is one projection in the family
+  of **management projections** (topology projection, catalog projection) —
+  the self-hosting management plane of [22](./22-bootstrap-self-hosting.md)/[23](./23-bootstrap-roadmap.md).
+- **`On` patterns, `Emits` concrete.** A subscription's `On` is a pattern
+  matching a *family* of catalog kinds (`tool.fs.*.result`); a node's `Emits`
+  resolve to *concrete* catalog kinds (it declares exactly what it produces),
+  so the schema is retrievable for model-advertisement and payload validation.
+- **Validation gains three catalog checks** ([27 §5](./27-state-defined-agent.md)):
+  every `Emits` kind exists in the catalog (else **unknown-kind**); every `On`
+  pattern matches ≥1 catalog kind (else a **dead subscription**); and (runtime)
+  an emitted payload **conforms** to its kind's schema. Validation runs against
+  the catalog *snapshot* at each changeset — dynamic registration is just
+  another changeset the validator re-runs against, so "compilation says
+  ok / not-ok" still holds.
+- **The LLM stops looking special, finally.** The body advertises its `Emits`
+  allowlist, each kind paired with its catalog schema. No `ToolSchema`, no menu
+  mechanism — a schema'd allowlist is all the model is handed (§4).
+
 ## 5. What changes in the canon
 
 | Clause | Before | After (this doc) |
@@ -332,6 +387,7 @@ is the whole contract.
 | [24 §5](./24-concept.md) budget hard-stop | `scope.budget_exhausted` = **refused dispatch** | a compile-mandated scope budget covering every cycle (§3a), enforced by a per-scope **cap** (the guarantee) with a terminal `budget_exhausted` fact for graceful shutdown (§3d); plus a compile check that every `scope.closed` has a continuation or terminal exit (§3f) |
 | [24 §5](./24-concept.md) cancellation | "refused dispatch read off the cone" | the covering scope closes early + idempotent consumer; in-flight result recorded then deduped (§3b/§3e) |
 | [24 §5/§7](./24-concept.md) managed kinds | **four**: nodes, subscriptions, **scopes**, projections | **three**: nodes, subscriptions, projections; scope = built-in projection instance (§2) |
+| [24 §7](./24-concept.md) event types | implicit / untyped payloads | an **event catalog** (`kind → schema`) on a *type axis* orthogonal to wiring — self-hosted as a projection over `event.registered`, no new primitive (§4a) |
 | [24 §3](./24-concept.md) LLM/menu | "emits typed actions from an allowlist; menu is a projection of consumers" | strengthened: the LLM has **no tools**, only allowlisted emissions; tool-call = emission with a tool-node consumer; function-calling = transport encoding (§4) |
 | [25 §6/§7.1](./25-regulation-concept.md) | "the engine refuses dispatch on an exhausted budget" | per-cone hard-stop is a guard node (§3a); **resolver admission control is unaffected** — it is already a guard-style reaction, not the dispatcher gate |
 
@@ -367,9 +423,11 @@ convention over Event / Reaction / Projection?*
 | scope → built-in projection | removes a managed kind (4 → 3) | subtracts; passes |
 | termination → scope budget | replaces a per-event runtime gate with a scope budget + a static cycle-coverage check (no node attribute) | no new primitive, a stronger validator; passes |
 | LLM emits events, not tool-calls | removes "tool" as a held capability | subtracts; passes |
+| event catalog (kind → schema), self-hosted | adds a *type axis* over the Event primitive: registrations are Events, the catalog is a Projection, one primordial seed kind (§4a) | no new primitive; a type layer the wiring references; passes |
 
-All three **subtract**. The reduction direction the whole model is built on
-is not just preserved — it advances. The substrate is exactly what the
+The first three **subtract**; the catalog **adds a type layer without a new
+primitive**. The reduction direction the whole model is built on is not just
+preserved — it advances. The substrate is exactly what the
 lowest level should be: events, states, reactions, and one privileged
 authorship rule (the engine writes the facts it owns). Scopes, barriers,
 budgets, deadlines, and tool menus are built-in *instances* of those three

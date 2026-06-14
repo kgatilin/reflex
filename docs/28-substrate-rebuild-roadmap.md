@@ -46,7 +46,17 @@ graph-in contract, matrix internal). reflex depends on it via
   (a static cycle-coverage check, no node attribute), not a dispatch gate
   ([26](./26-bare-substrate.md)).
 - **The LLM has no tools** — it emits allowlisted events; a tool-call is an
-  emission with a tool-node consumer ([26 §4](./26-bare-substrate.md)).
+  emission with a tool-node consumer; the "menu" is just `Emits`
+  ([26 §4](./26-bare-substrate.md)).
+- **One state per scope** ([26 §2a](./26-bare-substrate.md)): writes are local
+  to the writer's scope; promotion to a parent/`global` is **only through
+  closure** (the closing scope carries its final state, a parent consumer
+  folds it up); promotion latency = scope granularity. No live cross-scope
+  write.
+- **Event catalog on a type axis** ([26 §4a](./26-bare-substrate.md)):
+  `kind → schema`, self-hosted as a projection over `event.registered`
+  (one primordial seed kind). The catalog is what the `llm` body advertises;
+  it is Event + Projection, no new primitive.
 - **Validation is the engine's job**, expressed as matrix algebra over a
   graph; the contract to ArchMotif is a graph (doc 27 §5).
 - **The domain is technology-agnostic** — `subjectMatch` is ours; the
@@ -118,15 +128,29 @@ The doc-24 §5 / doc-26 runtime.
 - **Proves**: the reconciler's state becomes computable from the log, and
   state flows up through closures, never sideways.
 
+### Stage 2d — event catalog (`kind → schema`, self-hosted)
+
+- **`event.registered{kind, schema}`** is the one primordial seed kind (schema
+  built-in); the **catalog** is the global-horizon projection folding these
+  into `kind → schema` ([26 §4a](./26-bare-substrate.md)). Dynamic registration
+  = emit a registration fact; static bootstrap seeds them before ingress.
+- **Three validator checks** ([27 §5](./27-state-defined-agent.md)):
+  unknown-kind (an `Emits` not in the catalog), dead-subscription (an `On`
+  matching no catalog kind), and runtime payload-conformance (an emit whose
+  payload violates its kind's schema → the body's `.failed`).
+- **Acceptance**: registering a kind makes it emittable/advertisable; an
+  unregistered `Emits` and a never-matching `On` both fail validation; a
+  malformed payload becomes `.failed`, not a crash.
+- **Proves**: the type axis is self-hosted (Event + Projection, one seed),
+  and the `llm` body can advertise `Emits` + schema with no "tool" concept.
+
 ### Stage 3 — `llm` body + run the reconciler
 
-- **Prerequisite — event kinds carry a payload schema** ([26 §4](./26-bare-substrate.md)):
-  an `llm` body advertises to the model *its `Emits` allowlist, each kind with
-  its payload schema* — there is no separate "tool menu", the allowlist **is**
-  the menu. Today `Emits` is bare kind names and `Emit.Payload` is untyped, so
-  a **kind → payload-schema** association must land in the substrate (lifting
-  what `provider.ToolSchema` carried ad hoc). An LLM node is not special — it
-  is a node with `Emits` whose body calls a model.
+- **Prerequisite — the event catalog** ([26 §4a](./26-bare-substrate.md), built
+  in Stage 2d): an `llm` body advertises to the model *its `Emits` allowlist,
+  each kind with its catalog schema* — there is no separate "tool menu", the
+  allowlist **is** the menu, and the schema comes from the catalog. An LLM
+  node is not special — it is a node with `Emits` whose body calls a model.
 - `llm.New`: read declared views, call the provider (stage-0
   `pkg/provider`, reused), decode the completion **and** function-calls into
   allowlisted `Emit`s ([26 §4](./26-bare-substrate.md): function-calling is
