@@ -142,13 +142,18 @@ remains for "add a node in real time" is the **daemon/CLI/API surface**
 (Iteration 2) that lets an *off-process* client submit ops (and bind a node
 name → a registered body factory).
 
-**Iteration 2 — Daemon around the new engine + send-message/wait.**
-A long-lived process hosting the engine: ingress (`emit`), drive to terminal
-(the `request.terminal` fact / a terminal-state predicate), read views, `--wait`.
-The management surface of §1's control plane as CLI (`reflex topo
-apply/show/diff`, `emit`, `validate`, `scopes`) **and** an API, so the daemon is
-configurable live. (Socket transport for out-of-process plugins can follow; tools
-may start in-process.)
+**Iteration 2 — Daemon around the new engine + send-message/wait. ✅ DONE
+(`79fb036`, `5baf443`, `52b0201`).** Built in two parts: **2a** — serializable
+body descriptors (`BodyKind`+`BodyConfig` on the log) + a factory registry
+(`nodes.Register`/`Resolver`) + `engine.Load` so a topology (including which body
+each node runs) is recoverable from the log; **2b** — a declarative topology
+document (`pkg/topology`, YAML/JSON), a long-lived engine host (`pkg/daemon`)
+with a unix-socket HTTP API (apply/validate/emit/topology/events), and the
+`reflexd` CLI (`serve`/`apply FILE`/`emit --subject --wait`/`topology`/`validate`).
+`emit --wait <kind>` is the send-message/drive-to-terminal verb; `apply` against
+a running daemon is live topology config. **Deferred:** disk persistence of the
+log (the daemon is in-memory; `Load` proves replay works), and the richer
+`scopes`/`diff` read surface.
 
 **Iteration 3 — The hands: file/test subscriber nodes + catalog schemas.**
 `fs.{read,edit,write,search}` (port the legacy fs logic, in-process,

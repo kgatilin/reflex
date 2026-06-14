@@ -267,15 +267,15 @@ All on branch `feat/connectivity-validation`, verified with `go test -race`
 | `llm.history` view type + `llm` body (real provider via `pkg/provider` → allowlisted emits + `llm.usage`); `tool.Node` | `nodes/llm`, `nodes/tool` | **done** (3b); a doc-27-style run reconciles on a stub provider |
 | Real model adapters (Gemini / Anthropic / OSS on Vertex) | `pkg/provider` | **done** (shared); Claude blocked only by GCP publisher access, not code |
 | **Control plane as changeset facts** — topology is `foldTopology(log, bodies)`, not a slice; `Apply` = the changeset client (`requested → facts + applied \| rejected`); bodies resolved by name from a process registry | `engine/changeset.go` + `engine.go` | **done** (Iteration 1); live table round-trips as a fold of the log (G8) |
+| **Serializable body descriptors + factory registry** — a node names its body by `BodyKind` + `BodyConfig` (on the log), resolved via an injected `BodyResolver`; `engine.Load` rebuilds bodies from the log | `engine/resolver.go`, `nodes/registry.go`, `nodes/llm` (`Factory`/`Declare`) | **done** (2a); a descriptor topology recovers from the log alone and runs |
+| **Daemon + CLI/API** — long-lived engine host with a unix-socket HTTP API (apply/validate/emit/topology/events) and the `reflexd` CLI (`serve`/`apply`/`emit --wait`/`topology`/`validate`); declarative YAML/JSON topology document | `pkg/daemon`, `pkg/topology`, `cmd/reflexd` | **done** (2b); server↔client round-trip reconciles to terminal; in-memory log (disk persistence deferred) |
 
 **Designed, not yet built on the new kernel** (the next work — see §12 and
 [28](./28-substrate-rebuild-roadmap.md)):
 
-- A **daemon** around the new engine: send a message (emit ingress), run to
-  terminal, read views, `--wait` — plus the CLI/API surface of §8 for real-time
-  topology config.
 - **In-process agent tools** for the new engine: `fs.{read,edit,write,search}`
-  (port the legacy fs logic), and `go`/`py.test` as plugins.
+  (port the legacy fs logic), and `go`/`py.test` as plugins — each a body kind
+  registered with the factory registry.
 - A **real-model agent run** (the coding agent of §9 with a verification flow),
   and an external benchmark harness (kept as throwaway scripts outside the
   framework).
@@ -296,12 +296,15 @@ All on branch `feat/connectivity-validation`, verified with `go test -race`
   dispatch matches `On` against the kind tail — reconcile.
 - **`provider.Message` is coarse** (`{Role, Text}`, no tool_use/result block
   pairing); proper tool-calling needs a richer message at the provider layer.
-- **Body resolution for off-process changeset clients** (new with Iteration 1): a
-  node's `Body` is code resolved by name from a process registry, never a log
-  fact. `Apply` stashes the body of each `Node` decl it is handed. A daemon/CLI
-  client (Iteration 2) that submits *ops* (not Go `Decl`s) needs a way to bind a
-  node name/kind to a registered body factory (built-in `llm`/`tool`/plugin) —
-  the plugin-`hello` seam of [20](./outdated/20-topology-management.md).
+- **Daemon log persistence** (new with Iteration 2): the daemon's log is
+  in-memory; `engine.Load(log, resolver)` proves a log *can* be replayed into a
+  running engine (bodies rebuilt from descriptors), but nothing yet writes the
+  log to disk or reloads it on restart. A real event-sourced daemon appends the
+  log to durable storage and `Load`s it at boot.
+- **Live in-process bodies are not log-recoverable** (the flip side of 2a): a
+  `Node` with a live `Body` closure (the test/library path) cannot survive
+  `Load` — only `BodyKind`/`BodyConfig` descriptors do. The daemon path uses
+  descriptors throughout; in-process callers accept no restart.
 
 ## See also
 
