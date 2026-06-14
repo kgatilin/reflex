@@ -31,17 +31,28 @@ type Config struct {
 	Command []string `json:"command"`
 }
 
-// Factory is the engine.BodyResolver entry for the "plugin" kind. It is wired
-// into the registry by the composition root: nodes.Register(proxy.Kind, proxy.Factory).
-func Factory(name string, config json.RawMessage) (engine.Reaction, error) {
+// ParseConfig decodes and validates a plugin node's body_config.
+func ParseConfig(name string, config json.RawMessage) (Config, error) {
 	var cfg Config
 	if len(config) > 0 {
 		if err := json.Unmarshal(config, &cfg); err != nil {
-			return nil, fmt.Errorf("proxy %q: decoding body_config: %w", name, err)
+			return Config{}, fmt.Errorf("proxy %q: decoding body_config: %w", name, err)
 		}
 	}
 	if len(cfg.Command) == 0 {
-		return nil, fmt.Errorf("proxy %q: body_config.command is required", name)
+		return Config{}, fmt.Errorf("proxy %q: body_config.command is required", name)
+	}
+	return cfg, nil
+}
+
+// Factory is a standalone engine.BodyResolver entry for the "plugin" kind: it
+// spawns a fresh process per call. The daemon uses a Manager instead (spawn-once
+// + reuse across the apply-time probe and the resolver); Factory is for direct
+// and test use where no manager is needed.
+func Factory(name string, config json.RawMessage) (engine.Reaction, error) {
+	cfg, err := ParseConfig(name, config)
+	if err != nil {
+		return nil, err
 	}
 	client, err := plugin.Spawn(cfg.Command...)
 	if err != nil {
