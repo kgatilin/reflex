@@ -159,16 +159,27 @@ log (the daemon is in-memory; `Load` proves replay works), and the richer
 special cases. The only true in-process body is `llm` (the reasoning core); every
 *hand* (`fs.*`, `py.test`, `go.*`, …) is an **out-of-process stdio plugin**.
 
-**3a — the plugin seam (stdio):**
-- a generic in-binary `"plugin"` body — a proxy `Reaction` that, when its node
-  fires, forwards the triggering event to a child process and returns the emits
-  the child sends back;
-- the wire: NDJSON over the child's stdin/stdout — `hello`/`welcome` handshake,
-  then per-firing `invoke{id,event}` → `result{id,emits[],error?}`;
-- a small plugin SDK (the deleted `pkg/sdk` transport-adapter shape is the
-  template) so a plugin author writes `plugin.Serve(handler)`;
+**3a — the plugin seam (stdio). ✅ DONE (`9716340`, `58bf01a`, `6efbb7d`).**
+- a generic in-binary `"plugin"` body (`nodes/proxy`) — a proxy `Reaction` that,
+  when its node fires, forwards the triggering event to a child process and
+  returns the emits the child sends back;
+- the wire (`pkg/plugin`, engine-free): NDJSON over the child's stdin/stdout —
+  `hello`/`welcome` handshake, then per-firing `invoke{id,event}` →
+  `result{id,emits[],error?}`;
+- a small plugin SDK (the deleted `pkg/sdk` transport-adapter shape was the
+  template) so a plugin author writes `plugin.Serve(spec, handler)`;
 - the proxy is built so a **socket** transport drops in later (for plugins with
   an independent lifecycle); stdio is the simpler start.
+
+**The catalog is populated dynamically from the plugin, never hardcoded.** A
+plugin announces its self-description in the `hello` — `events: [{kind, schema,
+role: in|out}]`. The daemon **probes** each plugin node at `apply` (spawns it
+once via a per-daemon `proxy.Manager`, reads the spec) and **expands the
+changeset**: the node's `On`/`Emits` gain the plugin's consumed/emitted kinds,
+and one `EventKind` decl is added per declared kind+schema. So the schemas come
+from the plugin and land on the log as `sys.event.registered` facts — `reflexd`
+hardcodes nothing. `engine.Load` rebuilds the catalog from those facts and
+re-spawns the process without re-probing (G8).
 
 Properties this preserves: the engine's **emit-allowlist still binds the plugin**
 (out-of-process is not out-of-bounds); the body descriptor (`kind` + spawn
@@ -184,12 +195,20 @@ only spawns what the applied topology references — a non-filesystem agent simp
 never wires an `fs` node, so no fs process is launched. The protocol is
 language-agnostic (a plugin can be native Python).
 
+*Finding (3a):* adopting the catalog — a plugin contributing even one kind —
+flips on **full catalog enforcement** (`validate.go`: a non-empty catalog gates
+`Connected`), so the whole topology must then declare every kind, including
+engine-internal `scope.*.closed` and ingress kinds. This is the right end-state
+for the agent (we want a full catalog so the `llm` body can advertise function
+schemas), but a follow-up should **auto-register scope-closure + ingress kinds**
+to cut operator boilerplate.
+
 **3b — the hands themselves:** `fs.{read,edit,write,search}` (port the deleted fs
 logic from git history, root-confined) and `py.test` as `reflexd plugin`
-subcommands on the SDK. **Register their event kinds + parameter schemas in the
-catalog** so the `llm` body advertises real function schemas (closes the
-`CONCEPT.md` §12 "tool schemas from catalog" gap). Schemas must be the
-LLM-tool-compatible subset.
+subcommands on the SDK, each announcing its kinds + parameter schemas in `hello`.
+With the catalog now carrying those schemas (3a), wire the `llm` body to
+advertise them as real function schemas (closes the `CONCEPT.md` §12 "tool
+schemas from catalog" gap). Schemas must be the LLM-tool-compatible subset.
 
 **Iteration 4 — The coding-agent topology + verification flow, run locally.**
 Express §4 as a changeset/YAML; wire the real model (Gemini, `iow-uagent`,
