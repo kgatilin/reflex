@@ -26,11 +26,13 @@ const (
 	TypeResult  = "result"  // plugin -> host: the produced emits (or an error)
 )
 
-// Event is the wire form of the triggering event handed to a plugin: the full
-// subject plus the opaque payload. Views are deliberately NOT crossed over the
-// wire — hands react to the event, not to in-process projections (those are the
-// brain's surface).
+// Event is the wire form of the triggering event handed to a plugin: the kind
+// (so a plugin handling several kinds on one node can dispatch without parsing
+// the subject), the full subject, and the opaque payload. Views are deliberately
+// NOT crossed over the wire — hands react to the event, not to in-process
+// projections (those are the brain's surface).
 type Event struct {
+	Kind    string          `json:"kind"`
 	Subject string          `json:"subject"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 }

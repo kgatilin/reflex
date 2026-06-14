@@ -69,7 +69,7 @@ type reaction struct {
 }
 
 func (r reaction) React(ctx context.Context, ev engine.Event, _ engine.Views) ([]engine.Emit, error) {
-	emits, err := r.client.Invoke(ctx, plugin.Event{Subject: ev.Subject, Payload: ev.Payload})
+	emits, err := r.client.Invoke(ctx, plugin.Event{Kind: engine.KindOf(ev), Subject: ev.Subject, Payload: ev.Payload})
 	if err != nil {
 		return nil, err
 	}

@@ -206,9 +206,21 @@ to cut operator boilerplate.
 **3b — the hands themselves:** `fs.{read,edit,write,search}` (port the deleted fs
 logic from git history, root-confined) and `py.test` as `reflexd plugin`
 subcommands on the SDK, each announcing its kinds + parameter schemas in `hello`.
-With the catalog now carrying those schemas (3a), wire the `llm` body to
-advertise them as real function schemas (closes the `CONCEPT.md` §12 "tool
-schemas from catalog" gap). Schemas must be the LLM-tool-compatible subset.
+
+The `llm` body needs **no per-tool wiring** — a callable function already *is* a
+kind in the node's `Emits` ("the menu", llm.go: no separate tool-menu concept).
+The only §12 gap is that the advertised `ToolSchema` carries no `InputSchema`;
+3b fills it from the **catalog** (which 3a populates dynamically from the
+plugin). The engine already folds the catalog at dispatch (`catalogSchema`); 3b
+exposes that lookup on the dispatch read-surface (a `Views.Schema(kind)`
+accessor — no `Reads`, no wiring) and the `llm` body sets each function's
+`InputSchema` from it. Adding a tool = register its kind in the llm node's
+`Emits` + have the plugin announce the schema → the catalog carries it → the
+`llm` advertises it. Schemas must be the LLM-tool-compatible subset.
+
+A plugin's **root** (e.g. the fs sandbox dir) comes from its node `body_config`,
+so one daemon can host several fs plugins rooted at different dirs — config, not
+code.
 
 **Iteration 4 — The coding-agent topology + verification flow, run locally.**
 Express §4 as a changeset/YAML; wire the real model (Gemini, `iow-uagent`,
