@@ -17,7 +17,9 @@
 | Engine contracts (skeleton): `Event`/`Trace`/`Emit`, `Reaction`/`Views`/`KV`, `Decl` (`Node`/`Scope`/`Projection`), `tool.Node` | `engine/`, `nodes/` | defined; `llm.New` still panics |
 | **Step 1 — connectivity validation** (doc 27 §7) | `engine/` + ArchMotif `pkg/graphval` | **done, verified** |
 | **Stage 2a — `Append` + `Drain` to quiescence** (deterministic) | `engine/` | **done, verified** |
-| **Stage 2b — scope instances, obligation counting, `scope.closed`, budget cap** (docs 24 §5 / 26 §3d/§3f) | `engine/scope.go` + `engine/engine.go` + `validate.go` | **done, verified** (`306fc6e`) |
+| **Stage 2b — scope instances, obligation counting, `scope.closed`, budget cap** (docs 24 §5 / 26 §3d/§3f) | `engine/scope.go` + `engine/engine.go` + `validate.go` | **done, verified** (`306fc6e`); co-rooting reject (`47dcf3d`) |
+| **Stage 2c — projection evaluation (backward-walk views) + per-scope state + closure carries snapshot** (docs 26 §2a / 24 §6) | `engine/projection.go` + `engine.go` + `scope.go` | **done, verified** (`e8f5c55`); also fixed a latent multi-ingress drain defect (frontier → per-index dispatched) |
+| **Stage 2d — event catalog (`kind → schema`) self-hosted over `event.registered`; unknown-kind / dead-subscription / payload-conformance checks** (doc 26 §4a) | `engine/catalog.go` + `topology.go` + `validate.go` + `engine.go` | **done, verified** (`2fdee6e`); catalog opt-in-until-adopted |
 
 **Step 1 detail.** `engine.Validate(decls...) → Report{Connected, DeadEnds,
 UnreachableNodes, Fragments, UnboundedCycles, Suggestions}`; `Apply` routes
