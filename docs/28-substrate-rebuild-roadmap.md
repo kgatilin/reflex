@@ -97,23 +97,41 @@ The doc-24 §5 / doc-26 runtime.
 - **Proves**: loops, joins, scope budgets, stall→bridge re-drive — the heart
   of the model.
 
-### Stage 2c — projections (declared folds over causal horizons)
+### Stage 2c — projections + the per-scope state ([26 §2a](./26-bare-substrate.md))
 
-- kv/log views via a backward walk over `caused_by` to the horizon
-  (`request` / `session` / `global`), attached as `Views` at dispatch
-  ([24 §6](./24-concept.md)).
-- `state.updated.*` facts fold into `task_state`; `in: global` serves
-  `project_context` and config facts.
+- **One state per scope instance** (the built-in fold): each scope's
+  `state.updated.{path}` events fold into one kv (`path → payload`), born at
+  root, frozen at close. `task_state` *is* the `request` scope's state, not a
+  free-standing projection.
+- **Declared projections are views over states**: kv/log views via a backward
+  walk over `caused_by` to the horizon (`request` / `session` / `global`),
+  attached as `Views` at dispatch ([24 §6](./24-concept.md)); a view may join
+  the node's own scope state with an ancestor/`global` state.
+- **Closure carries the state snapshot**: extend the 2b `scope.X.closed`
+  payload to include the cone's final state, so a parent-scope consumer can
+  fold chosen fields up — the only request→global promotion path (writes are
+  local; no live `sys.` up-write).
 - **Acceptance**: a reaction reads a kv/log view reproducing the expected
-  fold; read-at-trigger isolation holds across parallel `request` cones.
-- **Proves**: the reconciler's state becomes computable from the log.
+  fold; read-at-trigger isolation holds across parallel `request` cones; a
+  `global` consumer of `scope.request.closed` promotes a field into the
+  global state.
+- **Proves**: the reconciler's state becomes computable from the log, and
+  state flows up through closures, never sideways.
 
 ### Stage 3 — `llm` body + run the reconciler
 
+- **Prerequisite — event kinds carry a payload schema** ([26 §4](./26-bare-substrate.md)):
+  an `llm` body advertises to the model *its `Emits` allowlist, each kind with
+  its payload schema* — there is no separate "tool menu", the allowlist **is**
+  the menu. Today `Emits` is bare kind names and `Emit.Payload` is untyped, so
+  a **kind → payload-schema** association must land in the substrate (lifting
+  what `provider.ToolSchema` carried ad hoc). An LLM node is not special — it
+  is a node with `Emits` whose body calls a model.
 - `llm.New`: read declared views, call the provider (stage-0
-  `pkg/provider`, reused), decode the completion **and** tool-calls into
+  `pkg/provider`, reused), decode the completion **and** function-calls into
   allowlisted `Emit`s ([26 §4](./26-bare-substrate.md): function-calling is
-  transport encoding).
+  transport encoding, not a "tool" mechanism — every decode is an allowlisted
+  emission).
 - Wire the doc-27 §3/§4 topology; run a real task through
   `new → gathering → planning → executing → done`.
 - **Acceptance**: the example topology, given a task, reconciles to

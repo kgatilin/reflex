@@ -93,6 +93,55 @@ lives in the parent cone (the sealing row above) and opens a **new child
 cone**. The "follow-up loop" `cone₁ closes (stall) → bridge → cone₂ opens →
 …` *is* the cycle that a budget bounds (§3f).
 
+### 2a. One state per scope; writes are local; promotion is through closure
+
+The "accumulating state" above is not a vague notion — it is **one state per
+scope instance**, the scope's single canonical record. It is a built-in
+projection: the fold of the cone's `state.updated.{path}` events into a kv
+(`path → payload`). It is born with the scope (the root event) and frozen at
+closure — **state lifecycle is scope lifecycle**, so "who creates state" has
+no separate answer: rooting the scope *is* creating its state. The engine
+stays payload-blind: it keys by the path token in the subject and stores the
+bytes; meaning is the reconciler's.
+
+- **One per *instance* → isolation is free.** N parallel `request` cones are
+  N `task_state`s, each seeing only its own ([27 §4](./27-state-defined-agent.md)).
+  `task_state` is **not** "a projection over the log" — it **is** the
+  `request` scope's one state.
+- **Declared projections are *views over states*, never a second state.**
+  Many views over one state (a `goal` slice; `context` as a list; a join of
+  `request` state with `global` state). A view reshapes; the underlying
+  per-scope state stays single. This is what a node's `Reads` names.
+- **Writes are local.** A node's `state.updated.X` writes **only its own
+  `In` scope's state** — no ancestor addressing, no `state.updated.{scope}.{path}`.
+  Simple, and it keeps "what wrote this" answerable from the cone alone.
+
+**Promotion to a parent (incl. global) goes through closure — and only
+through closure.** A mid-cone emit is `caused_by` a cone event, so it lives
+*in that cone* and dies with it; it cannot durably be a parent's/global's
+state. The **only** event that is both caused by the cone and placed in the
+parent is `scope.X.closed` (the sealing row above puts it in the parent).
+So: closure **carries the cone's final state snapshot** in its payload (the
+engine attaches its own maintained fold, as it does the obligation count),
+and a **parent-scope consumer** of `scope.X.closed` folds the chosen fields
+into the *parent's* state — an ordinary reaction, the same consumer-of-closure
+as the join/barrier and the stall bridge. State flows **up through closures,
+never sideways through scopes**: the reduce step of a map over child cones.
+
+A **live** cross-scope write is impossible without breaking an invariant we
+hold: it would have to strip `caused_by` (re-root the event out of its cone)
+or declare a subject class ambient despite its causality (a sender claim —
+exactly what the [24 §2 amendment](./24-concept.md) "membership is topology,
+not a sender claim" forbids). So there is no live up-write; the old
+`sys.state.updated.*` promotion of [27 §4](./27-state-defined-agent.md) is
+retired in favour of closure-propagation.
+
+**Latency is a granularity knob, not a second mechanism.** Promotion is
+always on-close, but *close can be as fine as you make it*: wrap the unit you
+want shared (one "read a file + index it") in a small sub-scope and its
+closure promotes near-live, without waiting for the whole `request` to close.
+Promotion latency = scope granularity; the mechanism stays one.
+
 **What does *not* dissolve.** The *region itself*. "Final" is meaningless
 without "final over **what**" — and the answer is the cone: a root event
 plus the events `caused_by`-descended from it up to the closure. The cone is
@@ -235,13 +284,23 @@ is the whole contract.
   difference between emitting `tool.fs.read.call` and emitting `llm.message`
   (the text answer) — both are allowlisted emissions. *"Tool calling" as a
   distinct capability dissolves.*
-- The **menu** advertised to the model is a projection:
-  `allowlist ∩ { kinds with a tool.*.call consumer }`
-  ([24 §3](./24-concept.md): "the LLM tool menu is a projection of the
-  `tool.*.call` consumers"). Register a plugin → a consumer appears → the
-  kind becomes callable → the menu updates on the next firing. Remove the
-  consumer → the kind is still *emittable* but now *orphaned* (a lint), and
-  it drops from the menu. Zero config.
+- There is **no separate "menu" concept.** What the model may emit *is the
+  node's `Emits` allowlist* (`Actions`) — the same `Emits` every node already
+  declares, LLM or not. The "menu" advertised to the model is simply that
+  allowlist; an LLM node is not special, it is a node whose body happens to
+  call a model. (Connectivity is orthogonal: a kind in `Emits` with no
+  consumer is an *orphan lint*, but it is still emittable and still in the
+  allowlist — whether anything acts on it is graph shape, not a menu
+  mechanism.)
+- **What the model needs that we don't yet have: the event's *type*.** Each
+  emittable kind has a **payload schema** — "emit `tool.fs.read.call` with
+  `{path: string}`". The payload *is* the event's type. Today `Emit.Payload`
+  is an untyped `json.RawMessage` and `Emits` is bare kind names, so the
+  schema lives nowhere in the substrate; the body cannot tell the model the
+  shape to emit. The missing piece is a **kind → payload-schema** association
+  in the substrate — which is exactly what `provider.ToolSchema` was carrying
+  ad hoc. Lifting it to "the schema of an event kind" removes the last place
+  "tool" looked special: a schema'd allowlist is all the model is handed.
 - Provider-level **function-calling is transport encoding, not a
   mechanism.** The adapter decodes the model's function-call into
   `Emit{ Kind: "tool.X.call", Payload }` and decodes a text completion into

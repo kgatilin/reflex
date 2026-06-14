@@ -95,7 +95,8 @@ read-only**):
 |---|---|---|---|---|
 | `resolver` | `app.ingress.*` | `global` | session binding | `request.received` (roots `request`) |
 | `understand` (llm, **read-only**) | `request.received` | `request` | `task` | `state.updated.goal`, `state.updated.status`, **only** `tool.fs.read.call` / `tool.fs.search.call` |
-| `gather` (llm) | `tool.fs.*.result` | `request` | `project_context` (global) + `task_context` (request) | `state.updated.context.found` (req), `sys.…project.context.found` (global), `state.updated.sufficiency`; then loop `tool.fs.read.call` **/** `plan.requested` **/** `task.needs_clarification` |
+| `gather` (llm) | `tool.fs.*.result` | `request` | `project_context` (joins global state) + `task_context` (request) | `state.updated.context.found` (writes **own** request state), `state.updated.sufficiency`; then loop `tool.fs.read.call` **/** `plan.requested` **/** `task.needs_clarification` |
+| `promote` (llm or det.) | `scope.request.closed` | `global` | request's final state (from the closure payload) | `state.updated.project_context` (writes **global** state) — the only request→global path (§4 / [26 §2a](./26-bare-substrate.md)) |
 | `plan` (llm) | `plan.requested` | `request` | `goal`, context views | `state.updated.plan`, `state.updated.status{executing}` |
 | `execute` (llm) | `state.updated.plan`, `tool.*.result` | `request` | `plan`, `task_context` | next step `tool.*.call`, `state.updated.plan.{i}.status`; when no `pending` → `state.updated.status{done}`, `task.answered` |
 | `fs`, `gotool` (tool) | `tool.X.call` | `global` | — | `tool.X.result` / `.failed` |
@@ -116,13 +117,19 @@ covering scope is what bounds the loop.
 **No node is scope-less. The minimum scope is `global`.** Three live in this
 agent:
 
-- **`global`** — daemon-wide, session-less (`sys.` facts, outside every
-  cone). Holds: the shared **`project_context`**, **config** (system prompt,
-  project orientation, per-node prompt/model config as facts —
-  [24 §A.4](./24-concept.md)), and lifecycle events like **`agent.started`**.
+- **`global`** — daemon-wide, session-less (outside every cone). Holds the
+  **global state**: the shared **`project_context`** and **config** (system
+  prompt, project orientation, per-node prompt/model config as facts —
+  [24 §A.4](./24-concept.md)), plus lifecycle events like **`agent.started`**.
 - **`request`** — one per task. **N parallel tasks = N isolated `request`
-  cones.** Holds `task_state`.
+  cones.** Its one state is `task_state` ([26 §2a](./26-bare-substrate.md):
+  one state per scope instance).
 - **node-loop** — the `gather` / `execute` loops, within a `request`.
+
+Each scope has exactly **one state** ([26 §2a](./26-bare-substrate.md)):
+`global` has the global state, each `request` instance its own `task_state`.
+A node writes only *its own* scope's state; views (`Reads`) are read-shaped
+projections over one or more states.
 
 **Parallelism is not N agents — it is one node-set firing in N cones.**
 There is one `gather` declaration; it fires inside each `request` cone
@@ -131,13 +138,18 @@ sees only its own task. Isolation is geometry (`caused_by`,
 [24 §6](./24-concept.md)), not addressing. A background daemon running four
 tasks at once is four `request` cones over one standing topology.
 
-**Shared context, deliberately.** `gather` reads `project_context`
-(`in: global`) first — if the project was already explored, `sufficiency`
-can be `sufficient` with no re-reads. New findings it publishes *up* as
-`sys.` facts (`sys.state.updated.project.context.found`) so the other three
-tasks reuse them; task-private findings stay `request`-scoped. This is the
-[25 §3](./25-regulation-concept.md) pattern (global state as `sys.` facts,
-outside cones) applied to context instead of energy.
+**Shared context, through closure.** `gather` reads `project_context`
+(a view joining the `global` state) first — if the project was already
+explored, `sufficiency` can be `sufficient` with no re-reads. New findings it
+writes to its **own** `request` state; they are **promoted to `global` only
+through closure** ([26 §2a](./26-bare-substrate.md)): the closing scope
+carries its final state, and a `global`-scope consumer of the closure folds
+the chosen findings into `project_context`. There is no live `sys.` up-write
+(it would break "membership is geometry", [24 §2](./24-concept.md)); the old
+`sys.state.updated.project.context.found` promotion is retired. If
+near-live sharing is wanted, wrap a finding in a **small sub-scope** so its
+closure promotes promptly — promotion latency is scope granularity, not a
+second mechanism.
 
 **Config arrives as global events.** `agent.started` seeds the global scope;
 the system prompt, project orientation, and each LLM node's
