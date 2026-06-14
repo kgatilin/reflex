@@ -12,8 +12,8 @@ import (
 // the readable log (no privileged plane, G8: audit, cost, every metric
 // is a fold over Events).
 type Engine struct {
-	log    []Event
-	decls  []Decl
+	log   []Event
+	decls []Decl
 }
 
 // New returns an empty engine: no topology, no events. Everything it
@@ -24,10 +24,37 @@ func New() *Engine {
 
 // Apply runs the changeset pipeline (doc 20 via §7): the resulting graph
 // is validated as a whole — not each step — and applied atomically
-// between dispatches; intermediate states are inexpressible. Facts
-// recording the change land on the log like any other event.
-func (e *Engine) Apply(ctx context.Context, decls ...Decl) error {
-	panic("engine: Apply not implemented — skeleton for API review")
+// between dispatches; intermediate states are inexpressible.
+//
+// In the doc-27 step-1 milestone this is the validation path only: it folds
+// the decls and runs the connectivity validator (Validate). If the topology
+// is connected it records the decls and returns nil; otherwise it returns a
+// ValidationError carrying the Report. No event is appended and no drain runs
+// — fact recording and dispatch belong to later steps. Callers that want the
+// Report regardless of connectivity should call Validate directly; that is the
+// cleaner read-only surface, and Apply is implemented on top of it.
+func (e *Engine) Apply(_ context.Context, decls ...Decl) error {
+	rep, err := Validate(decls...)
+	if err != nil {
+		return err
+	}
+	if !rep.Connected {
+		return &ValidationError{Report: rep}
+	}
+	e.decls = append(e.decls, decls...)
+	return nil
+}
+
+// ValidationError reports a topology that failed connectivity validation
+// (doc 27 §5). It carries the full Report so the caller can render the gaps
+// and the suggested LLM bridges.
+type ValidationError struct {
+	Report Report
+}
+
+func (e *ValidationError) Error() string {
+	return "engine: topology is not connected — " +
+		"dead-ends, unreachable nodes, fragments, or unbounded cycles present (see Report)"
 }
 
 // Append puts one event on the log — the sole write (§4) — and stamps

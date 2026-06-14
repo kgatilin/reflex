@@ -4,6 +4,10 @@ go 1.24
 
 toolchain go1.24.0
 
+// archmotif's pkg/graphval (the connectivity validator's graph package) lives
+// on an unpushed local branch; resolve the module from the working tree.
+replace github.com/kgatilin/archmotif => ../tools/archmotif
+
 require (
 	github.com/anthropics/anthropic-sdk-go v1.50.1
 	github.com/google/uuid v1.6.0

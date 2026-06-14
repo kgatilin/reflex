@@ -6,10 +6,46 @@ package engine
 // instance root; interventions on live instances are ordinary events.
 type Decl interface{ isDecl() }
 
+// Kind tags a node by the nature of its body (doc 27 §6): the connectivity
+// validator reads it to decide which nodes may serve as the deterministic
+// guard of a cycle (KindDeterministic) and which are bridges that may not be
+// relied on to enforce a loop exit (KindLLM). The zero value is
+// KindDeterministic — a node with no declared kind is treated as plain
+// deterministic machinery, the conservative default for a guard candidate.
+type Kind string
+
+const (
+	// KindDeterministic is plain machinery: tool dispatch is not modelled by
+	// this kind (tools carry KindTool); deterministic covers guards,
+	// resolvers, and any pure transition that is not an LLM bridge. It is the
+	// zero value, so an unset Node.Kind reads as deterministic.
+	KindDeterministic Kind = "deterministic"
+	// KindLLM marks a bridge node whose body is a language model (doc 27 §1):
+	// LLM nodes sit at dead-ends and emit the entry kinds of otherwise
+	// disconnected fragments. They may not be counted as a cycle's guard.
+	KindLLM Kind = "llm"
+	// KindTool marks a tool-dispatch node (nodes/tool): subscribed to
+	// tool.{name}.call, emitting tool.{name}.result / .failed.
+	KindTool Kind = "tool"
+)
+
+// orDefault returns the node's kind, defaulting the zero value to
+// KindDeterministic so no node is ever kind-less.
+func (k Kind) orDefault() Kind {
+	if k == "" {
+		return KindDeterministic
+	}
+	return k
+}
+
 // Node wires a Reaction into the topology: what it hears, what views it
 // reads, what it may emit, and whether its firings root a scope.
 type Node struct {
 	Name string
+
+	// Kind tags the body's nature (llm / tool / deterministic) for the
+	// connectivity validator (doc 27 §6). Empty defaults to deterministic.
+	Kind Kind
 
 	// On lists kind patterns (NATS grammar: * one token, > tail) the node
 	// subscribes to. The dispatcher prepends the scope wildcard (§2).

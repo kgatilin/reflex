@@ -23,6 +23,7 @@ type Func func(ctx context.Context, input json.RawMessage) (json.RawMessage, err
 func Node(name string, fn Func) engine.Node {
 	return engine.Node{
 		Name:  name,
+		Kind:  engine.KindTool,
 		On:    []string{"tool." + name + ".call"},
 		Emits: []string{"tool." + name + ".result", "tool." + name + ".failed"},
 		Body:  reaction(name, fn),
