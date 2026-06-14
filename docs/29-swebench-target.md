@@ -128,14 +128,19 @@ what is missing is the *runtime shell* and the *hands*.
 Proposed sequence (iterations, to confirm). The lean is **do it right**: the
 daemon and real-time management stand on a log fold, not a slice.
 
-**Iteration 1 — Control plane as changeset events on the new engine.**
-Topology becomes a **fold over `sys.topology.changeset.*` / `sys.node.registered`
-… facts** (the "management projections" family beside the catalog), not the
-current `Apply(decls)` slice. `Apply`, YAML boot, and the CLI all become
-*clients* emitting `changeset.requested → applied | rejected`; the existing
-`Validate` is the resulting-graph validator. This is
-[`outdated/20`](./outdated/20-topology-management.md) on the new engine, and it
-is what makes "add a node / subscription / event type in real time" real.
+**Iteration 1 — Control plane as changeset events on the new engine. ✅ DONE
+(`645a0bc`).** Topology is now a **fold over `sys.topology.changeset.*` /
+`sys.node.registered` … facts** (`foldTopology(log, bodies)`), not the old
+`Apply(decls)` slice. `Apply` is the in-process *client* emitting
+`changeset.requested → facts + applied | rejected`; `Validate` is the
+resulting-graph validator (now validating the cumulative graph). A node's `Body`
+is the one non-serializable part — resolved by name from a process registry, the
+same way view-type builders and provider adapters are code, not facts. The live
+table round-trips as a fold of the log (G8). This is
+[`outdated/20`](./outdated/20-topology-management.md) on the new engine; what
+remains for "add a node in real time" is the **daemon/CLI/API surface**
+(Iteration 2) that lets an *off-process* client submit ops (and bind a node
+name → a registered body factory).
 
 **Iteration 2 — Daemon around the new engine + send-message/wait.**
 A long-lived process hosting the engine: ingress (`emit`), drive to terminal
@@ -175,10 +180,11 @@ instance image, `docker cp` the linux daemon+agent in, run the agent against
 
 ## 8. Open questions specific to this target
 
-- **Control-plane depth for Iteration 1**: full self-hosted changeset-as-log-fold
-  vs a thinner "Apply is the only mutation, but it appends changeset facts" first
-  cut. (Lean: real fold — the management surface is a stated goal, not a
-  shortcut.)
+- ~~**Control-plane depth for Iteration 1**~~: **resolved** — built the real
+  self-hosted changeset-as-log-fold (`645a0bc`), not the thin slice. New
+  follow-on (Iteration 2): an off-process client submits *ops* without Go
+  `Decl`s, so it needs a name/kind → registered-body-factory binding (the
+  plugin-`hello` seam of [`outdated/20`](./outdated/20-topology-management.md)).
 - **Verifier target**: which test command the `verifier` runs for self-checking
   (repo default suite? a subset the brain names?), given the hidden tests are
   invisible.

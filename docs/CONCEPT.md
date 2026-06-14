@@ -169,7 +169,9 @@ matched events become the view value ([26 §4b](./26-bare-substrate.md)).
 
 Managing the agent (adding nodes, subscriptions, scopes, projections, event
 types) is itself **events on the log** ([20](./outdated/20-topology-management.md)),
-not a config-file edit + restart.
+not a config-file edit + restart. **Built** (Iteration 1): the live table is
+`foldTopology(log, bodies)` and `Apply` is the in-process changeset client; what
+is not yet built is the daemon/CLI/API surface around it (Iteration 2).
 
 ```
 sys.topology.changeset.requested{ ops, principal }
@@ -264,13 +266,11 @@ All on branch `feat/connectivity-validation`, verified with `go test -race`
 | View-type registry (`Type`, `RegisterType`, `Value`, `ViewAs`); validate unknown-type & dangling-reads | `engine/` | **done** (3a) |
 | `llm.history` view type + `llm` body (real provider via `pkg/provider` → allowlisted emits + `llm.usage`); `tool.Node` | `nodes/llm`, `nodes/tool` | **done** (3b); a doc-27-style run reconciles on a stub provider |
 | Real model adapters (Gemini / Anthropic / OSS on Vertex) | `pkg/provider` | **done** (shared); Claude blocked only by GCP publisher access, not code |
+| **Control plane as changeset facts** — topology is `foldTopology(log, bodies)`, not a slice; `Apply` = the changeset client (`requested → facts + applied \| rejected`); bodies resolved by name from a process registry | `engine/changeset.go` + `engine.go` | **done** (Iteration 1); live table round-trips as a fold of the log (G8) |
 
 **Designed, not yet built on the new kernel** (the next work — see §12 and
 [28](./28-substrate-rebuild-roadmap.md)):
 
-- The **control plane as events** on the new engine: today `Apply(decls)` records
-  into a slice, not a log fold. Doing it right (§8) = changeset facts +
-  live-table-as-fold (the "management projections" family beside the catalog).
 - A **daemon** around the new engine: send a message (emit ingress), run to
   terminal, read views, `--wait` — plus the CLI/API surface of §8 for real-time
   topology config.
@@ -282,8 +282,6 @@ All on branch `feat/connectivity-validation`, verified with `go test -race`
 
 ## 12. Open questions (current)
 
-- **Control plane on the new engine** (§8/§11): self-hosted topology-as-log-fold
-  vs the pragmatic `Apply(decls)` slice first. ("Do it right" leans self-hosted.)
 - **Completion via verification** (§9): the exact claim → verify → state flow and
   what the verifier checks beyond tests.
 - **Tool schemas from the catalog** into the `llm` body (today advertised
@@ -298,6 +296,12 @@ All on branch `feat/connectivity-validation`, verified with `go test -race`
   dispatch matches `On` against the kind tail — reconcile.
 - **`provider.Message` is coarse** (`{Role, Text}`, no tool_use/result block
   pairing); proper tool-calling needs a richer message at the provider layer.
+- **Body resolution for off-process changeset clients** (new with Iteration 1): a
+  node's `Body` is code resolved by name from a process registry, never a log
+  fact. `Apply` stashes the body of each `Node` decl it is handed. A daemon/CLI
+  client (Iteration 2) that submits *ops* (not Go `Decl`s) needs a way to bind a
+  node name/kind to a registered body factory (built-in `llm`/`tool`/plugin) —
+  the plugin-`hello` seam of [20](./outdated/20-topology-management.md).
 
 ## See also
 
