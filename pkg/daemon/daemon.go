@@ -137,19 +137,20 @@ func (d *Daemon) Apply(ctx context.Context, doc topology.Document) error {
 
 // pendingPluginDecls returns the launched plugins' decls that are NOT yet on the
 // log (the live table). The engine's changeset takes a delta over the live table
-// — a node already registered must not be re-sent (foldNodes does not dedup, so a
-// duplicate would break the graph build). After a Load the subscriber nodes are
-// already live (rebuilt from the log) and pluginDecls is empty, so this is nil.
+// — a subscriber already registered must not be re-sent (foldSubscribers does not
+// dedup, so a duplicate would break the graph build). After a Load the plugin
+// subscribers are already live (rebuilt from the log) and pluginDecls is empty,
+// so this is nil.
 func (d *Daemon) pendingPluginDecls() []engine.Decl {
 	if len(d.pluginDecls) == 0 {
 		return nil
 	}
-	liveNodes := map[string]bool{}
+	liveSubs := map[string]bool{}
 	liveEvents := map[string]bool{}
 	for _, dcl := range d.e.Topology() {
 		switch v := dcl.(type) {
-		case engine.Node:
-			liveNodes[v.Name] = true
+		case engine.Subscriber:
+			liveSubs[v.Name] = true
 		case engine.EventKind:
 			liveEvents[v.Kind] = true
 		}
@@ -157,8 +158,8 @@ func (d *Daemon) pendingPluginDecls() []engine.Decl {
 	var out []engine.Decl
 	for _, dcl := range d.pluginDecls {
 		switch v := dcl.(type) {
-		case engine.Node:
-			if !liveNodes[v.Name] {
+		case engine.Subscriber:
+			if !liveSubs[v.Name] {
 				out = append(out, v)
 			}
 		case engine.EventKind:

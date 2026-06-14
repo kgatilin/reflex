@@ -17,9 +17,9 @@ func catalogTopology() []Decl {
 		EventKind{Kind: "request.received", Schema: objSchema},
 		EventKind{Kind: "work.done", Schema: objSchema},
 
-		Node{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}},
-		Node{Name: "worker", On: []string{"request.received"}, In: "global", Emits: []string{"work.done"}},
-		Node{Name: "sink", On: []string{"work.done"}, In: "global"},
+		Subscriber{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}},
+		Subscriber{Name: "worker", On: []string{"request.received"}, In: "global", Emits: []string{"work.done"}},
+		Subscriber{Name: "sink", On: []string{"work.done"}, In: "global"},
 	}
 }
 
@@ -63,14 +63,14 @@ func TestCatalog_UnknownKindIsRejected(t *testing.T) {
 	decls := catalogTopology()
 	// Mutate the worker to emit an unregistered kind alongside work.done.
 	for i := range decls {
-		if n, ok := decls[i].(Node); ok && n.Name == "worker" {
+		if n, ok := decls[i].(Subscriber); ok && n.Name == "worker" {
 			n.Emits = []string{"work.done", "work.mystery"}
 			decls[i] = n
 		}
 	}
 	// work.mystery has no consumer either, but the catalog check is what we assert
 	// — add a consumer so the only gap is unknown-kind.
-	decls = append(decls, Node{Name: "mystery-sink", On: []string{"work.mystery"}, In: "global"})
+	decls = append(decls, Subscriber{Name: "mystery-sink", On: []string{"work.mystery"}, In: "global"})
 
 	rep, err := Validate(decls...)
 	if err != nil {
@@ -107,7 +107,7 @@ func TestCatalog_DeadSubscriptionIsReported(t *testing.T) {
 	decls := catalogTopology()
 	// The sink subscribes to a pattern no catalog kind matches.
 	for i := range decls {
-		if n, ok := decls[i].(Node); ok && n.Name == "sink" {
+		if n, ok := decls[i].(Subscriber); ok && n.Name == "sink" {
 			n.On = []string{"never.matches.anything"}
 			decls[i] = n
 		}
@@ -197,7 +197,7 @@ func conformanceTopology(t *testing.T, emit Emit, schema json.RawMessage) *Engin
 	e := New()
 	e.install(
 		EventKind{Kind: "echo.done", Schema: schema},
-		Node{
+		Subscriber{
 			Name:  "resolver",
 			On:    []string{"surface.in"}, // kind tail of app.ingress.surface.in
 			In:    "global",
@@ -207,7 +207,7 @@ func conformanceTopology(t *testing.T, emit Emit, schema json.RawMessage) *Engin
 			}),
 		},
 		// A sink so echo.done has a consumer (matches the runtime fanout shape).
-		Node{Name: "sink", On: []string{"echo.done"}, In: "global"},
+		Subscriber{Name: "sink", On: []string{"echo.done"}, In: "global"},
 	)
 	if _, err := e.Append(context.Background(), "app.ingress.surface.in", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Append ingress: %v", err)

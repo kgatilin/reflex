@@ -81,7 +81,7 @@ func TestRun_Doc27Reconciles(t *testing.T) {
 	})
 	fs.In = "request"
 
-	resolver := engine.Node{
+	resolver := engine.Subscriber{
 		Name: "resolver",
 		// "app.ingress.*" marks it an ingress root for the validator; "cli.task"
 		// is what actually matches at dispatch (the ingress kind tail of
@@ -104,9 +104,9 @@ func TestRun_Doc27Reconciles(t *testing.T) {
 		plan, pProj,
 		execute, eProj,
 		// sinks: the terminal answer, the cost fold, and the closure terminator.
-		engine.Node{Name: "notify", On: []string{"task.answered"}, In: "request"},
-		engine.Node{Name: "costs", On: []string{"llm.usage"}, In: "request"},
-		engine.Node{Name: "lifecycle", On: []string{"scope.request.closed"}},
+		engine.Subscriber{Name: "notify", On: []string{"task.answered"}, In: "request"},
+		engine.Subscriber{Name: "costs", On: []string{"llm.usage"}, In: "request"},
+		engine.Subscriber{Name: "lifecycle", On: []string{"scope.request.closed"}},
 	}
 
 	e := engine.New()

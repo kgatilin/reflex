@@ -106,7 +106,7 @@ type Report struct {
 // through it — because validation is a pure function of the decls and the
 // Report is the whole product of step 1.
 func Validate(decls ...Decl) (Report, error) {
-	nodes := foldNodes(decls)
+	nodes := foldSubscribers(decls)
 	consumers := foldConsumers(decls, nodes)
 
 	// Build the node graph (doc 27 §4): one graphval node per reaction node,
@@ -222,7 +222,7 @@ type consumer struct {
 // foldConsumers gathers every kind-consuming declaration: the reaction nodes
 // (already scope-defaulted) plus the projections. Projection names are
 // prefixed to keep them distinct from node names in the bipartite relation.
-func foldConsumers(decls []Decl, nodes []Node) []consumer {
+func foldConsumers(decls []Decl, nodes []Subscriber) []consumer {
 	out := make([]consumer, 0, len(decls))
 	for _, n := range nodes {
 		out = append(out, consumer{name: n.Name, on: n.On})
@@ -254,7 +254,7 @@ func unknownViewTypes(decls []Decl) []string {
 
 // danglingReads returns "node:view" pairs where a node's Reads names a view
 // that is not a declared Projection (doc 26 §4b). Sorted ascending.
-func danglingReads(decls []Decl, nodes []Node) []string {
+func danglingReads(decls []Decl, nodes []Subscriber) []string {
 	declared := map[string]struct{}{}
 	for _, d := range decls {
 		if p, ok := d.(Projection); ok {
@@ -273,13 +273,13 @@ func danglingReads(decls []Decl, nodes []Node) []string {
 	return out
 }
 
-// foldNodes extracts the reaction nodes from the decls and applies scope
+// foldSubscribers extracts the reaction nodes from the decls and applies scope
 // defaulting (doc 27 §4: no node is scope-less; empty In becomes "global").
 // It copies each Node so the caller's decls are never mutated in place.
-func foldNodes(decls []Decl) []Node {
-	var out []Node
+func foldSubscribers(decls []Decl) []Subscriber {
+	var out []Subscriber
 	for _, d := range decls {
-		n, ok := d.(Node)
+		n, ok := d.(Subscriber)
 		if !ok {
 			continue
 		}
@@ -294,7 +294,7 @@ func foldNodes(decls []Decl) []Node {
 // producesFor reports whether any kind in produced is matched by some pattern
 // in y.On (doc 27 §4): the directed edge X→Y of the topology graph, generalised
 // to take X's effective produced kinds (Emits + rooted closures).
-func producesFor(produced []string, y Node) bool {
+func producesFor(produced []string, y Subscriber) bool {
 	for _, kind := range produced {
 		for _, pat := range y.On {
 			if subjectMatch(pat, kind) {
@@ -311,7 +311,7 @@ func producesFor(produced []string, y Node) bool {
 // emits the declared Root kind of some Scope (kind-rooted) — in either case the
 // engine will emit scope.{name}.closed caused by that rooting, so the graph
 // edge runs from the rooter to the closure's consumer.
-func effectiveEmits(decls []Decl, nodes []Node) map[string][]string {
+func effectiveEmits(decls []Decl, nodes []Subscriber) map[string][]string {
 	declared := declaredScopes(decls)
 	out := make(map[string][]string, len(nodes))
 	for _, n := range nodes {
@@ -345,7 +345,7 @@ func effectiveEmits(decls []Decl, nodes []Node) map[string][]string {
 
 // ingressRoots returns the names of nodes that subscribe to an ingress kind
 // (doc 27 §3): the topology's entry points.
-func ingressRoots(nodes []Node) []string {
+func ingressRoots(nodes []Subscriber) []string {
 	var out []string
 	for _, n := range nodes {
 		if isIngressRoot(n) {
@@ -370,7 +370,7 @@ func isIngressPattern(pat string) bool {
 	return false
 }
 
-func isIngressRoot(n Node) bool {
+func isIngressRoot(n Subscriber) bool {
 	// A node is an ingress root if any subscription matches the ingress namespace
 	// — either by literally carrying an app.ingress.* / .> pattern or by matching
 	// a representative ingress subject.
@@ -389,7 +389,7 @@ func isIngressRoot(n Node) bool {
 // surfaces the items (kinds) with no incoming edge — the dead-ends. A kind is
 // terminal-and-fine only if it truly has a consumer (e.g. notify consuming
 // task.answered); otherwise it is reported.
-func deadEnds(nodes []Node, consumers []consumer) ([]string, error) {
+func deadEnds(nodes []Subscriber, consumers []consumer) ([]string, error) {
 	kindSet := map[string]struct{}{}
 	for _, n := range nodes {
 		for _, k := range n.Emits {
@@ -429,7 +429,7 @@ func deadEnds(nodes []Node, consumers []consumer) ([]string, error) {
 // unreachable returns the nodes that are neither an ingress root nor reachable
 // from one (doc 27 §5). ReachableFromNames(roots) includes each root and
 // everything downstream; the complement is the unreachable set.
-func unreachable(g *graphval.Graph, nodes []Node, roots []string) []string {
+func unreachable(g *graphval.Graph, nodes []Subscriber, roots []string) []string {
 	reachable := map[string]struct{}{}
 	for _, name := range g.ReachableFromNames(roots) {
 		reachable[name] = struct{}{}
@@ -502,7 +502,7 @@ func unboundedCycles(g *graphval.Graph) [][]string {
 // closure as potentially stalling and demands a consumer. Tightening to exempt
 // provably terminal-only closes is left as future work, mirroring how
 // unboundedCycles documents its own coarser approximation.
-func stalledClosures(decls []Decl, nodes []Node) []string {
+func stalledClosures(decls []Decl, nodes []Subscriber) []string {
 	names := map[string]struct{}{}
 	for _, d := range decls {
 		if s, ok := d.(Scope); ok && s.Name != "" {
@@ -554,7 +554,7 @@ func stalledClosures(decls []Decl, nodes []Node) []string {
 // patterns that share no concrete subject). Erring toward rejection is correct
 // for a hard constraint — a false positive is a topology made to name its scopes
 // disjointly, never a co-rooting slipping through.
-func coRootedScopes(decls []Decl, nodes []Node) [][]string {
+func coRootedScopes(decls []Decl, nodes []Subscriber) [][]string {
 	triggers := rootTriggers(decls, nodes)
 
 	names := make([]string, 0, len(triggers))
@@ -579,7 +579,7 @@ func coRootedScopes(decls []Decl, nodes []Node) [][]string {
 // node-rooted scope contributes the node's On patterns (the node roots on the
 // events it fires on). A declared Scope with an empty Root is budget-only
 // (rooted by a same-named node) and contributes no trigger.
-func rootTriggers(decls []Decl, nodes []Node) map[string][]string {
+func rootTriggers(decls []Decl, nodes []Subscriber) map[string][]string {
 	out := map[string][]string{}
 	for _, d := range decls {
 		if s, ok := d.(Scope); ok && s.Name != "" && s.Root != "" {
@@ -645,7 +645,7 @@ func patternsOverlap(a, b string) bool {
 // this check is exactly "declared Emits vs catalog". Called only over a
 // non-empty catalog (opt-in dormancy is the caller's gate). Sorted ascending,
 // de-duplicated across nodes.
-func unknownKinds(nodes []Node, cat catalog) []string {
+func unknownKinds(nodes []Subscriber, cat catalog) []string {
 	seen := map[string]struct{}{}
 	for _, n := range nodes {
 		for _, k := range n.Emits {
@@ -768,7 +768,7 @@ func suggestions(rep Report) []string {
 // is observed-emit-vs-declared and can only run against the log at dispatch
 // time, not against the static topology. The static validator does not call
 // it; it lives here to mark the seam.
-func allowlistLint(_ []Node) []string {
+func allowlistLint(_ []Subscriber) []string {
 	// Runtime concern (doc 27 §5): compare an observed Emit on the log against
 	// the emitting node's declared Emits. Not implementable statically.
 	return nil

@@ -60,7 +60,7 @@ func (m *Manager) Launch(command []string) (name string, decls []engine.Decl, er
 	if err != nil {
 		return "", nil, err
 	}
-	decls = append(decls, engine.Node{
+	decls = append(decls, engine.Subscriber{
 		Name: name, On: spec.In(), Emits: spec.Out(), In: "global",
 		BodyKind: Kind, BodyConfig: cfg,
 	})

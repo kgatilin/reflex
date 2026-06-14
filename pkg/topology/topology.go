@@ -15,20 +15,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Document is a whole topology (or a changeset fragment): scopes, nodes,
+// Document is a whole topology (or a changeset fragment): scopes, subscribers,
 // projections, and event-catalog entries. Applied as one changeset, it is
 // validated as a resulting graph (the engine rejects a disconnected outcome).
 type Document struct {
 	Scopes      []ScopeSpec      `json:"scopes,omitempty" yaml:"scopes,omitempty"`
-	Nodes       []NodeSpec       `json:"nodes,omitempty" yaml:"nodes,omitempty"`
+	Subscribers []SubscriberSpec `json:"subscribers,omitempty" yaml:"subscribers,omitempty"`
 	Projections []ProjectionSpec `json:"projections,omitempty" yaml:"projections,omitempty"`
 	Events      []EventSpec      `json:"events,omitempty" yaml:"events,omitempty"`
 }
 
-// NodeSpec is a subscriber: its subscription/scope/emit wiring plus a body
-// descriptor. A node with an empty Body.Kind is a sink (consumes, emits
+// SubscriberSpec is a subscriber: its subscription/scope/emit wiring plus a body
+// descriptor. A subscriber with an empty Body.Kind is a sink (consumes, emits
 // nothing).
-type NodeSpec struct {
+type SubscriberSpec struct {
 	Name  string   `json:"name" yaml:"name"`
 	On    []string `json:"on,omitempty" yaml:"on,omitempty"`
 	In    string   `json:"in,omitempty" yaml:"in,omitempty"`
@@ -89,12 +89,12 @@ func (d Document) Decls() ([]engine.Decl, error) {
 	for _, s := range d.Scopes {
 		out = append(out, engine.Scope{Name: s.Name, Root: s.Root, Budget: s.Budget})
 	}
-	for _, n := range d.Nodes {
+	for _, n := range d.Subscribers {
 		cfg, err := toRaw(n.Body.Config)
 		if err != nil {
 			return nil, fmt.Errorf("topo: node %q body config: %w", n.Name, err)
 		}
-		out = append(out, engine.Node{
+		out = append(out, engine.Subscriber{
 			Name: n.Name, On: n.On, In: n.In, Reads: n.Reads, Emits: n.Emits, Scope: n.Scope,
 			BodyKind: n.Body.Kind, BodyConfig: cfg,
 		})
@@ -143,8 +143,8 @@ func FromDecls(decls []engine.Decl) Document {
 		switch v := decl.(type) {
 		case engine.Scope:
 			d.Scopes = append(d.Scopes, ScopeSpec{Name: v.Name, Root: v.Root, Budget: v.Budget})
-		case engine.Node:
-			d.Nodes = append(d.Nodes, NodeSpec{
+		case engine.Subscriber:
+			d.Subscribers = append(d.Subscribers, SubscriberSpec{
 				Name: v.Name, On: v.On, In: v.In, Reads: v.Reads, Emits: v.Emits, Scope: v.Scope,
 				Body: BodySpec{Kind: v.BodyKind, Config: rawToAny(v.BodyConfig)},
 			})

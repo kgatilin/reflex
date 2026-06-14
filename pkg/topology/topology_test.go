@@ -13,7 +13,7 @@ scopes:
     root: request.received
     budget:
       tool.fs.read.call: 16
-nodes:
+subscribers:
   - name: brain
     on: [request.received]
     in: request
@@ -56,7 +56,7 @@ func TestParseAndDecls(t *testing.T) {
 	var nNodes, nScopes, nProj, nEvents int
 	for _, d := range decls {
 		switch v := d.(type) {
-		case engine.Node:
+		case engine.Subscriber:
 			nNodes++
 			if v.Name == "brain" {
 				if v.BodyKind != "llm" {

@@ -2,7 +2,7 @@
 // / CONCEPT §8, §12): it maps a node's declared body kind ("llm", a tool, …) to
 // a factory that builds the runnable engine.Reaction from the node's serialized
 // config. The engine stays body-agnostic — it carries the body descriptor
-// (kind + config) on the sys.node.registered fact and asks an injected
+// (kind + config) on the sys.subscriber.registered fact and asks an injected
 // engine.BodyResolver to turn it into code. This package IS that resolver: the
 // composition root (a daemon, a test) registers the factories it wants
 // (nodes.Register("llm", llm.Factory)) and hands engine.WithBodyResolver(

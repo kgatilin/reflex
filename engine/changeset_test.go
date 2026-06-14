@@ -13,19 +13,19 @@ import (
 func connectedTopology() []Decl {
 	return []Decl{
 		Scope{Name: "request", Root: "request.received"},
-		Node{
+		Subscriber{
 			// "app.ingress.*" marks it an ingress root for the validator; "cli.task"
 			// is the kind tail of app.ingress.cli.task that actually matches at
 			// dispatch (the ingress-root/dispatch-match divergence, CONCEPT §12).
 			Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global", Emits: []string{"request.received"},
 			Body: emitKind("request.received"),
 		},
-		Node{
+		Subscriber{
 			Name: "worker", On: []string{"request.received"}, In: "request", Emits: []string{"task.answered"},
 			Body: emitKind("task.answered"),
 		},
-		Node{Name: "notify", On: []string{"task.answered"}, In: "request"},
-		Node{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
+		Subscriber{Name: "notify", On: []string{"task.answered"}, In: "request"},
+		Subscriber{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
 	}
 }
 
@@ -57,7 +57,7 @@ func TestApply_ConnectedChangesetWritesFacts(t *testing.T) {
 
 	got := countSubjects(e,
 		SubjChangesetRequested, SubjChangesetApplied, SubjChangesetRejected,
-		subjScopeDeclared, subjNodeRegistered)
+		subjScopeDeclared, subjSubscriberRegistered)
 	if got[SubjChangesetRequested] != 1 {
 		t.Errorf("%s = %d, want 1", SubjChangesetRequested, got[SubjChangesetRequested])
 	}
@@ -70,8 +70,8 @@ func TestApply_ConnectedChangesetWritesFacts(t *testing.T) {
 	if got[subjScopeDeclared] != 1 {
 		t.Errorf("%s = %d, want 1 (one Scope decl)", subjScopeDeclared, got[subjScopeDeclared])
 	}
-	if got[subjNodeRegistered] != 4 {
-		t.Errorf("%s = %d, want 4 (four Node decls)", subjNodeRegistered, got[subjNodeRegistered])
+	if got[subjSubscriberRegistered] != 4 {
+		t.Errorf("%s = %d, want 4 (four Node decls)", subjSubscriberRegistered, got[subjSubscriberRegistered])
 	}
 
 	// The live table folds back to exactly the applied topology, names and all.
@@ -79,7 +79,7 @@ func TestApply_ConnectedChangesetWritesFacts(t *testing.T) {
 	gotNames := map[string]bool{}
 	for _, d := range topo {
 		switch v := d.(type) {
-		case Node:
+		case Subscriber:
 			gotNames["node:"+v.Name] = true
 			// Reaction nodes (resolver/worker) must fold back with their Body
 			// reattached from the registry; sinks (notify/lifecycle) legitimately
@@ -108,7 +108,7 @@ func TestApply_RejectedChangesetWritesNoObjectFacts(t *testing.T) {
 
 	// A worker with no ingress root and a dead-end answer — disconnected.
 	bad := []Decl{
-		Node{Name: "orphan", On: []string{"never.happens"}, In: "global", Emits: []string{"goes.nowhere"}, Body: emitKind("goes.nowhere")},
+		Subscriber{Name: "orphan", On: []string{"never.happens"}, In: "global", Emits: []string{"goes.nowhere"}, Body: emitKind("goes.nowhere")},
 	}
 	err := e.Apply(ctx, bad...)
 	if err == nil {
@@ -118,7 +118,7 @@ func TestApply_RejectedChangesetWritesNoObjectFacts(t *testing.T) {
 		t.Fatalf("Apply error type = %T, want *ValidationError", err)
 	}
 
-	got := countSubjects(e, SubjChangesetRequested, SubjChangesetRejected, SubjChangesetApplied, subjNodeRegistered)
+	got := countSubjects(e, SubjChangesetRequested, SubjChangesetRejected, SubjChangesetApplied, subjSubscriberRegistered)
 	if got[SubjChangesetRequested] != 1 {
 		t.Errorf("%s = %d, want 1 (the request is recorded even on rejection)", SubjChangesetRequested, got[SubjChangesetRequested])
 	}
@@ -128,8 +128,8 @@ func TestApply_RejectedChangesetWritesNoObjectFacts(t *testing.T) {
 	if got[SubjChangesetApplied] != 0 {
 		t.Errorf("%s = %d, want 0", SubjChangesetApplied, got[SubjChangesetApplied])
 	}
-	if got[subjNodeRegistered] != 0 {
-		t.Errorf("%s = %d, want 0 (a rejected changeset writes no object facts)", subjNodeRegistered, got[subjNodeRegistered])
+	if got[subjSubscriberRegistered] != 0 {
+		t.Errorf("%s = %d, want 0 (a rejected changeset writes no object facts)", subjSubscriberRegistered, got[subjSubscriberRegistered])
 	}
 	if n := len(e.Topology()); n != 0 {
 		t.Errorf("live topology size = %d, want 0 (rejection left the table unchanged)", n)
@@ -156,7 +156,7 @@ func TestApply_LiveTableIsAFoldOfTheLog(t *testing.T) {
 	gotNodes, gotScopes := 0, 0
 	for _, d := range refold {
 		switch d.(type) {
-		case Node:
+		case Subscriber:
 			gotNodes++
 		case Scope:
 			gotScopes++

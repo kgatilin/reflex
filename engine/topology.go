@@ -2,8 +2,8 @@ package engine
 
 import "encoding/json"
 
-// Decl is a managed topology object (doc 20 via §7): nodes,
-// subscriptions (carried on the node), scopes, and projections — the
+// Decl is a managed topology object (doc 20 via §7): subscribers
+// (a subscription carries its own wiring), scopes, and projections — the
 // four kinds a changeset may create or remove. Declarations pin at the
 // instance root; interventions on live instances are ordinary events.
 //
@@ -32,9 +32,9 @@ type EventKind struct {
 
 func (EventKind) isDecl() {}
 
-// Node wires a Reaction into the topology: what it hears, what views it
+// Subscriber wires a Reaction into the topology: what it hears, what views it
 // reads, what it may emit, and whether its firings root a scope.
-type Node struct {
+type Subscriber struct {
 	Name string
 
 	// On lists kind patterns (NATS grammar: * one token, > tail) the node
@@ -71,7 +71,7 @@ type Node struct {
 	// daemon path): instead of a live closure, a declarative node names a body
 	// kind ("llm", a tool, …) and carries its opaque config. Apply resolves them
 	// through the engine's BodyResolver into a Reaction (and caches it in the
-	// registry); both ride on the sys.node.registered fact, so a daemon restart
+	// registry); both ride on the sys.subscriber.registered fact, so a daemon restart
 	// rebuilds the body from the log via the resolver (G8). A node sets EITHER a
 	// live Body (in-process) OR a BodyKind descriptor (declarative), never both;
 	// a node with neither is a sink.
@@ -79,7 +79,7 @@ type Node struct {
 	BodyConfig json.RawMessage
 }
 
-func (Node) isDecl() {}
+func (Subscriber) isDecl() {}
 
 // Scope declares a kind-rooted scope (§5 declared rooting): phases,
 // budgets, and the request lifecycle live here. Node-rooted scopes are

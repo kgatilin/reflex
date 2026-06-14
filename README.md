@@ -64,7 +64,7 @@ against a running daemon is live topology config — adding a node does not requ
 a restart, because the topology is a fold of the log.
 
 A node's behaviour is **code resolved by name**, not a fact: the
-`sys.node.registered` fact carries a serializable `body_kind` + `body_config`
+`sys.subscriber.registered` fact carries a serializable `body_kind` + `body_config`
 descriptor, and an injected resolver (the `nodes` factory registry) rebuilds the
 runnable `Reaction`. `engine.Load(log, …)` reconstructs the whole engine —
 topology and bodies — from the log alone.

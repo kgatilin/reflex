@@ -30,7 +30,7 @@ type scopeRuntime struct {
 	// declared Scope (kind-rooted) and a scope-rooting Node (every firing roots
 	// an instance of Scope). Both are read off the recorded decls.
 	declared []Scope
-	nodes    []Node
+	nodes    []Subscriber
 }
 
 // scopeInstance is one cone's live state (doc 26 §2). All of it is a fold over
@@ -57,7 +57,7 @@ type scopeInstance struct {
 	closed      bool
 }
 
-func newScopeRuntime(declared []Scope, nodes []Node) *scopeRuntime {
+func newScopeRuntime(declared []Scope, nodes []Subscriber) *scopeRuntime {
 	return &scopeRuntime{
 		instances:  map[string]*scopeInstance{},
 		membership: map[string][]string{},
@@ -83,7 +83,7 @@ func (sr *scopeRuntime) rootsOf(ev Event, scope, kind string) []rootSpec {
 		if n.Scope == "" {
 			continue
 		}
-		if !nodeMatches(n, scope, kind) {
+		if !subscriberMatches(n, scope, kind) {
 			continue
 		}
 		out = append(out, rootSpec{name: n.Scope, budget: budgetForScope(sr.declared, n.Scope)})
@@ -247,7 +247,7 @@ func (sr *scopeRuntime) admit(ev Event, scope, kind string) {
 // instance of that scope (the dispatcher's ancestor-scope walk, doc 24 §5
 // "scope-qualified subscriptions … a delivery-time filter on the ancestor-scope
 // walk"). The kind itself is still matched by On after handler desugar.
-func (sr *scopeRuntime) deliver(n Node, span, scope, kind string) bool {
+func (sr *scopeRuntime) deliver(n Subscriber, span, scope, kind string) bool {
 	matched := false
 	for _, pat := range n.On {
 		if subjectMatch(pat, kind) {

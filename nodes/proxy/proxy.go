@@ -3,7 +3,7 @@
 // is NOT operator-declared — the daemon launches a plugin, reads its self-
 // description, and generates a node whose body_config carries the spawn command
 // (proxy.Manager.Launch). That body descriptor (kind "plugin" + config) rides on
-// sys.node.registered, so the Factory can rebuild the engine.Reaction from it: on
+// sys.subscriber.registered, so the Factory can rebuild the engine.Reaction from it: on
 // each firing the reaction forwards the triggering event to the plugin process
 // (stdio transport) and returns the emits it produces. The engine binds those
 // emits to the node's declared emit set as usual — out-of-process is not

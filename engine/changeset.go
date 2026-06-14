@@ -11,7 +11,7 @@ import "encoding/json"
 //
 //	sys.topology.changeset.requested{ ops, principal }
 //	   → engine validates fold(live table) + ops → resulting graph
-//	   → facts:  sys.node.registered · sys.scope.declared · sys.projection.registered
+//	   → facts:  sys.subscriber.registered · sys.scope.declared · sys.projection.registered
 //	             · sys.event.registered (+ the .deregistered/.retired removals)
 //	            + sys.topology.changeset.applied{ id }
 //	   | sys.topology.changeset.rejected{ id, reasons }
@@ -45,8 +45,8 @@ const (
 	// object facts are written, so the live table is unchanged by construction.
 	SubjChangesetRejected = "sys.topology.changeset.rejected"
 
-	subjNodeRegistered         = "sys.node.registered"
-	subjNodeDeregistered       = "sys.node.deregistered"
+	subjSubscriberRegistered   = "sys.subscriber.registered"
+	subjSubscriberDeregistered = "sys.subscriber.deregistered"
 	subjScopeDeclared          = "sys.scope.declared"
 	subjScopeRetired           = "sys.scope.retired"
 	subjProjectionRegistered   = "sys.projection.registered"
@@ -65,7 +65,7 @@ const (
 // code, resolved by name, see changeset.go's package doc).
 type Op struct {
 	Verb string          `json:"verb"` // "add" | "remove"
-	Kind string          `json:"kind"` // "node" | "scope" | "projection" | "event"
+	Kind string          `json:"kind"` // "subscriber" | "scope" | "projection" | "event"
 	Name string          `json:"name"`
 	Spec json.RawMessage `json:"spec,omitempty"`
 }
@@ -74,7 +74,7 @@ const (
 	verbAdd    = "add"
 	verbRemove = "remove"
 
-	opKindNode       = "node"
+	opKindSubscriber = "subscriber"
 	opKindScope      = "scope"
 	opKindProjection = "projection"
 	opKindEvent      = "event"
@@ -100,10 +100,10 @@ type rejectedPayload struct {
 	Reasons   []string `json:"reasons,omitempty"`
 }
 
-// nodeSpec is the serializable wiring of a Node — everything but Body (doc 20 /
+// subscriberSpec is the serializable wiring of a Node — everything but Body (doc 20 /
 // changeset.go package doc). The Body is reattached from the engine's registry
 // by Name at fold time.
-type nodeSpec struct {
+type subscriberSpec struct {
 	Name  string   `json:"name"`
 	On    []string `json:"on,omitempty"`
 	In    string   `json:"in,omitempty"`
@@ -141,8 +141,8 @@ func opsOf(decls []Decl) []Op {
 	out := make([]Op, 0, len(decls))
 	for _, d := range decls {
 		switch v := d.(type) {
-		case Node:
-			out = append(out, Op{Verb: verbAdd, Kind: opKindNode, Name: v.Name, Spec: mustMarshal(nodeSpecOf(v))})
+		case Subscriber:
+			out = append(out, Op{Verb: verbAdd, Kind: opKindSubscriber, Name: v.Name, Spec: mustMarshal(subscriberSpecOf(v))})
 		case Scope:
 			out = append(out, Op{Verb: verbAdd, Kind: opKindScope, Name: v.Name, Spec: mustMarshal(scopeSpec{Name: v.Name, Root: v.Root, Budget: v.Budget})})
 		case Projection:
@@ -154,8 +154,8 @@ func opsOf(decls []Decl) []Op {
 	return out
 }
 
-func nodeSpecOf(n Node) nodeSpec {
-	return nodeSpec{
+func subscriberSpecOf(n Subscriber) subscriberSpec {
+	return subscriberSpec{
 		Name: n.Name, On: n.On, In: n.In, Reads: n.Reads, Emits: n.Emits, Scope: n.Scope,
 		BodyKind: n.BodyKind, BodyConfig: n.BodyConfig,
 	}
@@ -173,11 +173,11 @@ func projectionSpecOf(p Projection) projectionSpec {
 // topology fold.
 func factOf(op Op) (subject string, payload json.RawMessage) {
 	switch op.Kind {
-	case opKindNode:
+	case opKindSubscriber:
 		if op.Verb == verbRemove {
-			return subjNodeDeregistered, mustMarshal(map[string]string{"name": op.Name})
+			return subjSubscriberDeregistered, mustMarshal(map[string]string{"name": op.Name})
 		}
-		return subjNodeRegistered, op.Spec
+		return subjSubscriberRegistered, op.Spec
 	case opKindScope:
 		if op.Verb == verbRemove {
 			return subjScopeRetired, mustMarshal(map[string]string{"name": op.Name})
@@ -207,10 +207,10 @@ func factOf(op Op) (subject string, payload json.RawMessage) {
 // name — the one part that is code, not a fact.
 func foldTopology(log []Event, bodies map[string]Reaction) []Decl {
 	type orderedNodes struct {
-		m     map[string]nodeSpec
+		m     map[string]subscriberSpec
 		order []string
 	}
-	nodes := orderedNodes{m: map[string]nodeSpec{}}
+	nodes := orderedNodes{m: map[string]subscriberSpec{}}
 	scopes := map[string]scopeSpec{}
 	var scopeOrder []string
 	projs := map[string]projectionSpec{}
@@ -231,13 +231,13 @@ func foldTopology(log []Event, bodies map[string]Reaction) []Decl {
 
 	for _, ev := range log {
 		switch ev.Subject {
-		case subjNodeRegistered:
-			var s nodeSpec
+		case subjSubscriberRegistered:
+			var s subscriberSpec
 			if json.Unmarshal(ev.Payload, &s) == nil && s.Name != "" {
 				addOrder(&nodes.order, nodePresent, s.Name)
 				nodes.m[s.Name] = s
 			}
-		case subjNodeDeregistered:
+		case subjSubscriberDeregistered:
 			delete(nodes.m, nameField(ev.Payload))
 		case subjScopeDeclared:
 			var s scopeSpec
@@ -274,7 +274,7 @@ func foldTopology(log []Event, bodies map[string]Reaction) []Decl {
 		if !ok {
 			continue
 		}
-		out = append(out, Node{
+		out = append(out, Subscriber{
 			Name: s.Name, On: s.On, In: s.In, Reads: s.Reads, Emits: s.Emits, Scope: s.Scope,
 			BodyKind: s.BodyKind, BodyConfig: s.BodyConfig,
 			Body: bodies[s.Name],

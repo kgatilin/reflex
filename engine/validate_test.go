@@ -25,7 +25,7 @@ func TestValidate_RemovingNotifyMakesTaskAnsweredADeadEnd(t *testing.T) {
 	// a bridge suggestion.
 	var mutated []Decl
 	for _, d := range exampleTopology() {
-		if n, ok := d.(Node); ok && n.Name == "notify" {
+		if n, ok := d.(Subscriber); ok && n.Name == "notify" {
 			continue
 		}
 		mutated = append(mutated, d)
@@ -57,19 +57,19 @@ func TestValidate_UnbudgetedCycleIsUnbounded(t *testing.T) {
 	// as unbounded (doc 24 §5 "loops are budgets"). Node determinism is
 	// irrelevant — termination is a scope property, not a node property.
 	decls := []Decl{
-		Node{
+		Subscriber{
 			Name:  "in",
 			On:    []string{"app.ingress.*"},
 			In:    "global",
 			Emits: []string{"kind.a"},
 		},
-		Node{
+		Subscriber{
 			Name:  "a",
 			On:    []string{"kind.a", "kind.b"},
 			In:    "request",
 			Emits: []string{"kind.b"},
 		},
-		Node{
+		Subscriber{
 			Name:  "b",
 			On:    []string{"kind.b"},
 			In:    "request",
@@ -104,11 +104,11 @@ func TestValidate_BudgetedScopeBoundsTheCycle(t *testing.T) {
 	// bounded and not reported (doc 24 §5 "loops are budgets").
 	decls := []Decl{
 		Scope{Name: "loop", Root: "kind.a", Budget: map[string]int{"kind.a": 8}},
-		Node{Name: "in", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"kind.a"}},
-		Node{Name: "a", On: []string{"kind.a", "kind.b"}, In: "loop", Emits: []string{"kind.b"}},
-		Node{Name: "b", On: []string{"kind.b"}, In: "loop", Emits: []string{"kind.a", "kind.done"}},
+		Subscriber{Name: "in", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"kind.a"}},
+		Subscriber{Name: "a", On: []string{"kind.a", "kind.b"}, In: "loop", Emits: []string{"kind.b"}},
+		Subscriber{Name: "b", On: []string{"kind.b"}, In: "loop", Emits: []string{"kind.a", "kind.done"}},
 		// done is consumed so it is not a dead-end.
-		Node{Name: "sink", On: []string{"kind.done"}, In: "loop"},
+		Subscriber{Name: "sink", On: []string{"kind.done"}, In: "loop"},
 	}
 	rep, err := Validate(decls...)
 	if err != nil {
@@ -125,10 +125,10 @@ func TestValidate_StalledClosureNeedsAConsumer(t *testing.T) {
 	// resolver roots the scope; nothing reads scope.work.closed.
 	decls := []Decl{
 		Scope{Name: "work", Root: "request.received", Budget: map[string]int{"tool.x.call": 4}},
-		Node{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}},
-		Node{Name: "doer", On: []string{"request.received"}, In: "work", Emits: []string{"tool.x.call"}},
-		Node{Name: "tool", On: []string{"tool.x.call"}, In: "work", Emits: []string{"tool.x.result"}},
-		Node{Name: "loop", On: []string{"tool.x.result"}, In: "work", Emits: []string{"tool.x.call"}},
+		Subscriber{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}},
+		Subscriber{Name: "doer", On: []string{"request.received"}, In: "work", Emits: []string{"tool.x.call"}},
+		Subscriber{Name: "tool", On: []string{"tool.x.call"}, In: "work", Emits: []string{"tool.x.result"}},
+		Subscriber{Name: "loop", On: []string{"tool.x.result"}, In: "work", Emits: []string{"tool.x.call"}},
 	}
 	rep, err := Validate(decls...)
 	if err != nil {
@@ -145,7 +145,7 @@ func TestValidate_StalledClosureNeedsAConsumer(t *testing.T) {
 	}
 
 	// Add a consumer of scope.work.closed (a terminator): the gap closes.
-	bridged := append(decls, Node{Name: "terminator", On: []string{"scope.work.closed"}})
+	bridged := append(decls, Subscriber{Name: "terminator", On: []string{"scope.work.closed"}})
 	rep2, err := Validate(bridged...)
 	if err != nil {
 		t.Fatalf("Validate (bridged): %v", err)
@@ -167,9 +167,9 @@ func TestValidate_CoRootedScopesRejected(t *testing.T) {
 	decls := []Decl{
 		Scope{Name: "request", Root: "request.received", Budget: map[string]int{"llm.call": 10}},
 		Scope{Name: "cost", Root: "request.received", Budget: map[string]int{"tool.pay.call": 3}},
-		Node{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}},
-		Node{Name: "work", On: []string{"request.received"}, In: "request", Emits: []string{"task.answered"}},
-		Node{Name: "notify", On: []string{"task.answered", "scope.request.closed", "scope.cost.closed"}, In: "global"},
+		Subscriber{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}},
+		Subscriber{Name: "work", On: []string{"request.received"}, In: "request", Emits: []string{"task.answered"}},
+		Subscriber{Name: "notify", On: []string{"task.answered", "scope.request.closed", "scope.cost.closed"}, In: "global"},
 	}
 	rep, err := Validate(decls...)
 	if err != nil {
@@ -194,9 +194,9 @@ func TestValidate_CoRootedScopesRejected(t *testing.T) {
 	// One scope carrying BOTH budgets is the sanctioned form — no co-rooting.
 	merged := []Decl{
 		Scope{Name: "request", Root: "request.received", Budget: map[string]int{"llm.call": 10, "tool.pay.call": 3}},
-		Node{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}},
-		Node{Name: "work", On: []string{"request.received"}, In: "request", Emits: []string{"task.answered"}},
-		Node{Name: "notify", On: []string{"task.answered", "scope.request.closed"}, In: "global"},
+		Subscriber{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}},
+		Subscriber{Name: "work", On: []string{"request.received"}, In: "request", Emits: []string{"task.answered"}},
+		Subscriber{Name: "notify", On: []string{"task.answered", "scope.request.closed"}, In: "global"},
 	}
 	rep2, err := Validate(merged...)
 	if err != nil {
@@ -220,7 +220,7 @@ func TestApply_RoutesThroughValidate(t *testing.T) {
 	// A topology with a dead-end fails Apply with a ValidationError carrying the
 	// Report.
 	bad := []Decl{
-		Node{Name: "in", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"orphan.kind"}},
+		Subscriber{Name: "in", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"orphan.kind"}},
 	}
 	err := e.Apply(context.Background(), bad...)
 	var ve *ValidationError

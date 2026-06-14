@@ -47,16 +47,16 @@ func mustJSON(v any) json.RawMessage {
 func descriptorTopology() []engine.Decl {
 	return []engine.Decl{
 		engine.Scope{Name: "request", Root: "request.received"},
-		engine.Node{
+		engine.Subscriber{
 			Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global",
 			Emits: []string{"request.received"}, BodyKind: "emit", BodyConfig: mustJSON(emitConfig{Kind: "request.received"}),
 		},
-		engine.Node{
+		engine.Subscriber{
 			Name: "worker", On: []string{"request.received"}, In: "request",
 			Emits: []string{"task.answered"}, BodyKind: "emit", BodyConfig: mustJSON(emitConfig{Kind: "task.answered"}),
 		},
-		engine.Node{Name: "notify", On: []string{"task.answered"}, In: "request"},
-		engine.Node{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
+		engine.Subscriber{Name: "notify", On: []string{"task.answered"}, In: "request"},
+		engine.Subscriber{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
 	}
 }
 
@@ -127,12 +127,12 @@ func TestApply_UnknownBodyKindRejected(t *testing.T) {
 	ctx := context.Background()
 	e := engine.New(engine.WithBodyResolver(nodes.Resolver()))
 	err := e.Apply(ctx, engine.Scope{Name: "request", Root: "request.received"},
-		engine.Node{
+		engine.Subscriber{
 			Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global",
 			Emits: []string{"request.received"}, BodyKind: "nonesuch", BodyConfig: json.RawMessage(`{}`),
 		},
-		engine.Node{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
-		engine.Node{Name: "sink", On: []string{"request.received"}, In: "request"},
+		engine.Subscriber{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
+		engine.Subscriber{Name: "sink", On: []string{"request.received"}, In: "request"},
 	)
 	if err == nil {
 		t.Fatalf("Apply with unknown body kind returned nil, want an error")
@@ -148,12 +148,12 @@ func TestApply_DescriptorWithNoResolverRejected(t *testing.T) {
 	ctx := context.Background()
 	e := engine.New() // no resolver
 	err := e.Apply(ctx, engine.Scope{Name: "request", Root: "request.received"},
-		engine.Node{
+		engine.Subscriber{
 			Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global",
 			Emits: []string{"request.received"}, BodyKind: "emit", BodyConfig: json.RawMessage(`{}`),
 		},
-		engine.Node{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
-		engine.Node{Name: "sink", On: []string{"request.received"}, In: "request"},
+		engine.Subscriber{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
+		engine.Subscriber{Name: "sink", On: []string{"request.received"}, In: "request"},
 	)
 	if err == nil {
 		t.Fatalf("Apply with a descriptor and no resolver returned nil, want an error")

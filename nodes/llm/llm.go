@@ -1,6 +1,6 @@
 // Package llm is the reasoning body (docs/24-concept.md §3, doc 26 §4): a node
 // whose body calls a model once and turns the completion into allowlisted
-// emits. It is NOT special — it is an ordinary engine.Node with an Emits
+// emits. It is NOT special — it is an ordinary engine.Subscriber with an Emits
 // allowlist (the "menu" — there is no separate tool-menu concept, doc 26 §4)
 // whose Body happens to call pkg/provider. Tool-calling is transport encoding:
 // a function-call decodes into Emit{Kind: "tool.X.call"}, a text completion
@@ -150,7 +150,7 @@ func (h *history) Messages() []provider.Message { return h.messages }
 
 // Config wires one llm seat: its subscription/emit topology plus its model
 // binding and prompt shaping (doc 26 §4). It is behaviour, not a node-kind —
-// the result is an ordinary engine.Node.
+// the result is an ordinary engine.Subscriber.
 type Config struct {
 	Name  string   // node name
 	On    []string // subscription patterns
@@ -208,9 +208,9 @@ func (c Config) defaults() Config {
 // against an injected provider (the test/stub seam; production uses New). The
 // node reads the projection; the projection carries the split params derived
 // from the same Config, so view and node never drift.
-func NewWithProvider(cfg Config, p provider.Provider) (engine.Node, engine.Projection) {
+func NewWithProvider(cfg Config, p provider.Provider) (engine.Subscriber, engine.Projection) {
 	cfg = cfg.defaults()
-	node := engine.Node{
+	node := engine.Subscriber{
 		Name:  cfg.Name,
 		On:    cfg.On,
 		In:    cfg.In,
@@ -242,9 +242,9 @@ func NewWithProvider(cfg Config, p provider.Provider) (engine.Node, engine.Proje
 // is recoverable from the log (G8). The in-process analog is NewWithProvider
 // (a live Body, no descriptor). The Config round-trips through the descriptor by
 // field name (it is both marshalled here and unmarshalled in Factory).
-func Declare(cfg Config) (engine.Node, engine.Projection) {
+func Declare(cfg Config) (engine.Subscriber, engine.Projection) {
 	cfg = cfg.defaults()
-	node := engine.Node{
+	node := engine.Subscriber{
 		Name:       cfg.Name,
 		On:         cfg.On,
 		In:         cfg.In,
@@ -271,10 +271,10 @@ func Declare(cfg Config) (engine.Node, engine.Projection) {
 
 // New resolves the provider from the model binding (pkg/provider) and builds the
 // seat. The returned model id replaces the binding in completion requests.
-func New(cfg Config) (engine.Node, engine.Projection, error) {
+func New(cfg Config) (engine.Subscriber, engine.Projection, error) {
 	p, model, err := provider.For(cfg.Model, provider.Config{Project: cfg.Project, Location: cfg.Location})
 	if err != nil {
-		return engine.Node{}, engine.Projection{}, err
+		return engine.Subscriber{}, engine.Projection{}, err
 	}
 	cfg.Model = model
 	n, pr := NewWithProvider(cfg, p)

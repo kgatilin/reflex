@@ -34,7 +34,7 @@ func emitFactory(_ string, config json.RawMessage) (engine.Reaction, error) {
 func declarativeDoc() topology.Document {
 	return topology.Document{
 		Scopes: []topology.ScopeSpec{{Name: "request", Root: "request.received"}},
-		Nodes: []topology.NodeSpec{
+		Subscribers: []topology.SubscriberSpec{
 			{Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global", Emits: []string{"request.received"},
 				Body: topology.BodySpec{Kind: "emit", Config: map[string]any{"kind": "request.received"}}},
 			{Name: "worker", On: []string{"request.received"}, In: "request", Emits: []string{"task.answered"},
@@ -116,7 +116,7 @@ func TestDaemon_LaunchPluginSelfRegisters(t *testing.T) {
 	doc := topology.Document{
 		Scopes: []topology.ScopeSpec{{Name: "request", Root: "echo.request"}},
 		Events: []topology.EventSpec{{Kind: "cli.task"}, {Kind: "scope.request.closed"}},
-		Nodes: []topology.NodeSpec{
+		Subscribers: []topology.SubscriberSpec{
 			// app.ingress.* marks the ingress root; cli.task is the kind tail of
 			// app.ingress.cli.task, the pattern that actually delivers the ingress.
 			{Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global", Emits: []string{"echo.request"},
@@ -193,7 +193,7 @@ func TestDaemon_ValidateRejectsDisconnected(t *testing.T) {
 	d := daemon.New()
 
 	rep, err := d.Validate(topology.Document{
-		Nodes: []topology.NodeSpec{
+		Subscribers: []topology.SubscriberSpec{
 			{Name: "orphan", On: []string{"never.happens"}, In: "global", Emits: []string{"goes.nowhere"},
 				Body: topology.BodySpec{Kind: "emit", Config: map[string]any{"kind": "goes.nowhere"}}},
 		},
@@ -217,7 +217,7 @@ func TestDaemon_ApplyRejectsUnknownBodyKind(t *testing.T) {
 	d := daemon.New()
 	err := d.Apply(ctx, topology.Document{
 		Scopes: []topology.ScopeSpec{{Name: "request", Root: "request.received"}},
-		Nodes: []topology.NodeSpec{
+		Subscribers: []topology.SubscriberSpec{
 			{Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global", Emits: []string{"request.received"},
 				Body: topology.BodySpec{Kind: "nonesuch"}},
 			{Name: "sink", On: []string{"request.received"}, In: "request"},

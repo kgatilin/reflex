@@ -130,7 +130,7 @@ daemon and real-time management stand on a log fold, not a slice.
 
 **Iteration 1 — Control plane as changeset events on the new engine. ✅ DONE
 (`645a0bc`).** Topology is now a **fold over `sys.topology.changeset.*` /
-`sys.node.registered` … facts** (`foldTopology(log, bodies)`), not the old
+`sys.subscriber.registered` … facts** (`foldTopology(log, bodies)`), not the old
 `Apply(decls)` slice. `Apply` is the in-process *client* emitting
 `changeset.requested → facts + applied | rejected`; `Validate` is the
 resulting-graph validator (now validating the cumulative graph). A node's `Body`
@@ -193,12 +193,12 @@ never of a lone handler. The schemas come from the plugin and land on the log as
 The subscriber's scope is **`global`** on purpose: a plugin is scope-agnostic —
 it handles its kinds wherever they occur, and the engine places its emits in the
 trigger's cone by causality (a reaction never chooses its emit's scope, doc 24
-§5). `engine.Load` rebuilds the subscriber node from `sys.node.registered` and
+§5). `engine.Load` rebuilds the subscriber node from `sys.subscriber.registered` and
 re-spawns the process from its descriptor without re-launching (G8).
 
 Properties this preserves: the engine's **emit-allowlist still binds the plugin**
 (out-of-process is not out-of-bounds); the body descriptor (`kind` + spawn
-command) rides on `sys.node.registered`, so the wiring is **recoverable from the
+command) rides on `sys.subscriber.registered`, so the wiring is **recoverable from the
 log** (G8); and **hot-plug** ("agent launches a plugin, applies a topology that
 emits its kinds, uses it, no daemon restart") is a property of live `apply`, not
 the transport.
@@ -217,7 +217,19 @@ flips on **full catalog enforcement** (`validate.go`: a non-empty catalog gates
 engine-internal `scope.*.closed` and ingress kinds. This is the right end-state
 for the agent (we want a full catalog so the `llm` body can advertise function
 schemas), but a follow-up should **auto-register scope-closure + ingress kinds**
-to cut operator boilerplate.
+to cut operator boilerplate. The self-registering model makes "have ≥1 plugin"
+the common case, so a launched plugin almost always trips enforcement — which
+sharpens the case for a **built-in catalog** the engine seeds from the kinds it
+owns (the seed `event.registered`, `scope.{name}.closed`/`.budget_exhausted` per
+declared scope, ingress) so the operator declares only domain kinds. Pending.
+
+*Vocabulary (this iteration):* the substrate wiring unit is a **`Subscriber`**,
+not a "node". The type, the fact (`sys.subscriber.registered`), the changeset
+op-kind (`"subscriber"`), and the topology document key (`subscribers:`) were
+renamed accordingly; "node"/"edge" now live **only** in the connectivity-graph
+projection (the validator). A `Subscriber` is `On`/`In`/`Emits` + a `Reaction`
+body; the graph "node" is its image in that projection. A plugin, on launch,
+self-registers as one global `Subscriber`.
 
 **3b — the hands themselves. ✅ DONE (`a2cfb62`, `8f2f610`, `54c6af8`).**
 `fs.{read,edit,write,search}` (ported fs logic, root-confined, read-before-edit

@@ -9,12 +9,14 @@
 > in [28 — rebuild roadmap](./28-substrate-rebuild-roadmap.md). When an
 > `outdated/` doc disagrees with this one, this one wins.
 >
-> **Vocabulary discipline (the thing that keeps drifting):** there are
-> **events** and **subscribers (nodes)**. There is **no "tool" and no "tool
-> menu"** as a concept — `tool.fs.read.call` is the *name of an event*, and the
-> `fs` node is a *subscriber* to it. What a model "may do" is just its `Emits`
-> allowlist. Completion is a **state reached by verification**, never an LLM
-> claim and never mere quiescence.
+> **Vocabulary discipline (the thing that keeps drifting):** the wiring unit is a
+> **subscriber** (`engine.Subscriber`: `On`/`In`/`Emits` + a `Reaction` body) —
+> NOT a "node". "Node" is the subscriber's image in the **connectivity graph
+> projection** (the validator's dead-end/reachability/cycle view); the word lives
+> only there. There is **no "tool" and no "tool menu"** as a concept either —
+> `tool.fs.read.call` is the *name of an event*, and the `fs` subscriber consumes
+> it. What a model "may do" is just its `Emits` allowlist. Completion is a **state
+> reached by verification**, never an LLM claim and never mere quiescence.
 
 ---
 
@@ -176,7 +178,7 @@ is not yet built is the daemon/CLI/API surface around it (Iteration 2).
 ```
 sys.topology.changeset.requested{ ops, principal }
    → engine validates fold(live table) + ops → resulting graph
-   → facts (sys.node.registered, sys.subscribed, sys.scope.declared,
+   → facts (sys.subscriber.registered, sys.subscribed, sys.scope.declared,
             sys.projection.registered, event.registered, …)
      + changeset.applied | changeset.rejected{ reasons }
 ```

@@ -60,7 +60,7 @@ func New(opts ...Option) *Engine {
 
 // Load reconstructs an engine from a persisted or replayed log (the daemon's
 // crash-recovery / restart path): it adopts the log and rebuilds every
-// descriptor-based node body from the recorded sys.node.registered facts via the
+// descriptor-based node body from the recorded sys.subscriber.registered facts via the
 // resolver. This is the proof of G8 for behaviour wiring — only the body kind +
 // config are facts; the resolver rebuilds the code. A descriptor whose body
 // cannot be resolved is a fatal load error (the daemon refuses to start on a log
@@ -70,10 +70,10 @@ func Load(log []Event, opts ...Option) (*Engine, error) {
 	e := New(opts...)
 	e.log = log
 	for _, ev := range log {
-		if ev.Subject != subjNodeRegistered {
+		if ev.Subject != subjSubscriberRegistered {
 			continue
 		}
-		var s nodeSpec
+		var s subscriberSpec
 		if json.Unmarshal(ev.Payload, &s) != nil || s.Name == "" || s.BodyKind == "" {
 			continue
 		}
@@ -104,7 +104,7 @@ func (e *Engine) resolveBody(name, kind string, config json.RawMessage) (Reactio
 //
 // The grammar is on the log: a sys.topology.changeset.requested fact records
 // the ops; on a connected resulting graph the engine appends one object fact per
-// decl (sys.node.registered, sys.scope.declared, …) followed by
+// decl (sys.subscriber.registered, sys.scope.declared, …) followed by
 // sys.topology.changeset.applied, and commits the nodes' bodies to the registry;
 // on a disconnected graph it appends sys.topology.changeset.rejected with the
 // reasons and writes no object facts (so the live table is unchanged by
@@ -132,7 +132,7 @@ func (e *Engine) Apply(ctx context.Context, decls ...Decl) error {
 	resolved := map[string]Reaction{}
 	var bodyErrs []string
 	for _, d := range decls {
-		n, ok := d.(Node)
+		n, ok := d.(Subscriber)
 		if !ok {
 			continue
 		}
@@ -140,7 +140,7 @@ func (e *Engine) Apply(ctx context.Context, decls ...Decl) error {
 			resolved[n.Name] = n.Body
 			continue
 		}
-		if nodeBodyDescriptor(n) {
+		if subscriberBodyDescriptor(n) {
 			r, rerr := e.resolveBody(n.Name, n.BodyKind, n.BodyConfig)
 			if rerr != nil {
 				bodyErrs = append(bodyErrs, rerr.Error())
@@ -208,7 +208,7 @@ func (e *Engine) liveDecls() []Decl {
 // and appends to the cache, the same shape a fold would produce.
 func (e *Engine) install(decls ...Decl) {
 	for _, d := range decls {
-		if n, ok := d.(Node); ok && n.Body != nil {
+		if n, ok := d.(Subscriber); ok && n.Body != nil {
 			e.bodies[n.Name] = n.Body
 		}
 	}
@@ -304,7 +304,7 @@ func (e *Engine) mintSpan() string {
 // roots of that recursion — events at the frontier with no open cone above
 // them (ingress) — and a re-drive resumes from the recomputed frontier.
 func (e *Engine) Drain(ctx context.Context) error {
-	nodes := e.liveNodes()
+	nodes := e.liveSubscribers()
 	sr := e.rebuildScopes(nodes)
 
 	// Drive each undispatched event depth-first to quiescence. process dispatches
@@ -351,7 +351,7 @@ func (e *Engine) markDispatched(idx int) {
 // instances closed/exhausted so a re-drive never re-emits them (G6). Counts
 // and obligations of still-open instances are rebuilt so the depth-first pass
 // resumes exactly.
-func (e *Engine) rebuildScopes(nodes []Node) *scopeRuntime {
+func (e *Engine) rebuildScopes(nodes []Subscriber) *scopeRuntime {
 	sr := newScopeRuntime(declaredScopes(e.liveDecls()), nodes)
 	// Replay DISPATCHED events in log order, re-rooting and re-stamping
 	// membership. Obligations are not replayed (they are an in-flight quantity of
@@ -385,7 +385,7 @@ func (e *Engine) rebuildScopes(nodes []Node) *scopeRuntime {
 // (so the child's increments land BEFORE this event's decrement — the
 // false-zero guard), and finally leaves the cones (−1 each), closing any whose
 // count crossed to zero.
-func (e *Engine) process(ctx context.Context, idx int, nodes []Node, sr *scopeRuntime) {
+func (e *Engine) process(ctx context.Context, idx int, nodes []Subscriber, sr *scopeRuntime) {
 	e.markDispatched(idx)
 	ev := e.log[idx]
 	cls, scope, kind := splitSubject(ev.Subject)
@@ -433,7 +433,7 @@ func (e *Engine) process(ctx context.Context, idx int, nodes []Node, sr *scopeRu
 // fanOut runs every matching live node and recursively processes each emit as
 // a child of ev. A React error is not fatal (§4 G3): it becomes a non-terminal
 // {node}.failed event in the same cone and the drain continues.
-func (e *Engine) fanOut(ctx context.Context, idx int, cls, scope, kind string, nodes []Node, sr *scopeRuntime) {
+func (e *Engine) fanOut(ctx context.Context, idx int, cls, scope, kind string, nodes []Subscriber, sr *scopeRuntime) {
 	ev := e.log[idx]
 	for _, n := range nodes {
 		if !sr.deliver(n, ev.Trace.SpanID, scope, kind) {
@@ -585,20 +585,20 @@ func (e *Engine) catalogLookup() schemaFunc {
 	return cat.schemaOf
 }
 
-// liveNodes returns the reaction nodes from the recorded decls, with scope
-// defaulting applied (empty In → "global", matching Validate's foldNodes). The
+// liveSubscribers returns the reaction nodes from the recorded decls, with scope
+// defaulting applied (empty In → "global", matching Validate's foldSubscribers). The
 // live table Drain dispatches against is exactly the validated topology Apply
 // stored.
-func (e *Engine) liveNodes() []Node {
-	return foldNodes(e.liveDecls())
+func (e *Engine) liveSubscribers() []Subscriber {
+	return foldSubscribers(e.liveDecls())
 }
 
-// nodeMatches reports whether a node subscribes to an event with the given
+// subscriberMatches reports whether a node subscribes to an event with the given
 // scope token and kind. A node matches iff (a) its scope qualifier admits the
 // event's scope and (b) some On pattern matches the kind after handler desugar
 // (§2: the node binds the kind, the bus prepended the scope wildcard, so we
 // match On against the kind tail alone).
-func nodeMatches(n Node, scope, kind string) bool {
+func subscriberMatches(n Subscriber, scope, kind string) bool {
 	if !scopeAdmits(n.In, scope) {
 		return false
 	}

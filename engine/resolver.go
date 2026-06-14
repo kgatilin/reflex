@@ -27,8 +27,8 @@ type Option func(*Engine)
 // Apply rejects a descriptor node when no resolver is installed.
 func WithBodyResolver(r BodyResolver) Option { return func(e *Engine) { e.resolver = r } }
 
-// nodeBodyDescriptor reports whether a node carries a serializable body
+// subscriberBodyDescriptor reports whether a node carries a serializable body
 // descriptor (a body kind to resolve) rather than a live in-process closure.
-func nodeBodyDescriptor(n Node) bool { return n.Body == nil && n.BodyKind != "" }
+func subscriberBodyDescriptor(n Subscriber) bool { return n.Body == nil && n.BodyKind != "" }
 
 var _ = json.Marshal // resolver.go keeps the encoding/json import meaningful for future descriptor helpers

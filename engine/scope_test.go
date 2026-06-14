@@ -49,7 +49,7 @@ func TestDrain_BoundedLoopBudgetCapTerminates(t *testing.T) {
 			Budget: map[string]int{"tool.fs.read.call": budget},
 		},
 		// resolver: ingress → request.received (roots the work scope).
-		Node{
+		Subscriber{
 			Name:  "resolver",
 			On:    []string{"test.msg"},
 			Emits: []string{"request.received"},
@@ -58,7 +58,7 @@ func TestDrain_BoundedLoopBudgetCapTerminates(t *testing.T) {
 		// gather: kicks off the loop on request.received, then loops on every
 		// fs result by emitting another read call. Unbounded by itself — the
 		// scope budget is what stops it (doc 26 §3).
-		Node{
+		Subscriber{
 			Name:  "gather",
 			On:    []string{"request.received", "tool.fs.read.result"},
 			In:    "work",
@@ -66,7 +66,7 @@ func TestDrain_BoundedLoopBudgetCapTerminates(t *testing.T) {
 			Body:  emitKind("tool.fs.read.call"),
 		},
 		// fs (tool): answers each read call with a result.
-		Node{
+		Subscriber{
 			Name:  "fs",
 			On:    []string{"tool.fs.read.call"},
 			In:    "work",
@@ -153,13 +153,13 @@ func TestDrain_JoinBarrierClosesOnceWhenAllResultsIn(t *testing.T) {
 			Scope{Name: "fanout", Root: "fan.out", Budget: map[string]int{"tool.noop.call": n + 1}},
 			// dispatcher: ingress → fan.out (roots the fanout scope), emitting N
 			// parallel calls inside the cone.
-			Node{
+			Subscriber{
 				Name:  "dispatcher",
 				On:    []string{"test.msg"},
 				Emits: []string{"fan.out"},
 				Body:  emitKind("fan.out"),
 			},
-			Node{
+			Subscriber{
 				Name:  "fanner",
 				On:    []string{"fan.out"},
 				In:    "fanout",
@@ -168,7 +168,7 @@ func TestDrain_JoinBarrierClosesOnceWhenAllResultsIn(t *testing.T) {
 			},
 			// the tool answers each call; results open no further obligations,
 			// so once all N land the cone quiesces.
-			Node{
+			Subscriber{
 				Name:  "noop",
 				On:    []string{"tool.noop.call"},
 				In:    "fanout",
@@ -177,7 +177,7 @@ func TestDrain_JoinBarrierClosesOnceWhenAllResultsIn(t *testing.T) {
 			},
 			// barrier: consumes the closure in the parent cone (the join's
 			// continuation belongs to the enclosing block, doc 24 §5 sealing).
-			Node{
+			Subscriber{
 				Name: "barrier",
 				On:   []string{"scope.fanout.closed"},
 			},
@@ -240,13 +240,13 @@ func TestDrain_StallReDrivesIntoNewChildCone(t *testing.T) {
 
 		// opener: ingress → session.open (roots session), then kicks the first
 		// attempt by emitting attempt.start inside the session cone.
-		Node{
+		Subscriber{
 			Name:  "opener",
 			On:    []string{"test.msg"},
 			Emits: []string{"session.open"},
 			Body:  emitKind("session.open"),
 		},
-		Node{
+		Subscriber{
 			Name:  "kick",
 			On:    []string{"session.open"},
 			In:    "session",
@@ -255,14 +255,14 @@ func TestDrain_StallReDrivesIntoNewChildCone(t *testing.T) {
 		},
 		// worker: inside an attempt cone, does a tool call; the result opens no
 		// terminal, so the attempt cone quiesces non-terminally (a stall).
-		Node{
+		Subscriber{
 			Name:  "worker",
 			On:    []string{"attempt.start"},
 			In:    "attempt",
 			Emits: []string{"tool.noop.call"},
 			Body:  emitKind("tool.noop.call"),
 		},
-		Node{
+		Subscriber{
 			Name:  "noop",
 			On:    []string{"tool.noop.call"},
 			In:    "attempt",
@@ -273,7 +273,7 @@ func TestDrain_StallReDrivesIntoNewChildCone(t *testing.T) {
 		// the parent (session) cone and re-drives — emits another attempt.start,
 		// opening a NEW attempt instance. Bounded by the session budget on
 		// attempt.start, so the re-drive loop terminates.
-		Node{
+		Subscriber{
 			Name:  "bridge",
 			On:    []string{"scope.attempt.closed"},
 			In:    "session",

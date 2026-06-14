@@ -31,7 +31,7 @@ func exampleTopology() []Decl {
 			},
 		},
 		// resolver: ingress → request.received (roots the request scope).
-		Node{
+		Subscriber{
 			Name:  "resolver",
 			On:    []string{"app.ingress.*"},
 			In:    "global",
@@ -40,7 +40,7 @@ func exampleTopology() []Decl {
 		},
 		// understand (llm, read-only): turns the request into a goal and the
 		// first read/search tool calls.
-		Node{
+		Subscriber{
 			Name: "understand",
 			On:   []string{"request.received"},
 			In:   "request",
@@ -53,7 +53,7 @@ func exampleTopology() []Decl {
 		},
 		// gather (llm): consumes fs results, loops (another read) or exits via
 		// plan.requested / task.needs_clarification.
-		Node{
+		Subscriber{
 			Name: "gather",
 			On: []string{
 				"tool.fs.read.result",
@@ -74,7 +74,7 @@ func exampleTopology() []Decl {
 		// gather-guard: an extra consumer on the re-trigger edges that can emit
 		// the exit (plan.requested). It is an ordinary SCC member; the loop is
 		// bounded by the request scope's budget, not by this node (doc 24 §5).
-		Node{
+		Subscriber{
 			Name: "gather-guard",
 			On: []string{
 				"tool.fs.read.result",
@@ -84,7 +84,7 @@ func exampleTopology() []Decl {
 			Emits: []string{"plan.requested"},
 		},
 		// plan (llm): writes the plan and flips status to executing.
-		Node{
+		Subscriber{
 			Name: "plan",
 			On:   []string{"plan.requested"},
 			In:   "request",
@@ -95,7 +95,7 @@ func exampleTopology() []Decl {
 		},
 		// execute (llm): runs steps via tools; loops on results; answers when
 		// the plan is complete.
-		Node{
+		Subscriber{
 			Name: "execute",
 			On: []string{
 				"state.updated.plan",
@@ -115,7 +115,7 @@ func exampleTopology() []Decl {
 		},
 		// execute-guard: an extra consumer that can emit task.answered. Like
 		// gather-guard, it is a plain SCC member; the budget bounds the loop.
-		Node{
+		Subscriber{
 			Name:  "execute-guard",
 			On:    []string{"tool.gotool.build.result"},
 			In:    "request",
@@ -123,7 +123,7 @@ func exampleTopology() []Decl {
 		},
 		// fs (tool): tool.fs.* island. In the request scope so it is inside the
 		// budgeted cone that bounds the work SCC (doc 24 §5).
-		Node{
+		Subscriber{
 			Name: "fs",
 			On:   []string{"tool.fs.>"},
 			In:   "request",
@@ -136,7 +136,7 @@ func exampleTopology() []Decl {
 		},
 		// gotool (tool): tool.gotool.* island. In the request scope for the same
 		// reason as fs — inside the budgeted cone (doc 24 §5).
-		Node{
+		Subscriber{
 			Name: "gotool",
 			On:   []string{"tool.gotool.>"},
 			In:   "request",
@@ -147,7 +147,7 @@ func exampleTopology() []Decl {
 		},
 		// notify (sink): consumes the two terminal answers, replies to the
 		// user. Emits nothing — a legitimate sink, not a dead-end.
-		Node{
+		Subscriber{
 			Name: "notify",
 			On: []string{
 				"task.answered",
@@ -162,7 +162,7 @@ func exampleTopology() []Decl {
 		// quiesces on a non-terminal state would freeze in the void. It lives in
 		// the parent (global) cone — closure exits the cone it seals — so it is
 		// scope-less (In defaults to global).
-		Node{
+		Subscriber{
 			Name: "lifecycle",
 			On:   []string{"scope.request.closed"},
 		},

@@ -60,8 +60,8 @@ func TestServerClient_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client Topology: %v", err)
 	}
-	if len(doc.Nodes) != 4 || len(doc.Scopes) != 1 {
-		t.Errorf("topology = %d nodes, %d scopes; want 4/1", len(doc.Nodes), len(doc.Scopes))
+	if len(doc.Subscribers) != 4 || len(doc.Scopes) != 1 {
+		t.Errorf("topology = %d nodes, %d scopes; want 4/1", len(doc.Subscribers), len(doc.Scopes))
 	}
 
 	events, err := c.Emit(ctx, "app.ingress.cli.task", json.RawMessage(`{}`), true)
@@ -102,7 +102,7 @@ func TestServerClient_ApplyRejected(t *testing.T) {
 	waitReady(t, ctx, c)
 
 	bad := declarativeDoc()
-	bad.Nodes = bad.Nodes[:1] // drop worker/notify/lifecycle: dead-ends + stalled closure
+	bad.Subscribers = bad.Subscribers[:1] // drop worker/notify/lifecycle: dead-ends + stalled closure
 	res, err := c.Apply(ctx, bad)
 	if err == nil {
 		t.Fatalf("Apply of a disconnected doc returned nil error")

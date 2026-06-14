@@ -25,8 +25,8 @@ func newObserved() *observed {
 // readerNode builds a node that, on each firing, records the named kv and log
 // views (evaluated at its trigger) into obs, then emits emitKindOut so the
 // chain can continue if needed.
-func readerNode(name string, on []string, in string, reads []string, kvName, logName, emitKindOut string, obs *observed) Node {
-	return Node{
+func readerNode(name string, on []string, in string, reads []string, kvName, logName, emitKindOut string, obs *observed) Subscriber {
+	return Subscriber{
 		Name:  name,
 		On:    on,
 		In:    in,
@@ -72,7 +72,7 @@ func TestProjection_KVAndLogViewsReproduceTheFold(t *testing.T) {
 	// status=planning (overwrites status — last writer wins), then a probe event
 	// that the reader fires on. The kv keys by the path tail after
 	// "state.updated." (default Key) and stores the payload (default Value).
-	writer := Node{
+	writer := Subscriber{
 		Name:  "writer",
 		On:    []string{"request.received"},
 		In:    "request",
@@ -97,7 +97,7 @@ func TestProjection_KVAndLogViewsReproduceTheFold(t *testing.T) {
 
 	decls := []Decl{
 		Scope{Name: "request", Root: "request.received"},
-		Node{Name: "resolver", On: []string{"test.msg"}, Emits: []string{"request.received"}, Body: emitKind("request.received")},
+		Subscriber{Name: "resolver", On: []string{"test.msg"}, Emits: []string{"request.received"}, Body: emitKind("request.received")},
 		writer,
 		reader,
 		// kv view over the per-scope state writes, keyed by path (default Key),
@@ -166,13 +166,13 @@ func TestProjection_ReadAtTriggerIsolationAcrossParallelRequestCones(t *testing.
 
 	// resolver, on its ingress, copies the ingress "tag" into state.updated.goal
 	// for its own request cone, then emits probe.go for the reader.
-	resolver := Node{
+	resolver := Subscriber{
 		Name:  "resolver",
 		On:    []string{"test.msg"},
 		Emits: []string{"request.received"},
 		Body:  emitKind("request.received"),
 	}
-	tagger := Node{
+	tagger := Subscriber{
 		Name:  "tagger",
 		On:    []string{"request.received"},
 		In:    "request",
@@ -277,7 +277,7 @@ func TestProjection_PromoteViaClosure(t *testing.T) {
 	ctx := context.Background()
 
 	// finder (in request): writes state.updated.found into its own cone.
-	finder := Node{
+	finder := Subscriber{
 		Name:  "finder",
 		On:    []string{"request.received"},
 		In:    "request",
@@ -290,7 +290,7 @@ func TestProjection_PromoteViaClosure(t *testing.T) {
 	// promoter (global): consumes scope.request.closed, reads the closing cone's
 	// state snapshot from the payload, and promotes "found" into the GLOBAL state
 	// as state.updated.project_context. This is the only request→global path.
-	promoter := Node{
+	promoter := Subscriber{
 		Name:  "promoter",
 		On:    []string{"scope.request.closed"},
 		In:    "global",
@@ -310,7 +310,7 @@ func TestProjection_PromoteViaClosure(t *testing.T) {
 
 	decls := []Decl{
 		Scope{Name: "request", Root: "request.received"},
-		Node{Name: "resolver", On: []string{"test.msg"}, Emits: []string{"request.received"}, Body: emitKind("request.received")},
+		Subscriber{Name: "resolver", On: []string{"test.msg"}, Emits: []string{"request.received"}, Body: emitKind("request.received")},
 		finder,
 		promoter,
 		// global state view: folds the global-horizon state writes.
@@ -369,7 +369,7 @@ func TestProjection_PromoteViaClosure(t *testing.T) {
 	if lastSpan == "" {
 		t.Fatal("no state.updated.project_context on the log")
 	}
-	pe := newProjectionEval(collect(e), e.liveDecls(), e.rebuildScopes(e.liveNodes()))
+	pe := newProjectionEval(collect(e), e.liveDecls(), e.rebuildScopes(e.liveSubscribers()))
 	_, events, ok := pe.matched("global_state", lastSpan)
 	if !ok {
 		t.Fatal("global_state projection did not resolve")
@@ -389,7 +389,7 @@ func TestProjection_PromoteViaClosure(t *testing.T) {
 	// The two request states did not leak into each other: the per-scope state of
 	// each request instance holds exactly its own found (already asserted via the
 	// closure snapshots above; this re-checks via the built-in scopeState fold).
-	srAfter := e.rebuildScopes(e.liveNodes())
+	srAfter := e.rebuildScopes(e.liveSubscribers())
 	peAfter := newProjectionEval(collect(e), e.liveDecls(), srAfter)
 	var reqInstances []string
 	for k := range srAfter.instances {

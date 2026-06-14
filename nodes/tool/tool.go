@@ -20,8 +20,8 @@ type Func func(ctx context.Context, input json.RawMessage) (json.RawMessage, err
 
 // Node wires a tool function as a complete topology node: subscribed to
 // tool.{name}.call, emitting tool.{name}.result / tool.{name}.failed.
-func Node(name string, fn Func) engine.Node {
-	return engine.Node{
+func Node(name string, fn Func) engine.Subscriber {
+	return engine.Subscriber{
 		Name:  name,
 		On:    []string{"tool." + name + ".call"},
 		Emits: []string{"tool." + name + ".result", "tool." + name + ".failed"},

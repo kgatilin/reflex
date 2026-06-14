@@ -28,9 +28,9 @@ func init() {
 func TestViewType_CustomBuilderResolvesThroughViewAs(t *testing.T) {
 	decls := []Decl{
 		Scope{Name: "request", Root: "request.received"},
-		Node{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}, Scope: "request"},
+		Subscriber{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}, Scope: "request"},
 		// A reader node whose body asserts the custom view through ViewAs.
-		Node{
+		Subscriber{
 			Name:  "reader",
 			On:    []string{"request.received"},
 			In:    "request",
@@ -49,7 +49,7 @@ func TestViewType_CustomBuilderResolvesThroughViewAs(t *testing.T) {
 				return nil, nil
 			}),
 		},
-		Node{Name: "sink", On: []string{"reader.saw"}, In: "request"},
+		Subscriber{Name: "sink", On: []string{"reader.saw"}, In: "request"},
 		Projection{Name: "hist", On: []string{"request.received"}, In: HorizonRequest, Type: "test.history"},
 	}
 
@@ -85,7 +85,7 @@ func TestViewType_UnknownTypeRejected(t *testing.T) {
 // view that no projection declares (doc 26 §4b).
 func TestViewType_DanglingReadRejected(t *testing.T) {
 	rep, err := Validate(
-		Node{Name: "n", On: []string{"x"}, In: "global", Reads: []string{"ghost"}},
+		Subscriber{Name: "n", On: []string{"x"}, In: "global", Reads: []string{"ghost"}},
 	)
 	if err != nil {
 		t.Fatalf("Validate: %v", err)

@@ -11,8 +11,8 @@ import (
 // (which would import engine → an import cycle in this internal test). It is the
 // same shape: subscribed to tool.noop.call, emitting tool.noop.result. The
 // dispatch path it exercises is identical to a real tool node.
-func toolNoop() Node {
-	return Node{
+func toolNoop() Subscriber {
+	return Subscriber{
 		Name:  "noop",
 		On:    []string{"tool.noop.call"},
 		Emits: []string{"tool.noop.result", "tool.noop.failed"},
@@ -38,20 +38,20 @@ func emitKind(kind string) ReactionFunc {
 //	done      On tool.noop.result       → emits task.done   (terminal, no consumer)
 func acyclicTopology() []Decl {
 	return []Decl{
-		Node{
+		Subscriber{
 			Name:  "resolver",
 			On:    []string{"test.msg"}, // kind tail of app.ingress.test.msg
 			Emits: []string{"request.received"},
 			Body:  emitKind("request.received"),
 		},
-		Node{
+		Subscriber{
 			Name:  "echo",
 			On:    []string{"request.received"},
 			Emits: []string{"tool.noop.call"},
 			Body:  emitKind("tool.noop.call"),
 		},
 		toolNoop(),
-		Node{
+		Subscriber{
 			Name:  "done",
 			On:    []string{"tool.noop.result"},
 			Emits: []string{"task.done"},
@@ -75,7 +75,7 @@ func TestDrain_AcyclicChainFlowsToQuiescence(t *testing.T) {
 
 	run := func() *Engine {
 		e := New()
-		// foldNodes wires In="global" by default, but Apply requires a connected
+		// foldSubscribers wires In="global" by default, but Apply requires a connected
 		// topology; this chain has a terminal (task.done) with no consumer, which
 		// Validate flags as a dead-end. The test exercises Drain, not Validate, so
 		// store the decls directly.
@@ -146,7 +146,7 @@ func TestDrain_AcyclicChainFlowsToQuiescence(t *testing.T) {
 func TestDrain_ReactionErrorBecomesFailedEventAndDrainCompletes(t *testing.T) {
 	ctx := context.Background()
 	e := New()
-	e.install(Node{
+	e.install(Subscriber{
 		Name: "boom",
 		On:   []string{"test.msg"},
 		Body: ReactionFunc(func(_ context.Context, _ Event, _ Views) ([]Emit, error) {
