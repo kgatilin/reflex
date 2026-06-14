@@ -478,6 +478,7 @@ func ViewAs[T any](views Views, name string) T {
 type projectionViews struct {
 	eval        *projectionEval
 	triggerSpan string
+	schema      schemaFunc
 }
 
 func (v projectionViews) Value(name string) any {
@@ -508,4 +509,11 @@ func (v projectionViews) Log(name string) []Event {
 		return log
 	}
 	return nil
+}
+
+func (v projectionViews) Schema(kind string) (json.RawMessage, bool) {
+	if v.schema == nil {
+		return nil, false
+	}
+	return v.schema(kind)
 }

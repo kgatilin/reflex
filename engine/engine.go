@@ -450,11 +450,13 @@ func (e *Engine) fanOut(ctx context.Context, idx int, cls, scope, kind string, n
 		// caused_by walk to the projection's horizon). The evaluator indexes the
 		// log as it stands now, so the view sees exactly the trigger's causal
 		// past — "in context" ≡ "in the causal past" (reaction.go Views doc).
-		views := Views(emptyViews{})
+		catLookup := e.catalogLookup()
+		views := Views(emptyViews{schema: catLookup})
 		if len(n.Reads) > 0 {
 			views = projectionViews{
 				eval:        newProjectionEval(e.log, e.liveDecls(), sr),
 				triggerSpan: ev.Trace.SpanID,
+				schema:      catLookup,
 			}
 		}
 		emits, err := n.Body.React(ctx, ev, views)
@@ -575,6 +577,14 @@ func (e *Engine) catalogSchema(kind string) (json.RawMessage, bool) {
 	return cat.schemaOf(kind)
 }
 
+// catalogLookup folds the catalog once and returns a per-dispatch schema lookup
+// for the read surface (Views.Schema) — so a body can advertise the schemas of
+// the kinds it may emit without each call re-folding the catalog.
+func (e *Engine) catalogLookup() schemaFunc {
+	cat := foldCatalog(e.liveDecls(), e.log)
+	return cat.schemaOf
+}
+
 // liveNodes returns the reaction nodes from the recorded decls, with scope
 // defaulting applied (empty In → "global", matching Validate's foldNodes). The
 // live table Drain dispatches against is exactly the validated topology Apply
@@ -618,11 +628,17 @@ func scopeAdmits(in, scope string) bool {
 // emptyViews is the 2a read surface: no projections exist yet, so every view
 // is empty. Stage 2b/§6 attaches the declared projections evaluated at the
 // trigger's causal position.
-type emptyViews struct{}
+type emptyViews struct{ schema schemaFunc }
 
 func (emptyViews) Value(string) any   { return nil }
 func (emptyViews) KV(string) KV       { return emptyKV{} }
 func (emptyViews) Log(string) []Event { return nil }
+func (v emptyViews) Schema(kind string) (json.RawMessage, bool) {
+	if v.schema == nil {
+		return nil, false
+	}
+	return v.schema(kind)
+}
 
 type emptyKV struct{}
 

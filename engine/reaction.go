@@ -38,7 +38,18 @@ type Views interface {
 	// Log returns a log-typed view by its declared name: the matched
 	// events of the declaration's horizon, in log order — sugar over Value.
 	Log(name string) []Event
+
+	// Schema returns the declared catalog schema for an event kind and whether
+	// the kind is in the catalog at all (doc 26 §4a). A body uses it to advertise
+	// the parameter schemas of the kinds it may emit — e.g. the llm body turns
+	// its Emits + their catalog schemas into function-call schemas. There is no
+	// per-tool wiring: the node's Emits allowlist is the menu, the catalog is the
+	// schema source, populated dynamically (e.g. by a plugin's announced kinds).
+	Schema(kind string) (json.RawMessage, bool)
 }
+
+// schemaFunc is the dispatch-time catalog lookup handed to the read surface.
+type schemaFunc = func(kind string) (json.RawMessage, bool)
 
 // KV is one of the two projection shapes (§6, deliberately final).
 // Ties between incomparable branches break by log order — the single

@@ -324,15 +324,25 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 	for _, k := range cfg.Emits {
 		allow[k] = struct{}{}
 	}
-	var tools []provider.ToolSchema
-	for _, k := range cfg.Emits {
-		if k == cfg.Answer {
-			continue // the answer kind is synthesised from text, not a tool
-		}
-		tools = append(tools, provider.ToolSchema{Name: k})
-	}
 
 	return engine.ReactionFunc(func(ctx context.Context, _ engine.Event, views engine.Views) ([]engine.Emit, error) {
+		// The advertised functions ARE the node's Emits — no separate tool menu
+		// (doc 26 §4). Each function's parameter schema comes from the catalog by
+		// kind (Views.Schema), populated dynamically (e.g. by a plugin's announced
+		// kinds), so adding a tool needs no llm-body change. Built per-call so a
+		// catalog grown earlier in the drain is in scope.
+		var tools []provider.ToolSchema
+		for _, k := range cfg.Emits {
+			if k == cfg.Answer {
+				continue // the answer kind is synthesised from text, not a tool
+			}
+			ts := provider.ToolSchema{Name: k}
+			if schema, ok := views.Schema(k); ok && len(schema) > 0 {
+				ts.InputSchema = schema
+			}
+			tools = append(tools, ts)
+		}
+
 		var system string
 		var msgs []provider.Message
 		if h := engine.ViewAs[History](views, cfg.HistoryName); h != nil {
