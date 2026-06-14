@@ -36,7 +36,7 @@ func root() *cobra.Command {
 		SilenceErrors: true,
 	}
 	cmd.PersistentFlags().StringVar(&socket, "socket", "/tmp/reflexd.sock", "daemon unix socket path")
-	cmd.AddCommand(serveCmd(&socket), applyCmd(&socket), topologyCmd(&socket), emitCmd(&socket), eventsCmd(&socket), validateCmd())
+	cmd.AddCommand(serveCmd(&socket), applyCmd(&socket), topologyCmd(&socket), emitCmd(&socket), eventsCmd(&socket), validateCmd(), pluginCmd())
 	return cmd
 }
 

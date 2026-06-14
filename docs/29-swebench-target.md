@@ -155,26 +155,38 @@ a running daemon is live topology config. **Deferred:** disk persistence of the
 log (the daemon is in-memory; `Load` proves replay works), and the richer
 `scopes`/`diff` read surface.
 
-**Iteration 3 — The hands: file/test subscriber nodes + catalog schemas.**
-Two seats, decided this line of work:
-- **`fs.{read,edit,write,search}` is *in the `reflexd` binary*** — a built-in body
-  kind in `daemon.registerFactories()` next to `llm` (port the legacy fs logic
-  from git history, in-process, root-confined).
-- **Everything else is an *out-of-process plugin*** (`py.test`, `go.*`, …). Build
-  the plugin seam: a generic in-binary `"plugin"` body (a proxy `Reaction`) +
-  a small plugin SDK (the legacy `pkg/sdk` transport-adapter shape is the
-  template). **3a** ships the **stdio** transport (daemon `exec`s the plugin on
-  `apply`, NDJSON `hello/deliver/emit/ack` over stdin/stdout); the proxy is
-  designed so a **socket** transport drops in later for plugins with an
-  independent lifecycle. The protocol is language-agnostic (a plugin can be
-  Python). The engine's emit-allowlist still binds the plugin — out-of-process
-  is not out-of-bounds — and the body descriptor on the log keeps it recoverable
-  (G8). Hot-plug ("agent writes a plugin, applies it, uses it, no daemon
-  restart") is a property of live `apply`, not the transport — stdio already
-  delivers it.
+**Iteration 3 — The hands: everything is a plugin.** One uniform mechanism, no
+special cases. The only true in-process body is `llm` (the reasoning core); every
+*hand* (`fs.*`, `py.test`, `go.*`, …) is an **out-of-process stdio plugin**.
 
-**3b — the hands themselves:** `fs.*` in-binary + `py.test` as a stdio plugin
-binary on that SDK. **Register their event kinds + parameter schemas in the
+**3a — the plugin seam (stdio):**
+- a generic in-binary `"plugin"` body — a proxy `Reaction` that, when its node
+  fires, forwards the triggering event to a child process and returns the emits
+  the child sends back;
+- the wire: NDJSON over the child's stdin/stdout — `hello`/`welcome` handshake,
+  then per-firing `invoke{id,event}` → `result{id,emits[],error?}`;
+- a small plugin SDK (the deleted `pkg/sdk` transport-adapter shape is the
+  template) so a plugin author writes `plugin.Serve(handler)`;
+- the proxy is built so a **socket** transport drops in later (for plugins with
+  an independent lifecycle); stdio is the simpler start.
+
+Properties this preserves: the engine's **emit-allowlist still binds the plugin**
+(out-of-process is not out-of-bounds); the body descriptor (`kind` + spawn
+config) rides on `sys.node.registered`, so the wiring is **recoverable from the
+log** (G8); and **hot-plug** ("agent writes a plugin, applies a node, uses it, no
+daemon restart") is a property of live `apply`, not the transport.
+
+**Plugins ship in-repo as a multi-call binary** — `reflexd plugin fs`,
+`reflexd plugin pytest` are subcommands the daemon spawns as separate child
+processes over stdio. Code lives in one binary ("built-in"), each plugin runs as
+its own process ("launchable separately"). Composability falls out: the daemon
+only spawns what the applied topology references — a non-filesystem agent simply
+never wires an `fs` node, so no fs process is launched. The protocol is
+language-agnostic (a plugin can be native Python).
+
+**3b — the hands themselves:** `fs.{read,edit,write,search}` (port the deleted fs
+logic from git history, root-confined) and `py.test` as `reflexd plugin`
+subcommands on the SDK. **Register their event kinds + parameter schemas in the
 catalog** so the `llm` body advertises real function schemas (closes the
 `CONCEPT.md` §12 "tool schemas from catalog" gap). Schemas must be the
 LLM-tool-compatible subset.

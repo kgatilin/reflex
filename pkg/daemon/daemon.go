@@ -15,6 +15,7 @@ import (
 	"github.com/kgatilin/reflex/engine"
 	"github.com/kgatilin/reflex/nodes"
 	"github.com/kgatilin/reflex/nodes/llm"
+	"github.com/kgatilin/reflex/nodes/proxy"
 	"github.com/kgatilin/reflex/pkg/topology"
 )
 
@@ -26,9 +27,12 @@ type Daemon struct {
 
 // registerFactories wires the built-in body kinds into the process registry.
 // Idempotent (Register replaces), so constructing several daemons in one process
-// (tests) is safe.
+// (tests) is safe. "llm" is the only true in-process body (the reasoning core);
+// every hand (fs, pytest, …) is an out-of-process plugin behind the "plugin"
+// proxy kind — the daemon spawns it over stdio (doc 29 Iteration 3).
 func registerFactories() {
 	nodes.Register("llm", llm.Factory)
+	nodes.Register(proxy.Kind, proxy.Factory)
 }
 
 // New builds a daemon with a fresh engine and the body resolver installed.
