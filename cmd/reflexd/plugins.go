@@ -31,7 +31,8 @@ var builtinPlugins = map[string]builtin{
 		spec := plugin.Spec{Name: "echo", Events: []plugin.EventDecl{{Kind: "echo.reply", Role: plugin.RoleOut}}}
 		return spec, echoHandler, nil
 	}},
-	"fs": {build: func(o pluginOpts) (plugin.Spec, plugin.Handler, error) { return buildFS(o.root) }},
+	"fs":     {build: func(o pluginOpts) (plugin.Spec, plugin.Handler, error) { return buildFS(o.root) }},
+	"pytest": {build: func(o pluginOpts) (plugin.Spec, plugin.Handler, error) { return buildPytest(o.root) }},
 }
 
 // echoHandler is the trivial reference plugin: it replies to any event with one
