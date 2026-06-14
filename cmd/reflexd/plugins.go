@@ -9,12 +9,25 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// builtinPlugins is the registry of in-repo plugin handlers this binary can run
-// as a child process (doc 29 Iteration 3: "built-in but launchable separately").
-// The daemon spawns `reflexd plugin <name>` over stdio; each entry is a separate
-// process. 3a ships "echo" (the smoke/test plugin); 3b adds "fs" and "pytest".
-var builtinPlugins = map[string]plugin.Handler{
-	"echo": echoHandler,
+// builtin is one in-repo plugin: its self-description (announced in hello) plus
+// its handler.
+type builtin struct {
+	spec    plugin.Spec
+	handler plugin.Handler
+}
+
+// builtinPlugins is the registry of in-repo plugins this binary can run as a
+// child process (doc 29 Iteration 3: "built-in but launchable separately"). The
+// daemon spawns `reflexd plugin <name>` over stdio; each entry is a separate
+// process. 3a ships "echo" (the smoke/reference plugin); 3b adds "fs"/"pytest".
+var builtinPlugins = map[string]builtin{
+	"echo": {
+		spec: plugin.Spec{
+			Name:   "echo",
+			Events: []plugin.EventDecl{{Kind: "echo.reply", Role: plugin.RoleOut}},
+		},
+		handler: echoHandler,
+	},
 }
 
 // echoHandler is the trivial reference plugin: it replies to any event with one
@@ -38,11 +51,11 @@ func pluginCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			name := args[0]
-			h, ok := builtinPlugins[name]
+			p, ok := builtinPlugins[name]
 			if !ok {
 				return fmt.Errorf("unknown plugin %q (built-in: %v)", name, pluginNames())
 			}
-			return plugin.Serve(name, h)
+			return plugin.Serve(p.spec, p.handler)
 		},
 	}
 }

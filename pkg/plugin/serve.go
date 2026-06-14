@@ -15,20 +15,23 @@ import (
 type Handler func(ev Event) ([]Emit, error)
 
 // Serve runs the plugin protocol over os.Stdin/os.Stdout until stdin closes (the
-// host went away) — the one call a Go plugin's main needs.
+// host went away) — the one call a Go plugin's main needs. The spec is the
+// plugin's self-description (its kinds + schemas), announced in the hello so the
+// daemon can wire and catalog it dynamically.
 //
 // IMPORTANT: stdout is the protocol channel. A plugin must write logs/diagnostics
 // to os.Stderr ONLY; anything on stdout that is not a Frame corrupts the stream.
-func Serve(name string, h Handler) error {
-	return serve(name, os.Stdin, os.Stdout, h)
+func Serve(spec Spec, h Handler) error {
+	return serve(spec, os.Stdin, os.Stdout, h)
 }
 
 // serve is the transport-agnostic loop (tested in-process over pipes).
-func serve(name string, r io.Reader, w io.Writer, h Handler) error {
+func serve(spec Spec, r io.Reader, w io.Writer, h Handler) error {
+	name := spec.Name
 	enc := json.NewEncoder(w)
 	dec := json.NewDecoder(bufio.NewReader(r))
 
-	if err := enc.Encode(Frame{Type: TypeHello, Protocol: Protocol, Name: name}); err != nil {
+	if err := enc.Encode(Frame{Type: TypeHello, Protocol: Protocol, Name: name, Events: spec.Events}); err != nil {
 		return fmt.Errorf("plugin %q: sending hello: %w", name, err)
 	}
 	var welcome Frame

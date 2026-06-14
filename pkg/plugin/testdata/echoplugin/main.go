@@ -5,7 +5,11 @@ package main
 import "github.com/kgatilin/reflex/pkg/plugin"
 
 func main() {
-	_ = plugin.Serve("echo", func(ev plugin.Event) ([]plugin.Emit, error) {
+	spec := plugin.Spec{
+		Name:   "echo",
+		Events: []plugin.EventDecl{{Kind: "echo.reply", Role: plugin.RoleOut}},
+	}
+	_ = plugin.Serve(spec, func(ev plugin.Event) ([]plugin.Emit, error) {
 		return []plugin.Emit{{Kind: "echo.reply", Payload: ev.Payload}}, nil
 	})
 }

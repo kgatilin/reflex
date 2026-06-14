@@ -24,7 +24,7 @@ type Client struct {
 
 	mu   sync.Mutex
 	seq  int
-	name string
+	spec Spec
 }
 
 // NewClient wraps an already-open duplex stream — r is read from the plugin, w
@@ -47,9 +47,9 @@ func NewClient(r io.Reader, w io.Writer, closer io.Closer) (*Client, error) {
 	if hello.Protocol != Protocol {
 		return nil, fmt.Errorf("plugin %q: protocol mismatch (host %d, plugin %d)", hello.Name, Protocol, hello.Protocol)
 	}
-	c.name = hello.Name
+	c.spec = Spec{Name: hello.Name, Events: hello.Events}
 	if err := c.enc.Encode(Frame{Type: TypeWelcome}); err != nil {
-		return nil, fmt.Errorf("plugin %q: sending welcome: %w", c.name, err)
+		return nil, fmt.Errorf("plugin %q: sending welcome: %w", c.spec.Name, err)
 	}
 	return c, nil
 }
@@ -98,26 +98,31 @@ func (c *Client) Invoke(ctx context.Context, ev Event) ([]Emit, error) {
 	c.seq++
 	id := strconv.Itoa(c.seq)
 	if err := c.enc.Encode(Frame{Type: TypeInvoke, ID: id, Event: &ev}); err != nil {
-		return nil, fmt.Errorf("plugin %q: sending invoke: %w", c.name, err)
+		return nil, fmt.Errorf("plugin %q: sending invoke: %w", c.spec.Name, err)
 	}
 	var res Frame
 	if err := c.dec.Decode(&res); err != nil {
-		return nil, fmt.Errorf("plugin %q: reading result: %w", c.name, err)
+		return nil, fmt.Errorf("plugin %q: reading result: %w", c.spec.Name, err)
 	}
 	if res.Type != TypeResult {
-		return nil, fmt.Errorf("plugin %q: expected %q, got %q", c.name, TypeResult, res.Type)
+		return nil, fmt.Errorf("plugin %q: expected %q, got %q", c.spec.Name, TypeResult, res.Type)
 	}
 	if res.ID != id {
-		return nil, fmt.Errorf("plugin %q: result id %q != invoke id %q", c.name, res.ID, id)
+		return nil, fmt.Errorf("plugin %q: result id %q != invoke id %q", c.spec.Name, res.ID, id)
 	}
 	if res.Error != "" {
-		return nil, fmt.Errorf("plugin %q: %s", c.name, res.Error)
+		return nil, fmt.Errorf("plugin %q: %s", c.spec.Name, res.Error)
 	}
 	return res.Emits, nil
 }
 
 // Name is the plugin's announced name (from its hello).
-func (c *Client) Name() string { return c.name }
+func (c *Client) Name() string { return c.spec.Name }
+
+// Spec is the plugin's announced self-description: the kinds it consumes/emits
+// and their schemas. The daemon reads it to wire the node and populate the
+// catalog dynamically.
+func (c *Client) Spec() Spec { return c.spec }
 
 // Close tears the plugin down via the closer supplied at construction.
 func (c *Client) Close() error {

@@ -16,9 +16,10 @@ func TestServeClientRoundTrip(t *testing.T) {
 	h2pR, h2pW := io.Pipe() // host -> plugin
 	p2hR, p2hW := io.Pipe() // plugin -> host
 
+	spec := Spec{Name: "echo", Events: []EventDecl{{Kind: "echo.reply", Role: RoleOut}}}
 	served := make(chan error, 1)
 	go func() {
-		served <- serve("echo", h2pR, p2hW, func(ev Event) ([]Emit, error) {
+		served <- serve(spec, h2pR, p2hW, func(ev Event) ([]Emit, error) {
 			return []Emit{{Kind: "echo.reply", Payload: ev.Payload}}, nil
 		})
 	}()
@@ -29,6 +30,9 @@ func TestServeClientRoundTrip(t *testing.T) {
 	}
 	if c.Name() != "echo" {
 		t.Errorf("Name = %q, want echo", c.Name())
+	}
+	if got := c.Spec().Out(); len(got) != 1 || got[0] != "echo.reply" {
+		t.Errorf("Spec().Out() = %v; want [echo.reply] — self-description must survive the handshake", got)
 	}
 
 	for i, in := range []string{`{"n":1}`, `{"n":2}`} {
@@ -53,7 +57,7 @@ func TestInvokeErrorPropagates(t *testing.T) {
 	h2pR, h2pW := io.Pipe()
 	p2hR, p2hW := io.Pipe()
 	go func() {
-		_ = serve("boom", h2pR, p2hW, func(Event) ([]Emit, error) {
+		_ = serve(Spec{Name: "boom"}, h2pR, p2hW, func(Event) ([]Emit, error) {
 			return nil, io.ErrUnexpectedEOF // any error
 		})
 	}()
