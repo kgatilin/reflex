@@ -13,8 +13,19 @@ import (
 // the readable log (no privileged plane, G8: audit, cost, every metric
 // is a fold over Events).
 type Engine struct {
-	log   []Event
-	decls []Decl
+	log []Event
+	// bodies maps a node name → its Reaction. It is the ONE part of the topology
+	// that is not a fact on the log: a Body is Go code, resolved by name from a
+	// process-level registry exactly as view-type builders (RegisterType) and
+	// provider adapters are code, not facts (changeset.go package doc). Apply
+	// commits a node's body here on a successful apply; foldTopology reattaches
+	// it by name. The wiring itself is fully recomputable from the log (G8).
+	bodies map[string]Reaction
+	// live is the cached live topology — a memoisation of foldTopology(log,
+	// bodies), nothing more (G8: it is recomputed from the log, never the truth).
+	// Apply rebuilds it after writing the changeset's facts; liveDecls lazily
+	// builds it on first read so a fresh engine reports an empty topology.
+	live []Decl
 	// frontier is the index of the next undispatched event in log. Drain
 	// advances it as it dispatches; re-running Drain resumes from here, so a
 	// crash mid-drain recovers by simply calling Drain again (G5).
@@ -35,30 +46,128 @@ type Engine struct {
 // New returns an empty engine: no topology, no events. Everything it
 // will ever hold arrives through Apply and Append.
 func New() *Engine {
-	return &Engine{}
+	return &Engine{bodies: map[string]Reaction{}}
 }
 
-// Apply runs the changeset pipeline (doc 20 via §7): the resulting graph
-// is validated as a whole — not each step — and applied atomically
-// between dispatches; intermediate states are inexpressible.
+// Apply runs the changeset pipeline (doc 20 / CONCEPT §8): it is the in-process
+// client of the changeset grammar. The resulting graph — the current live table
+// folded from the log PLUS the requested decls — is validated as a whole (not
+// each step), and on success the engine writes the facts the live table folds.
 //
-// In the doc-27 step-1 milestone this is the validation path only: it folds
-// the decls and runs the connectivity validator (Validate). If the topology
-// is connected it records the decls and returns nil; otherwise it returns a
-// ValidationError carrying the Report. No event is appended and no drain runs
-// — fact recording and dispatch belong to later steps. Callers that want the
-// Report regardless of connectivity should call Validate directly; that is the
-// cleaner read-only surface, and Apply is implemented on top of it.
-func (e *Engine) Apply(_ context.Context, decls ...Decl) error {
-	rep, err := Validate(decls...)
+// The grammar is on the log: a sys.topology.changeset.requested fact records
+// the ops; on a connected resulting graph the engine appends one object fact per
+// decl (sys.node.registered, sys.scope.declared, …) followed by
+// sys.topology.changeset.applied, and commits the nodes' bodies to the registry;
+// on a disconnected graph it appends sys.topology.changeset.rejected with the
+// reasons and writes no object facts (so the live table is unchanged by
+// construction) and returns a ValidationError carrying the Report. Validate
+// remains the cleaner read-only dry-run surface; Apply is the writing client.
+//
+// No drain runs here (doc 20: "appended as one batch between dispatches"): the
+// facts are dispatched on the next Drain, so an audit subscriber of the sys.*
+// kinds sees them like any other event.
+func (e *Engine) Apply(ctx context.Context, decls ...Decl) error {
+	live := e.liveDecls()
+	resulting := make([]Decl, 0, len(live)+len(decls))
+	resulting = append(resulting, live...)
+	resulting = append(resulting, decls...)
+
+	rep, err := Validate(resulting...)
 	if err != nil {
 		return err
 	}
+
+	req := e.appendSys("", SubjChangesetRequested, mustMarshal(changesetPayload{
+		Ops:       opsOf(decls),
+		Principal: "apply",
+	}))
+
 	if !rep.Connected {
+		e.appendSys(req.Trace.SpanID, SubjChangesetRejected, mustMarshal(rejectedPayload{
+			Changeset: req.Trace.SpanID,
+			Reasons:   rep.Suggestions,
+		}))
 		return &ValidationError{Report: rep}
 	}
-	e.decls = append(e.decls, decls...)
+
+	for _, op := range opsOf(decls) {
+		if subject, payload := factOf(op); subject != "" {
+			e.appendSys(req.Trace.SpanID, subject, payload)
+		}
+	}
+	for _, d := range decls {
+		if n, ok := d.(Node); ok && n.Body != nil {
+			e.bodies[n.Name] = n.Body
+		}
+	}
+	e.appendSys(req.Trace.SpanID, SubjChangesetApplied, mustMarshal(appliedPayload{
+		Changeset: req.Trace.SpanID,
+		Count:     len(decls),
+	}))
+
+	// The live table is exactly the fold of the facts just written (G8): rebuild
+	// the memoisation from the log so the hot dispatch paths read it in O(1).
+	e.live = foldTopology(e.log, e.bodies)
 	return nil
+}
+
+// liveDecls returns the cached live topology, lazily folding it from the log on
+// first read (a fresh engine has no facts → an empty topology). The cache is a
+// pure memoisation of foldTopology(log, bodies); Apply rebuilds it whenever the
+// topology facts change. Dynamic event.registered facts emitted DURING a drain
+// do not change the wiring, so they need no cache rebuild — the catalog path
+// folds them straight from the log (see catalogSchema).
+func (e *Engine) liveDecls() []Decl {
+	if e.live == nil {
+		e.live = foldTopology(e.log, e.bodies)
+	}
+	return e.live
+}
+
+// install records a topology directly into the live-table cache, bypassing the
+// changeset pipeline and its connectivity validation. It is a TEST seam:
+// white-box engine tests construct deliberately-disconnected topologies (no
+// ingress root, intentional dead-ends, raw cycles) to exercise the dispatcher,
+// scope, and projection mechanics in isolation — graphs Apply's validator is
+// built to reject. Production code goes through Apply, where the live table is a
+// genuine fold of the changeset facts (G8). install commits the nodes' bodies
+// and appends to the cache, the same shape a fold would produce.
+func (e *Engine) install(decls ...Decl) {
+	for _, d := range decls {
+		if n, ok := d.(Node); ok && n.Body != nil {
+			e.bodies[n.Name] = n.Body
+		}
+	}
+	e.live = append(e.liveDecls(), decls...)
+}
+
+// Topology returns a snapshot of the live topology — the fold of the changeset
+// facts (doc 20 "reads": the table behind `reflex topo show`). It is a copy, so
+// a caller cannot mutate the engine's cache.
+func (e *Engine) Topology() []Decl {
+	live := e.liveDecls()
+	return append([]Decl(nil), live...)
+}
+
+// appendSys appends an engine-written sys fact to the log (the control plane's
+// uprightness rule: only the engine writes facts). It mints a span, links the
+// optional cause (the changeset.requested event the facts hang under), and
+// carries no session/request — sys-class facts are session-less machinery.
+func (e *Engine) appendSys(cause, subject string, payload json.RawMessage) Event {
+	var causedBy []string
+	if cause != "" {
+		causedBy = []string{cause}
+	}
+	ev := Event{
+		Subject: subject,
+		Payload: payload,
+		Trace: Trace{
+			SpanID:   e.mintSpan(),
+			CausedBy: causedBy,
+		},
+	}
+	e.log = append(e.log, ev)
+	return ev
 }
 
 // ValidationError reports a topology that failed connectivity validation
@@ -169,7 +278,7 @@ func (e *Engine) markDispatched(idx int) {
 // and obligations of still-open instances are rebuilt so the depth-first pass
 // resumes exactly.
 func (e *Engine) rebuildScopes(nodes []Node) *scopeRuntime {
-	sr := newScopeRuntime(declaredScopes(e.decls), nodes)
+	sr := newScopeRuntime(declaredScopes(e.liveDecls()), nodes)
 	// Replay DISPATCHED events in log order, re-rooting and re-stamping
 	// membership. Obligations are not replayed (they are an in-flight quantity of
 	// a drain in progress); a fresh drain re-derives them as it dispatches. Closed
@@ -270,7 +379,7 @@ func (e *Engine) fanOut(ctx context.Context, idx int, cls, scope, kind string, n
 		views := Views(emptyViews{})
 		if len(n.Reads) > 0 {
 			views = projectionViews{
-				eval:        newProjectionEval(e.log, e.decls, sr),
+				eval:        newProjectionEval(e.log, e.liveDecls(), sr),
 				triggerSpan: ev.Trace.SpanID,
 			}
 		}
@@ -359,7 +468,7 @@ func (e *Engine) emitScopeFact(ctx context.Context, inst *scopeInstance, reason,
 	// now (the closure is appended just below, so the snapshot excludes it —
 	// correct: the closed fact is not part of the state it seals). Payload-blind:
 	// path → payload bytes.
-	pe := newProjectionEval(e.log, e.decls, sr)
+	pe := newProjectionEval(e.log, e.liveDecls(), sr)
 	state := pe.scopeState(inst.name, inst.rootSpan)
 	ev := Event{
 		Subject: placeSubject(inst.placeClass, subjectKind),
@@ -388,7 +497,7 @@ func (e *Engine) emitScopeFact(ctx context.Context, inst *scopeInstance, reason,
 // (conforms treats a nil schema as conforming). An unknown kind returns
 // (nil, false), and the caller skips the conformance check (opt-in dormancy).
 func (e *Engine) catalogSchema(kind string) (json.RawMessage, bool) {
-	cat := foldCatalog(e.decls, e.log)
+	cat := foldCatalog(e.liveDecls(), e.log)
 	return cat.schemaOf(kind)
 }
 
@@ -397,7 +506,7 @@ func (e *Engine) catalogSchema(kind string) (json.RawMessage, bool) {
 // live table Drain dispatches against is exactly the validated topology Apply
 // stored.
 func (e *Engine) liveNodes() []Node {
-	return foldNodes(e.decls)
+	return foldNodes(e.liveDecls())
 }
 
 // nodeMatches reports whether a node subscribes to an event with the given

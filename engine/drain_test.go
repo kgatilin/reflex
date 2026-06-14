@@ -79,7 +79,7 @@ func TestDrain_AcyclicChainFlowsToQuiescence(t *testing.T) {
 		// topology; this chain has a terminal (task.done) with no consumer, which
 		// Validate flags as a dead-end. The test exercises Drain, not Validate, so
 		// store the decls directly.
-		e.decls = append(e.decls, acyclicTopology()...)
+		e.install(acyclicTopology()...)
 		if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{"text":"hi"}`)); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
@@ -146,7 +146,7 @@ func TestDrain_AcyclicChainFlowsToQuiescence(t *testing.T) {
 func TestDrain_ReactionErrorBecomesFailedEventAndDrainCompletes(t *testing.T) {
 	ctx := context.Background()
 	e := New()
-	e.decls = append(e.decls, Node{
+	e.install(Node{
 		Name: "boom",
 		On:   []string{"test.msg"},
 		Body: ReactionFunc(func(_ context.Context, _ Event, _ Views) ([]Emit, error) {

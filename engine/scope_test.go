@@ -76,7 +76,7 @@ func TestDrain_BoundedLoopBudgetCapTerminates(t *testing.T) {
 	}
 
 	e := New()
-	e.decls = append(e.decls, decls...)
+	e.install(decls...)
 	if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestDrain_BoundedLoopBudgetCapTerminates(t *testing.T) {
 
 	// Determinism: replay yields the identical log.
 	e2 := New()
-	e2.decls = append(e2.decls, decls...)
+	e2.install(decls...)
 	if _, err := e2.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Append (replay): %v", err)
 	}
@@ -183,7 +183,7 @@ func TestDrain_JoinBarrierClosesOnceWhenAllResultsIn(t *testing.T) {
 			},
 		}
 		e := New()
-		e.decls = append(e.decls, decls...)
+		e.install(decls...)
 		if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{}`)); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
@@ -283,7 +283,7 @@ func TestDrain_StallReDrivesIntoNewChildCone(t *testing.T) {
 	}
 
 	e := New()
-	e.decls = append(e.decls, decls...)
+	e.install(decls...)
 	if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}

@@ -189,13 +189,13 @@ func TestCatalog_DynamicRegistrationGrowsTheFold(t *testing.T) {
 // conformanceTopology drives one node that emits a payload we control, with a
 // catalog schema (an EventKind decl) that the payload either satisfies or
 // violates. The node fires once on an ingress event. Like the drain tests, it
-// records decls directly (e.decls) and exercises Drain — the runtime
+// installs decls directly (the test seam) and exercises Drain — the runtime
 // payload-conformance path, not Validate — so the resolver's On is the ingress
 // event's kind tail (matching the dispatch convention of drain_test.go).
 func conformanceTopology(t *testing.T, emit Emit, schema json.RawMessage) *Engine {
 	t.Helper()
 	e := New()
-	e.decls = append(e.decls,
+	e.install(
 		EventKind{Kind: "echo.done", Schema: schema},
 		Node{
 			Name:  "resolver",

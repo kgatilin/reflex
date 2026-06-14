@@ -108,7 +108,7 @@ func TestProjection_KVAndLogViewsReproduceTheFold(t *testing.T) {
 	}
 
 	e := New()
-	e.decls = append(e.decls, decls...)
+	e.install(decls...)
 	if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestProjection_ReadAtTriggerIsolationAcrossParallelRequestCones(t *testing.
 	}
 
 	e := New()
-	e.decls = append(e.decls, decls...)
+	e.install(decls...)
 	// Two ingress events ⇒ two parallel request cones in one Drain.
 	if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{"tag":"A"}`)); err != nil {
 		t.Fatalf("Append A: %v", err)
@@ -318,7 +318,7 @@ func TestProjection_PromoteViaClosure(t *testing.T) {
 	}
 
 	e := New()
-	e.decls = append(e.decls, decls...)
+	e.install(decls...)
 	if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{"tag":"A"}`)); err != nil {
 		t.Fatalf("Append A: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestProjection_PromoteViaClosure(t *testing.T) {
 	if lastSpan == "" {
 		t.Fatal("no state.updated.project_context on the log")
 	}
-	pe := newProjectionEval(collect(e), e.decls, e.rebuildScopes(e.liveNodes()))
+	pe := newProjectionEval(collect(e), e.liveDecls(), e.rebuildScopes(e.liveNodes()))
 	_, events, ok := pe.matched("global_state", lastSpan)
 	if !ok {
 		t.Fatal("global_state projection did not resolve")
@@ -390,7 +390,7 @@ func TestProjection_PromoteViaClosure(t *testing.T) {
 	// each request instance holds exactly its own found (already asserted via the
 	// closure snapshots above; this re-checks via the built-in scopeState fold).
 	srAfter := e.rebuildScopes(e.liveNodes())
-	peAfter := newProjectionEval(collect(e), e.decls, srAfter)
+	peAfter := newProjectionEval(collect(e), e.liveDecls(), srAfter)
 	var reqInstances []string
 	for k := range srAfter.instances {
 		if srAfter.instances[k].name == "request" {

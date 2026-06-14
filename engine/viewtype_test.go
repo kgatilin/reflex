@@ -55,7 +55,7 @@ func TestViewType_CustomBuilderResolvesThroughViewAs(t *testing.T) {
 
 	ctx := context.Background()
 	e := New()
-	e.decls = append(e.decls, decls...)
+	e.install(decls...)
 	if _, err := e.Append(ctx, "app.ingress.cli.task", []byte(`{}`)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
