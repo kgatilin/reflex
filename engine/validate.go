@@ -82,6 +82,17 @@ type Report struct {
 	// ascending by pattern.
 	DeadSubscriptions []string
 
+	// UnknownViewTypes are projection names whose Type has no registered builder
+	// (doc 26 §4b): a view declared with a type the process never registered, so
+	// it can never be resolved. Symmetric with the catalog's unknown-kind check.
+	// Sorted ascending by projection name.
+	UnknownViewTypes []string
+
+	// DanglingReads are "node:view" pairs where a node's Reads names a view that
+	// is not a declared Projection (doc 26 §4b): the body would always get the
+	// null object. Sorted ascending.
+	DanglingReads []string
+
 	// Suggestions are human-readable bridge proposals (doc 27 §1/§5), e.g.
 	// "kind X is a dead-end — add an llm node that consumes X …".
 	Suggestions []string
@@ -169,6 +180,14 @@ func Validate(decls ...Decl) (Report, error) {
 		rep.DeadSubscriptions = deadSubscriptions(consumers, cat)
 	}
 
+	// View-type checks (doc 26 §4b): a projection's Type must be registered, and
+	// a node's Reads must name a declared projection. Unlike the catalog these
+	// are NOT opt-in — they run whenever a projection/Read exists, because an
+	// unregistered type or a dangling read is always a wiring bug (the view
+	// resolves to nil), never a not-yet-adopted layer.
+	rep.UnknownViewTypes = unknownViewTypes(decls)
+	rep.DanglingReads = danglingReads(decls, nodes)
+
 	rep.Suggestions = suggestions(rep)
 	rep.Connected = len(rep.DeadEnds) == 0 &&
 		len(rep.UnreachableNodes) == 0 &&
@@ -177,7 +196,9 @@ func Validate(decls ...Decl) (Report, error) {
 		len(rep.StalledClosures) == 0 &&
 		len(rep.CoRootedScopes) == 0 &&
 		len(rep.UnknownKinds) == 0 &&
-		len(rep.DeadSubscriptions) == 0
+		len(rep.DeadSubscriptions) == 0 &&
+		len(rep.UnknownViewTypes) == 0 &&
+		len(rep.DanglingReads) == 0
 
 	// allowlistLint is a runtime check, not a static one: it compares an
 	// observed emit against the node's declared Emits and can only be made on
@@ -211,6 +232,44 @@ func foldConsumers(decls []Decl, nodes []Node) []consumer {
 			out = append(out, consumer{name: "projection:" + p.Name, on: p.On})
 		}
 	}
+	return out
+}
+
+// unknownViewTypes returns the names of declared projections whose Type has no
+// registered builder (doc 26 §4b). Sorted ascending.
+func unknownViewTypes(decls []Decl) []string {
+	var out []string
+	for _, d := range decls {
+		p, ok := d.(Projection)
+		if !ok {
+			continue
+		}
+		if !typeRegistered(p.Type) {
+			out = append(out, p.Name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// danglingReads returns "node:view" pairs where a node's Reads names a view
+// that is not a declared Projection (doc 26 §4b). Sorted ascending.
+func danglingReads(decls []Decl, nodes []Node) []string {
+	declared := map[string]struct{}{}
+	for _, d := range decls {
+		if p, ok := d.(Projection); ok {
+			declared[p.Name] = struct{}{}
+		}
+	}
+	var out []string
+	for _, n := range nodes {
+		for _, r := range n.Reads {
+			if _, ok := declared[r]; !ok {
+				out = append(out, n.Name+":"+r)
+			}
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 

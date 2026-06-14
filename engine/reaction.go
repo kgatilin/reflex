@@ -28,10 +28,15 @@ func (f ReactionFunc) React(ctx context.Context, ev Event, views Views) ([]Emit,
 // the call's causal past" are the same predicate; raw log access does
 // not exist for reactions.
 type Views interface {
-	// KV returns a kv-shaped view by its declared name.
+	// Value returns the typed view value by its declared name (doc 26 §4b):
+	// the projection's matched events run through its Type's builder, as `any`.
+	// A node reads it type-safely through the generic ViewAs helper. An unknown
+	// name or unregistered type yields nil (the null object).
+	Value(name string) any
+	// KV returns a kv-typed view by its declared name — sugar over Value.
 	KV(name string) KV
-	// Log returns a log-shaped view by its declared name: the matched
-	// events of the declaration's horizon, in log order.
+	// Log returns a log-typed view by its declared name: the matched
+	// events of the declaration's horizon, in log order — sugar over Value.
 	Log(name string) []Event
 }
 

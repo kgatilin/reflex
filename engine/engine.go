@@ -437,6 +437,7 @@ func scopeAdmits(in, scope string) bool {
 // trigger's causal position.
 type emptyViews struct{}
 
+func (emptyViews) Value(string) any   { return nil }
 func (emptyViews) KV(string) KV       { return emptyKV{} }
 func (emptyViews) Log(string) []Event { return nil }
 

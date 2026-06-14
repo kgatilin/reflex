@@ -418,29 +418,94 @@ func memberOf(membership []string, key string) bool {
 	return false
 }
 
+// TypeBuilder turns a projection's matched events (selected payload-blind by
+// the engine: the backward caused_by walk bounded by the horizon, On-matched,
+// in log order) into the view value handed to a reaction (doc 26 §4b). The
+// builder is the type-specific shaping layer: "kv"/"log" are payload-blind, a
+// richer type (e.g. "llm.history") may read payloads — but it is still a pure
+// function of the matched events, so a view stays recomputable from the log
+// (G8). It returns `any`; a node reads it type-safely through ViewAs.
+type TypeBuilder func(p Projection, events []Event) any
+
+// typeBuilders is the open registry of view types (doc 26 §4b). "kv" and "log"
+// are registered here; packages register more in init (nodes/llm →
+// "llm.history"). Registration is process-global and static, like the provider
+// adapter registry — a collision is a programming error.
+var typeBuilders = map[string]TypeBuilder{
+	TypeKV:  func(p Projection, events []Event) any { return p.foldKV(events) },
+	TypeLog: func(_ Projection, events []Event) any { return append([]Event(nil), events...) },
+}
+
+// RegisterType installs a view-type builder under name (doc 26 §4b). Re-using a
+// name panics — view-type wiring is static. Packages call this from init so the
+// type is available before any topology is applied.
+func RegisterType(name string, b TypeBuilder) {
+	if _, ok := typeBuilders[name]; ok {
+		panic("engine: view type " + name + " already registered")
+	}
+	typeBuilders[name] = b
+}
+
+// typeRegistered reports whether a view type has a registered builder — the
+// validator uses it to reject a projection whose Type is unknown (doc 26 §4b).
+func typeRegistered(name string) bool {
+	if name == "" {
+		name = TypeKV // empty defaults to kv
+	}
+	_, ok := typeBuilders[name]
+	return ok
+}
+
+// ViewAs resolves a named view and asserts it to T — the type-safe read surface
+// a node body uses (doc 26 §4b): `h := engine.ViewAs[llm.History](views, "history")`.
+// An unresolved name or a type mismatch yields T's zero value, so a body never
+// panics on a missing/misdeclared view (it sees an empty view, the null object).
+func ViewAs[T any](views Views, name string) T {
+	if t, ok := views.Value(name).(T); ok {
+		return t
+	}
+	var zero T
+	return zero
+}
+
 // projectionViews is the real Views implementation attached at dispatch (doc 24
-// §6), replacing emptyViews: KV(name) and Log(name) resolve the named declared
-// projection and evaluate it for THIS trigger's causal position. Names not in
-// the node's Reads are still resolvable (the engine does not enforce the Reads
-// allowlist at read time — a node only ever asks for what it declared), but an
-// unknown projection name yields an empty view (the null object).
+// §6 / 26 §4b), replacing emptyViews: Value(name) resolves the named declared
+// projection, evaluates its matched events for THIS trigger's causal position,
+// and runs the Type's builder. KV/Log are sugar over Value for the two built-in
+// types. Names not in the node's Reads are still resolvable (the engine does not
+// enforce the Reads allowlist at read time — a node only ever asks for what it
+// declared); an unknown name yields nil (an empty view, the null object).
 type projectionViews struct {
 	eval        *projectionEval
 	triggerSpan string
 }
 
-func (v projectionViews) KV(name string) KV {
+func (v projectionViews) Value(name string) any {
 	p, events, ok := v.eval.matched(name, v.triggerSpan)
-	if !ok {
-		return emptyKV{}
-	}
-	return p.foldKV(events)
-}
-
-func (v projectionViews) Log(name string) []Event {
-	_, events, ok := v.eval.matched(name, v.triggerSpan)
 	if !ok {
 		return nil
 	}
-	return events
+	t := p.Type
+	if t == "" {
+		t = TypeKV
+	}
+	b, ok := typeBuilders[t]
+	if !ok {
+		return nil
+	}
+	return b(p, events)
+}
+
+func (v projectionViews) KV(name string) KV {
+	if kv, ok := v.Value(name).(KV); ok {
+		return kv
+	}
+	return emptyKV{}
+}
+
+func (v projectionViews) Log(name string) []Event {
+	if log, ok := v.Value(name).([]Event); ok {
+		return log
+	}
+	return nil
 }

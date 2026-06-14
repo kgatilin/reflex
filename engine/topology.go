@@ -91,23 +91,29 @@ type Projection struct {
 	On []string
 	// In is the horizon the backward walk stops at.
 	In Horizon
-	// Shape is kv or log — deliberately final (§6); anything richer is a
-	// reaction emitting state.updated.{path} facts served by a generic kv.
-	Shape Shape
-	// Key and Value are payload selectors for the kv shape, e.g.
-	// "payload.path" / "payload.sha". Ignored for the log shape.
+	// Type names the view-type builder that turns the matched events into the
+	// view value (doc 26 §4b — generalises the old kv|log Shape into an open
+	// registry). "kv" and "log" are built in (their builders are the
+	// payload-blind folds below); packages register richer types
+	// (e.g. nodes/llm registers "llm.history"). The engine still does only the
+	// payload-blind selection — backward walk + On-match → matched events — and
+	// the registered builder does the type-specific shaping (RegisterType). An
+	// empty Type defaults to "kv" for back-compatibility.
+	Type string
+	// Key and Value are payload selectors for the kv type, e.g.
+	// "payload.path" / "payload.sha". Ignored by the log type; richer types
+	// read them as builder params if they wish.
 	Key   string
 	Value string
 }
 
 func (Projection) isDecl() {}
 
-// Shape is a projection's view shape (§6): two only.
-type Shape string
-
+// Built-in view types (doc 26 §4b). These are registered names, not a closed
+// enum: Type is an open string and packages register more via RegisterType.
 const (
-	ShapeKV  Shape = "kv"
-	ShapeLog Shape = "log"
+	TypeKV  = "kv"
+	TypeLog = "log"
 )
 
 // Horizon bounds a projection's backward walk (§6).

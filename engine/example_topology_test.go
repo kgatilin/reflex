@@ -172,7 +172,7 @@ func exampleTopology() []Decl {
 			Name:  "project_context",
 			On:    []string{"sys.state.updated.project.context.found"},
 			In:    HorizonGlobal,
-			Shape: ShapeKV,
+			Type: TypeKV,
 		},
 		Projection{
 			Name: "task_context",
@@ -183,7 +183,7 @@ func exampleTopology() []Decl {
 				"state.updated.status",
 			},
 			In:    HorizonRequest,
-			Shape: ShapeKV,
+			Type: TypeKV,
 		},
 		Projection{
 			Name: "plan_view",
@@ -192,7 +192,7 @@ func exampleTopology() []Decl {
 				"state.updated.plan.>",
 			},
 			In:    HorizonRequest,
-			Shape: ShapeKV,
+			Type: TypeKV,
 		},
 	}
 }

@@ -102,9 +102,9 @@ func TestProjection_KVAndLogViewsReproduceTheFold(t *testing.T) {
 		reader,
 		// kv view over the per-scope state writes, keyed by path (default Key),
 		// valued by the whole payload (default Value).
-		Projection{Name: "task_state", On: []string{"state.updated.>"}, In: HorizonRequest, Shape: ShapeKV},
+		Projection{Name: "task_state", On: []string{"state.updated.>"}, In: HorizonRequest, Type: TypeKV},
 		// log view: the matched state writes in log order.
-		Projection{Name: "task_log", On: []string{"state.updated.>"}, In: HorizonRequest, Shape: ShapeLog},
+		Projection{Name: "task_log", On: []string{"state.updated.>"}, In: HorizonRequest, Type: TypeLog},
 	}
 
 	e := New()
@@ -202,7 +202,7 @@ func TestProjection_ReadAtTriggerIsolationAcrossParallelRequestCones(t *testing.
 		resolver,
 		tagger,
 		reader,
-		Projection{Name: "task_state", On: []string{"state.updated.>"}, In: HorizonRequest, Shape: ShapeKV},
+		Projection{Name: "task_state", On: []string{"state.updated.>"}, In: HorizonRequest, Type: TypeKV},
 	}
 
 	e := New()
@@ -314,7 +314,7 @@ func TestProjection_PromoteViaClosure(t *testing.T) {
 		finder,
 		promoter,
 		// global state view: folds the global-horizon state writes.
-		Projection{Name: "global_state", On: []string{"state.updated.>"}, In: HorizonGlobal, Shape: ShapeKV},
+		Projection{Name: "global_state", On: []string{"state.updated.>"}, In: HorizonGlobal, Type: TypeKV},
 	}
 
 	e := New()
@@ -374,7 +374,7 @@ func TestProjection_PromoteViaClosure(t *testing.T) {
 	if !ok {
 		t.Fatal("global_state projection did not resolve")
 	}
-	kv := Projection{Shape: ShapeKV}.foldKV(events)
+	kv := Projection{Type: TypeKV}.foldKV(events)
 	pcRaw, ok := kv.Get("state.updated.project_context")
 	if !ok {
 		t.Fatalf("global_state has no project_context — keys %v", kv.Keys())
