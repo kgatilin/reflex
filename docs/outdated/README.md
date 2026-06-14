@@ -1,0 +1,130 @@
+# reflex design documentation
+
+This directory captures the full mental model and per-phase design of
+reflex — an event-sourced agent runtime in which every component (handlers,
+control plane, audit, analysis, permissions, human feedback) lives as a
+subscriber on a single bus, with no synchronous primitives.
+
+**Start with [`24-concept.md`](./24-concept.md)** — the consolidated
+concept document: every settled decision and every open question, with
+the legacy→converged supersession table. The per-topic documents below
+are the "why" behind each section. For a one-page cheat sheet of the
+legacy-era model see [`00-reference.md`](./00-reference.md) (partially
+superseded; its own warning applies). If you just want to drive reflex
+from another application, jump to
+[`09-embedding-api.md`](./09-embedding-api.md). For phase status, see
+[`10-phase-roadmap.md`](./10-phase-roadmap.md); for the live bootstrap
+queue, [`23-bootstrap-roadmap.md`](./23-bootstrap-roadmap.md).
+
+## Recommended reading order
+
+1. [`01-mental-model.md`](./01-mental-model.md) —
+   the synthesis: events-only, graph ≡ subscription table, bus self-hosts,
+   projection-as-truth, no privileged plane.
+2. [`02-handlers-and-schemas.md`](./02-handlers-and-schemas.md) —
+   the YAML grammar, self-describing handlers, event schemas, the
+   terminal-event invariant.
+3. [`03-bus-and-projection.md`](./03-bus-and-projection.md) —
+   the bus contract, meta-events, the projection store, the aggregator
+   pattern, CLI wait-predicates.
+4. [`04-static-and-runtime-analysis.md`](./04-static-and-runtime-analysis.md) —
+   load-time cycle detection (Tarjan), runtime trace analyzer, archmotif
+   adapter, objective function, the planned migration to live-table
+   analysis.
+5. [`05-control-plane-as-events.md`](./05-control-plane-as-events.md) —
+   subscriptions themselves as event streams; YAML config as a seeded
+   stream; compression / audit / enforcement as ordinary handlers.
+6. [`06-permissions-and-scopes.md`](./06-permissions-and-scopes.md) —
+   declarative scope + permissions, permission events, rogue-handler
+   containment, recursive grant.
+7. [`07-archmotif-as-live-subscriber.md`](./07-archmotif-as-live-subscriber.md) —
+   archmotif as a bus-resident handler that maintains the runtime graph
+   projection and drives the compression cycle.
+8. [`08-optimization-as-rewrite.md`](./08-optimization-as-rewrite.md) —
+   compression passes as graph rewrites that emit subscription events;
+   feedback-as-rule; cost function; scope gating.
+9. [`09-embedding-api.md`](./09-embedding-api.md) —
+   the externally-facing API for foreign applications: Go `pkg/embed`,
+   HTTP daemon, optional gRPC.
+10. [`10-phase-roadmap.md`](./10-phase-roadmap.md) —
+    every phase with status, scope, and dependencies.
+11. [`11-domain-model.md`](./11-domain-model.md) —
+    the distilled model: events, reactions, projections; errors-as-events,
+    state-as-convention, scopes as structured concurrency over a causal DAG.
+12. [`12-react-experiment.md`](./12-react-experiment.md) —
+    findings from a live ReAct agent built from atomic nodes: what the
+    three-concept model buys and which conventions are still missing.
+13. [`13-event-taxonomy.md`](./13-event-taxonomy.md) —
+    the wire shape: subjects (scope + kind), the trace envelope (correlation +
+    causation), session resolution, and projections as wildcard subscriptions.
+14. [`14-target-coding-agent.md`](./14-target-coding-agent.md) —
+    the first end-to-end target: a minimal coding agent (read/edit/write/search
+    + fmt/lint) built from out-of-process tool plugins, scoped to its workspace.
+15. [`15-primitive-reduction.md`](./15-primitive-reduction.md) *(draft)* —
+    collapsing the node vocabulary to two primitives (`llm` + `tool`); fan-out
+    synchronization as the `scope.closed` projection, not a node.
+16. [`16-engine-architecture.md`](./16-engine-architecture.md) *(draft)* —
+    the engine side of the contract: append + dispatch, the progress
+    projection, scope rooting/nesting, the closure-predicate algebra
+    (waitgroup/errgroup/race/quorum on the bus), cancellation, budgets, the
+    engine event catalog, and the explicit guarantee list.
+17. [`17-quiescence-prior-art.md`](./17-quiescence-prior-art.md) *(draft)* —
+    Timely/Naiad progress tracking mapped onto reflex: what the causal-cone
+    geometry buys back (could-result-in, loop counters, the distributed
+    exchange), the obligation-count quiescence algorithm, and uprightness ⇒
+    engine-stamped `caused_by`.
+18. [`18-pipeline-walkthrough.md`](./18-pipeline-walkthrough.md) *(draft)* —
+    a conventional assistant pipeline (intent → enrichment barrier →
+    reasoning loop → post-answer hooks) modeled end-to-end on scopes with
+    zero new primitives; surfaces two subject-grammar refinements (state
+    paths in the subject, typed closure kinds for named scopes).
+19. [`19-projections.md`](./19-projections.md) *(draft)* —
+    the projection interface: declared folds over a causal horizon
+    (kv/log shapes, `in:` as walk boundary), `reads:` access positioned
+    at the trigger, control-plane registration, sessions as causal
+    chains; carries doc 14's read-before-edit guard end to end.
+20. [`20-topology-management.md`](./20-topology-management.md) *(draft)* —
+    doc 05 re-founded on the converged model: changeset pipeline
+    (requested → facts | rejected, engine-only fact writes),
+    resulting-graph validation with reject/lint severities, scopes and
+    projections as managed objects, pin-at-root declarations with
+    per-instance intervention events, and the daemon CLI surface.
+21. [`21-operator-exercise.md`](./21-operator-exercise.md) *(draft)* —
+    dogfooding stress-test: improving the coding agent through topology
+    changesets alone (gates, subagents-as-horizons, lanes, judges,
+    crystallisation), and the ranked gaps it surfaces — context
+    budget/view compaction, log payload weight, the mid-flight steering
+    rule, `sys.node.updated`, streaming as a sink concern, eval forking.
+22. [`22-bootstrap-self-hosting.md`](./22-bootstrap-self-hosting.md) *(draft)* —
+    the self-hosting plan: a stage-0 hand-built kernel (multi-model llm
+    body over Vertex AI, rooted fs plugin with a crutch guard,
+    build/test/vet plugins) and the self-build order by which reflex
+    implements its own roadmap; safety stance — no bash tool, no
+    self-wiring, operator-held commit and changeset rights.
+23. [`23-bootstrap-roadmap.md`](./23-bootstrap-roadmap.md) *(live)* —
+    the operational bootstrap document: what shipped of the stage-0
+    kernel, the per-task operating loop, the task queue (calibration
+    adapters → scopes/obligations → projections → changesets → onward),
+    and the cost tracking/optimisation protocol (`llm.usage` →
+    `reflex costs`, the lever order, the per-task cost log).
+24. [`24-concept.md`](./24-concept.md) *(consolidation)* —
+    the single normative index: the settled model (three concepts, the
+    envelope, two primitives, the engine and its guarantees, projections,
+    changesets, conventions, the coding-agent/bootstrap stance, the
+    legacy→converged supersession table) and the open questions (ranked
+    design gaps, recorded leans, explicit deferrals).
+25. [`25-regulation-concept.md`](./25-regulation-concept.md) *(concept)* —
+    the forward-looking regulation target — a self-balancing agent system
+    governed by one conserved quantity ("energy") — and the proof that it
+    needs no fourth primitive: every regulatory action reduces to three
+    control-plane verbs (config-fact, changeset, intervention) over a
+    projection read surface, with the regulator running *externally* for
+    now and crystallisable inward later.
+
+## Convention
+
+Each document opens with a 2–3 line summary, uses concrete YAML and
+event-payload snippets where possible, and cross-links to neighbours. The
+documents describe the system's design; they intentionally avoid
+conversation-log shape ("we decided", "the user said") and read as a
+specification a future reader can pick up cold.

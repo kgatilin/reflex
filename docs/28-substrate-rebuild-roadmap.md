@@ -1,11 +1,11 @@
 # 28 — Substrate rebuild roadmap: from connectivity validation to a running reconciler (LIVE)
 
 > **Status: LIVE / operational.** The staged plan that turns the converged
-> substrate (docs [24](./24-concept.md)/[26](./26-bare-substrate.md)) into a
+> substrate (docs [24](./outdated/24-concept.md)/[26](./26-bare-substrate.md)) into a
 > running state-defined agent (doc [27](./27-state-defined-agent.md)). Doc 27
 > is the design capture; **this is the tracker the rebuild runs from** — what
 > shipped and the next stages, updated as each lands. Mirrors the
-> [22](./22-bootstrap-self-hosting.md)(plan)/[23](./23-bootstrap-roadmap.md)(live)
+> [22](./outdated/22-bootstrap-self-hosting.md)(plan)/[23](./outdated/23-bootstrap-roadmap.md)(live)
 > split, one substrate generation later.
 
 ---
@@ -64,7 +64,7 @@ graph-in contract, matrix internal). reflex depends on it via
 - **Validation is the engine's job**, expressed as matrix algebra over a
   graph; the contract to ArchMotif is a graph (doc 27 §5).
 - **The domain is technology-agnostic** — `subjectMatch` is ours; the
-  "NATS grammar" wording in [24 §2](./24-concept.md) is a leak to clean up
+  "NATS grammar" wording in [24 §2](./outdated/24-concept.md) is a leak to clean up
   when docs are next touched.
 
 ## Stages
@@ -119,7 +119,7 @@ The doc-24 §5 / doc-26 runtime.
   free-standing projection.
 - **Declared projections are views over states**: kv/log views via a backward
   walk over `caused_by` to the horizon (`request` / `session` / `global`),
-  attached as `Views` at dispatch ([24 §6](./24-concept.md)); a view may join
+  attached as `Views` at dispatch ([24 §6](./outdated/24-concept.md)); a view may join
   the node's own scope state with an ancestor/`global` state.
 - **Closure carries the state snapshot**: extend the 2b `scope.X.closed`
   payload to include the cone's final state, so a parent-scope consumer can
@@ -243,7 +243,7 @@ The doc-24 §5 / doc-26 runtime.
 - `pkg/graphval` vs `graph` naming (chose `graphval` — ArchMotif already
   has `internal/graph`); reflex-side import could alias to `graph` if
   preferred.
-- [24 §2](./24-concept.md) "NATS grammar" wording cleanup (domain-agnostic).
+- [24 §2](./outdated/24-concept.md) "NATS grammar" wording cleanup (domain-agnostic).
 - Merge/push policy: the two feature branches stay local until the operator
   decides to merge.
 
@@ -254,7 +254,7 @@ The doc-24 §5 / doc-26 runtime.
 - [26-bare-substrate.md](./26-bare-substrate.md) — scope as projection,
   termination as a scope budget (cap + graceful fact, §3d) with the
   connectivity×budget closure guarantee (§3f), the LLM emits events.
-- [24-concept.md](./24-concept.md) — the settled model; §5 (scopes/
+- [24-concept.md](./outdated/24-concept.md) — the settled model; §5 (scopes/
   quiescence), §6 (projections).
-- [23-bootstrap-roadmap.md](./23-bootstrap-roadmap.md) — the prior-generation
+- [23-bootstrap-roadmap.md](./outdated/23-bootstrap-roadmap.md) — the prior-generation
   live roadmap this one supersedes in track.

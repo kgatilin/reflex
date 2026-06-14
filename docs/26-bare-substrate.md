@@ -1,7 +1,7 @@
 # 26 — The bare substrate: scope as a built-in projection, termination is a scope budget, the LLM emits events not tool-calls, the event catalog is self-hosted
 
 > **Status: DRAFT / proposed.** Converged in a design session. It pushes the
-> [24](./24-concept.md) reduction one level deeper and *subtracts* in three
+> [24](./outdated/24-concept.md) reduction one level deeper and *subtracts* in three
 > places: it removes "scope" as a fourth managed kind, moves cycle-bounding
 > off a per-event dispatch gate onto a scope budget (enforced by a per-scope
 > cap, with a terminal `budget_exhausted` fact for graceful shutdown — §3d),
@@ -11,16 +11,16 @@
 > self-hosted as a projection over `event.registered` (§4a) — without a new
 > primitive. It also fixes the per-scope state model: **one state per scope**,
 > written locally, promoted to a parent only through closure (§2a). This
-> supersedes specific clauses of [24 §4/§5/§7](./24-concept.md) and restates
-> one assumption of [25 §6](./25-regulation-concept.md); the supersession
+> supersedes specific clauses of [24 §4/§5/§7](./outdated/24-concept.md) and restates
+> one assumption of [25 §6](./outdated/25-regulation-concept.md); the supersession
 > table is §5. It adds no primitive — every move is the standing test
-> ([24 §D](./24-concept.md)) applied harder than before.
+> ([24 §D](./outdated/24-concept.md)) applied harder than before.
 
 ---
 
 ## 1. Thesis: three primitives, two mechanisms, nothing privileged below them
 
-Restate the settled model ([24 §1](./24-concept.md)) at the lowest level,
+Restate the settled model ([24 §1](./outdated/24-concept.md)) at the lowest level,
 in the operator's words:
 
 ```
@@ -39,13 +39,13 @@ bodies (`llm`, `tool`); the engine's built-ins are *more instances of the
 same three primitives*, not new kinds. The operator sees state (updating →
 final) and events; the engine authors some of that state, but it is state
 on the same log, foldable by anyone (G8, the uprightness rule of
-[24 §2/§7](./24-concept.md)).
+[24 §2/§7](./outdated/24-concept.md)).
 
 This document carries that sentence to its conclusion in three steps.
 
 ## 2. Scope is a built-in projection, not a fourth managed kind
 
-[24 §4](./24-concept.md) already says the load-bearing thing: *"the richness
+[24 §4](./outdated/24-concept.md) already says the load-bearing thing: *"the richness
 lives in the progress projection over the `caused_by` DAG — where loops,
 barriers, budgets, cancellation, and orphan detection all come from."*
 Finish the sentence: **a scope *is* that projection, plus the events it
@@ -55,17 +55,17 @@ Decompose a scope and every part lands on a primitive:
 
 | Part of "scope" | Reduces to |
 |---|---|
-| membership / cone geometry (the three-clause rule, [24 §5](./24-concept.md)) | a fold over `caused_by` — a **projection** |
+| membership / cone geometry (the three-clause rule, [24 §5](./outdated/24-concept.md)) | a fold over `caused_by` — a **projection** |
 | obligation count (quiescence detection) | a counting fold — a **projection** |
-| `scope.closed` / `budget_low` / `orphaned` | a built-in **reaction** emitting at the fixpoint / threshold crossing ([24 §1](./24-concept.md): "threshold crossings are announced back onto the log as events") |
-| sealing — "the next firing never emits into the closed cone" | already *geometry, not discipline* ([24 §5](./24-concept.md) second clause): the closure's consumer lives in the parent cone by construction. No mechanism. |
+| `scope.closed` / `budget_low` / `orphaned` | a built-in **reaction** emitting at the fixpoint / threshold crossing ([24 §1](./outdated/24-concept.md): "threshold crossings are announced back onto the log as events") |
+| sealing — "the next firing never emits into the closed cone" | already *geometry, not discipline* ([24 §5](./outdated/24-concept.md) second clause): the closure's consumer lives in the parent cone by construction. No mechanism. |
 
-**Consequence for [24 §7](./24-concept.md).** The "four managed object
+**Consequence for [24 §7](./outdated/24-concept.md).** The "four managed object
 kinds — nodes, subscriptions, scopes, projections" loses one. **Three
 remain: nodes, subscriptions, projections.** A scope is a *built-in
 projection instance*; its budget/deadline/closure-predicate are config on
 that instance (already runtime-editable log facts via the interventions of
-[20](./20-topology-management.md)/[24 §5](./24-concept.md)), not a separate
+[20](./outdated/20-topology-management.md)/[24 §5](./outdated/24-concept.md)), not a separate
 object class.
 
 **The operator's framing.** `scope.X.closed` is the engine's built-in
@@ -135,7 +135,7 @@ never sideways through scopes**: the reduce step of a map over child cones.
 A **live** cross-scope write is impossible without breaking an invariant we
 hold: it would have to strip `caused_by` (re-root the event out of its cone)
 or declare a subject class ambient despite its causality (a sender claim —
-exactly what the [24 §2 amendment](./24-concept.md) "membership is topology,
+exactly what the [24 §2 amendment](./outdated/24-concept.md) "membership is topology,
 not a sender claim" forbids). So there is no live up-write; the old
 `sys.state.updated.*` promotion of [27 §4](./27-state-defined-agent.md) is
 retired in favour of closure-propagation.
@@ -166,11 +166,11 @@ this section hung it on "deterministic guard nodes"; that was wrong.
 a cycle of deterministic nodes is no more bounded than a cycle through an
 LLM. The node's nature is irrelevant.
 
-What bounds a cycle is a **scope budget** ([24 §5](./24-concept.md), "loops
+What bounds a cycle is a **scope budget** ([24 §5](./outdated/24-concept.md), "loops
 are budgets"): a fold counts a kind's occurrences within a cone, and the
 loop *is* that count. Termination is a property of the **scope that covers
 the cycle**, never of a node on it. `dispatch` still sheds its *per-event*
-"enforcing budgets" clause ([24 §4](./24-concept.md)) — but the bound moves
+"enforcing budgets" clause ([24 §4](./outdated/24-concept.md)) — but the bound moves
 up to the scope, not out to node attributes.
 
 ### 3a. The static check: every cycle is covered by a budgeted scope
@@ -179,7 +179,7 @@ up to the scope, not out to node attributes.
 > non-trivial SCC must be **covered by a scope that declares a budget**
 > bounding a kind on the cycle — otherwise reject.
 
-This *upgrades [24's](./24-concept.md) "Tarjan survives as a lint" from a
+This *upgrades [24's](./outdated/24-concept.md) "Tarjan survives as a lint" from a
 warning to the mechanism*: "this cycle is not covered by a tight budget"
 stops being advice and becomes a hard reject at changeset validation.
 Decidable (SCCs + scope coverage), and it needs **no node attribute** —
@@ -190,7 +190,7 @@ on the cycle's edges — is a documented refinement.
 
 ### 3b. Deadlines are the same mechanism over `clock.tick`
 
-Time is `clock.tick` events ([24 §1](./24-concept.md)); a deadline is a
+Time is `clock.tick` events ([24 §1](./outdated/24-concept.md)); a deadline is a
 wall-clock budget crossed by ticks — the same scope property as 3a.
 Cancellation ("cancel the rest" in a race/quorum) is the covering scope
 closing early; stopping *new* work is its budget ceasing to admit the
@@ -271,7 +271,7 @@ stronger than reachability — not the base case).
 A reaction acts *after* an event exists, never before, so it cannot prevent
 the dispatch of an **already-in-flight** result. Two consequences, both
 already accepted: **wasted in-flight compute** on early cancellation (not
-reclaimable; [24 §B](./24-concept.md) leans "accept — the log records
+reclaimable; [24 §B](./outdated/24-concept.md) leans "accept — the log records
 results"), and **double-continuation** when a late result lands after early
 close (handled by an idempotent join-consumer; idempotency is already
 required for effectful tools, G5). The bound itself needs none of this.
@@ -311,20 +311,20 @@ is the whole contract.
   `Emit{ Kind: "tool.X.call", Payload }` and decodes a text completion into
   `Emit{ Kind: "llm.message", … }`. Both paths produce Emits from the
   allowlist; the native-tool-call decode shipped in stage 0 (`pkg/provider`,
-  [23](./23-bootstrap-roadmap.md)) is exactly this transcoding.
+  [23](./outdated/23-bootstrap-roadmap.md)) is exactly this transcoding.
 
 **Consequences.**
 
 - The `llm`/`tool` relationship is flatter than "reasoner that calls actor"
-  ([24 §3](./24-concept.md)). They are two reactions: one emits allowlisted
+  ([24 §3](./outdated/24-concept.md)). They are two reactions: one emits allowlisted
   events, the other consumes some of them. The coupling is **ordinary
   subscription, not a call** — there is no call edge in the model, only
   emit → subscribe.
 - `allowlist ⊆ emit` upper bound: emitting outside the allowlist is the
-  body's own `.failed` ([24 §2 amendment](./24-concept.md)); exceeding the
-  declared `emit:` is a lint ([24 §A.4](./24-concept.md)). Both already in
+  body's own `.failed` ([24 §2 amendment](./outdated/24-concept.md)); exceeding the
+  declared `emit:` is a lint ([24 §A.4](./outdated/24-concept.md)). Both already in
   the model.
-- **Crystallization is seamless** ([24 §8](./24-concept.md)): replacing an
+- **Crystallization is seamless** ([24 §8](./outdated/24-concept.md)): replacing an
   LLM seat with a deterministic node changes *who emits* `tool.X.call`, not
   *what a tool call is*. There was never a "call" to reimplement — only an
   emitter to swap.
@@ -363,7 +363,7 @@ regardless of who produced it.
   catalog, the node decl adds the consumer, the next `llm` firing sees the new
   `Emits` kind *with its schema*. The catalog is one projection in the family
   of **management projections** (topology projection, catalog projection) —
-  the self-hosting management plane of [22](./22-bootstrap-self-hosting.md)/[23](./23-bootstrap-roadmap.md).
+  the self-hosting management plane of [22](./outdated/22-bootstrap-self-hosting.md)/[23](./outdated/23-bootstrap-roadmap.md).
 - **`On` patterns, `Emits` concrete.** A subscription's `On` is a pattern
   matching a *family* of catalog kinds (`tool.fs.*.result`); a node's `Emits`
   resolve to *concrete* catalog kinds (it declares exactly what it produces),
@@ -387,9 +387,9 @@ a view is a projection. The only addition is that **a projection carries a
 `Type`**, generalizing the kv|log `Shape` into an open registry.
 
 - **`Projection.Type` replaces `Shape`.** `Shape` was deliberately final at two
-  values ([24 §6](./24-concept.md)); we open it. `kv` and `log` are now
+  values ([24 §6](./outdated/24-concept.md)); we open it. `kv` and `log` are now
   **built-in types** (their builders are the existing payload-blind folds);
-  packages register more. This **amends [24 §6](./24-concept.md)**: the old
+  packages register more. This **amends [24 §6](./outdated/24-concept.md)**: the old
   escape hatch *"anything richer is a reaction emitting `state.updated`"*
   becomes *"anything richer is a registered `Type` builder"*. The justification
   is unchanged-in-spirit: a `Type` builder is still a **pure function of the
@@ -452,16 +452,16 @@ frozen, tail append-only-stable-prefix.
 
 | Clause | Before | After (this doc) |
 |---|---|---|
-| [24 §4](./24-concept.md) dispatch | "consulting the progress projection … **enforcing budgets**" | dispatch = stamp trace + deliver; the *per-event* budget enforcement leaves dispatch — cycle-bounding moves to a scope budget (§3) |
-| [24 §5](./24-concept.md) budget hard-stop | `scope.budget_exhausted` = **refused dispatch** | a compile-mandated scope budget covering every cycle (§3a), enforced by a per-scope **cap** (the guarantee) with a terminal `budget_exhausted` fact for graceful shutdown (§3d); plus a compile check that every `scope.closed` has a continuation or terminal exit (§3f) |
-| [24 §5](./24-concept.md) cancellation | "refused dispatch read off the cone" | the covering scope closes early + idempotent consumer; in-flight result recorded then deduped (§3b/§3e) |
-| [24 §5/§7](./24-concept.md) managed kinds | **four**: nodes, subscriptions, **scopes**, projections | **three**: nodes, subscriptions, projections; scope = built-in projection instance (§2) |
-| [24 §7](./24-concept.md) event types | implicit / untyped payloads | an **event catalog** (`kind → schema`) on a *type axis* orthogonal to wiring — self-hosted as a projection over `event.registered`, no new primitive (§4a) |
-| [24 §6](./24-concept.md) projection shape | `Shape` **final** at `kv`/`log` | `Projection.Type` — open registry of type builders; `kv`/`log` built-in, `llm.history` registered by the `llm` package; the builder is still a pure fold of matched events (§4b) |
-| [24 §3](./24-concept.md) LLM/menu | "emits typed actions from an allowlist; menu is a projection of consumers" | strengthened: the LLM has **no tools**, only allowlisted emissions; tool-call = emission with a tool-node consumer; function-calling = transport encoding (§4) |
-| [25 §6/§7.1](./25-regulation-concept.md) | "the engine refuses dispatch on an exhausted budget" | per-cone hard-stop is a guard node (§3a); **resolver admission control is unaffected** — it is already a guard-style reaction, not the dispatcher gate |
+| [24 §4](./outdated/24-concept.md) dispatch | "consulting the progress projection … **enforcing budgets**" | dispatch = stamp trace + deliver; the *per-event* budget enforcement leaves dispatch — cycle-bounding moves to a scope budget (§3) |
+| [24 §5](./outdated/24-concept.md) budget hard-stop | `scope.budget_exhausted` = **refused dispatch** | a compile-mandated scope budget covering every cycle (§3a), enforced by a per-scope **cap** (the guarantee) with a terminal `budget_exhausted` fact for graceful shutdown (§3d); plus a compile check that every `scope.closed` has a continuation or terminal exit (§3f) |
+| [24 §5](./outdated/24-concept.md) cancellation | "refused dispatch read off the cone" | the covering scope closes early + idempotent consumer; in-flight result recorded then deduped (§3b/§3e) |
+| [24 §5/§7](./outdated/24-concept.md) managed kinds | **four**: nodes, subscriptions, **scopes**, projections | **three**: nodes, subscriptions, projections; scope = built-in projection instance (§2) |
+| [24 §7](./outdated/24-concept.md) event types | implicit / untyped payloads | an **event catalog** (`kind → schema`) on a *type axis* orthogonal to wiring — self-hosted as a projection over `event.registered`, no new primitive (§4a) |
+| [24 §6](./outdated/24-concept.md) projection shape | `Shape` **final** at `kv`/`log` | `Projection.Type` — open registry of type builders; `kv`/`log` built-in, `llm.history` registered by the `llm` package; the builder is still a pure fold of matched events (§4b) |
+| [24 §3](./outdated/24-concept.md) LLM/menu | "emits typed actions from an allowlist; menu is a projection of consumers" | strengthened: the LLM has **no tools**, only allowlisted emissions; tool-call = emission with a tool-node consumer; function-calling = transport encoding (§4) |
+| [25 §6/§7.1](./outdated/25-regulation-concept.md) | "the engine refuses dispatch on an exhausted budget" | per-cone hard-stop is a guard node (§3a); **resolver admission control is unaffected** — it is already a guard-style reaction, not the dispatcher gate |
 
-[25](./25-regulation-concept.md)'s economic regulation is otherwise intact:
+[25](./outdated/25-regulation-concept.md)'s economic regulation is otherwise intact:
 its admission gate lives at the *resolver* (a reaction refusing to mint
 `request.received`), never at the dispatcher, so it survives this change
 verbatim. Only the line attributing the per-cone hard-stop to a dispatch
@@ -473,19 +473,19 @@ gate needs the restatement above.
   barrier knows a cone has quiesced and when to fire `scope.closed`. It is
   now a *pure projection*, read by the barrier reaction and consulted by the
   scope-budget coverage check — not by a gate.
-- **`caused_by` stamping survives** (uprightness, [24 §2](./24-concept.md)):
+- **`caused_by` stamping survives** (uprightness, [24 §2](./outdated/24-concept.md)):
   membership-is-geometry depends on it; without engine-stamped causality the
   cone has no definition.
 - **The validator gains teeth, not a primitive.** The SCC budget-coverage check (§3a)
-  becomes a hard reject where [24](./24-concept.md) had a lint. New
+  becomes a hard reject where [24](./outdated/24-concept.md) had a lint. New
   *validation*, same three primitives.
 - **The clock is load-bearing.** `clock.tick` as an event source (already
-  named in [24 §1](./24-concept.md)) is what makes deadlines expressible
+  named in [24 §1](./outdated/24-concept.md)) is what makes deadlines expressible
   without a gate.
 
 ## 7. The standing test
 
-Run [24 §D](./24-concept.md) over all three moves — *new primitive, or
+Run [24 §D](./outdated/24-concept.md) over all three moves — *new primitive, or
 convention over Event / Reaction / Projection?*
 
 | Move | Effect on the concept count | Verdict |
@@ -507,20 +507,20 @@ primitives — none of them a fourth thing.
 
 ## See also
 
-- [24-concept.md](./24-concept.md) — the settled model this deepens; §1
+- [24-concept.md](./outdated/24-concept.md) — the settled model this deepens; §1
   (three primitives), §3 (two bodies + menu), §4 (two mechanisms), §5
   (scopes/quiescence/budgets/cancellation), §7 (managed kinds), §B (accepted
   leans incl. wasted in-flight work), §D (the standing test).
-- [25-regulation-concept.md](./25-regulation-concept.md) — economic
+- [25-regulation-concept.md](./outdated/25-regulation-concept.md) — economic
   regulation; its resolver-level admission gate is unaffected, its
   dispatch-gate attribution is restated here (§5).
-- [17-quiescence-prior-art.md](./17-quiescence-prior-art.md) — obligation
+- [17-quiescence-prior-art.md](./outdated/17-quiescence-prior-art.md) — obligation
   counting, the progress projection that survives as a pure projection.
-- [16-engine-architecture.md](./16-engine-architecture.md) — dispatch and
+- [16-engine-architecture.md](./outdated/16-engine-architecture.md) — dispatch and
   the closure algebra scope budgets re-express.
-- [15-primitive-reduction.md](./15-primitive-reduction.md) — the two-body
+- [15-primitive-reduction.md](./outdated/15-primitive-reduction.md) — the two-body
   vocabulary; the `router` reaction the value-fork rides on.
-- [19-projections.md](./19-projections.md) — the fold grammar a scope is now
+- [19-projections.md](./outdated/19-projections.md) — the fold grammar a scope is now
   an instance of; horizons.
-- [20-topology-management.md](./20-topology-management.md) — changeset
+- [20-topology-management.md](./outdated/20-topology-management.md) — changeset
   validation, where the SCC budget-coverage check lands; per-instance interventions.

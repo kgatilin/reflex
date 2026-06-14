@@ -3,7 +3,7 @@
 > **Status: EXPERIMENT / first bootstrap step on the converged substrate.**
 > Captures a design session building a simple coding agent as a *state
 > model*, compiling it to a flat *list of subscribers*, and having the
-> **engine** validate graph connectivity. Spends [24](./24-concept.md) and
+> **engine** validate graph connectivity. Spends [24](./outdated/24-concept.md) and
 > [26](./26-bare-substrate.md); adds no primitive. The deliverable of step 1
 > is **not a running agent** — it is: *define the subscriber list, and run
 > connectivity validation through the engine.* The engine, not a human,
@@ -29,12 +29,12 @@ subscriber, the engine re-validates. The point of the whole model:
 > You never hold the entire graph in your head. You add one subscriber; the
 > engine tells you whether it breaks connectivity. Local edit, global check.
 
-**LLM nodes are the bridges** ([24 §1](./24-concept.md), [26 §4](./26-bare-substrate.md)):
+**LLM nodes are the bridges** ([24 §1](./outdated/24-concept.md), [26 §4](./26-bare-substrate.md)):
 they sit at dead-ends (events with no consumer) and emit allowlisted events
 that are the entry points of otherwise-disconnected fragments. There is no
 "brain": there are many LLM nodes, each a bridge over one gap, each with its
 own subscription and config (model, prompt, **emit allowlist**) — one
-universal `llm` body parameterised by the log ([24 §A.4](./24-concept.md)).
+universal `llm` body parameterised by the log ([24 §A.4](./outdated/24-concept.md)).
 
 ## 2. The state model (the worked example)
 
@@ -78,7 +78,7 @@ Compilation rule: a **state transition is an LLM node bridging a dead-end to
 the entry of the next fragment**. Mechanics, decided this session:
 
 - **Field updates live in the subject** — `state.updated.sufficiency`,
-  `state.updated.plan` ([24 §2](./24-concept.md): state paths are subjects,
+  `state.updated.plan` ([24 §2](./outdated/24-concept.md): state paths are subjects,
   subscription is a wildcard, not a payload filter). You subscribe to a
   *field's change*, not to a blob.
 - **Values live in the payload**; the consuming reaction reads them (the
@@ -120,7 +120,7 @@ agent:
 - **`global`** — daemon-wide, session-less (outside every cone). Holds the
   **global state**: the shared **`project_context`** and **config** (system
   prompt, project orientation, per-node prompt/model config as facts —
-  [24 §A.4](./24-concept.md)), plus lifecycle events like **`agent.started`**.
+  [24 §A.4](./outdated/24-concept.md)), plus lifecycle events like **`agent.started`**.
 - **`request`** — one per task. **N parallel tasks = N isolated `request`
   cones.** Its one state is `task_state` ([26 §2a](./26-bare-substrate.md):
   one state per scope instance).
@@ -135,7 +135,7 @@ projections over one or more states.
 There is one `gather` declaration; it fires inside each `request` cone
 independently, and because its views are bound `in: request`, each firing
 sees only its own task. Isolation is geometry (`caused_by`,
-[24 §6](./24-concept.md)), not addressing. A background daemon running four
+[24 §6](./outdated/24-concept.md)), not addressing. A background daemon running four
 tasks at once is four `request` cones over one standing topology.
 
 **Shared context, through closure.** `gather` reads `project_context`
@@ -145,7 +145,7 @@ writes to its **own** `request` state; they are **promoted to `global` only
 through closure** ([26 §2a](./26-bare-substrate.md)): the closing scope
 carries its final state, and a `global`-scope consumer of the closure folds
 the chosen findings into `project_context`. There is no live `sys.` up-write
-(it would break "membership is geometry", [24 §2](./24-concept.md)); the old
+(it would break "membership is geometry", [24 §2](./outdated/24-concept.md)); the old
 `sys.state.updated.project.context.found` promotion is retired. If
 near-live sharing is wanted, wrap a finding in a **small sub-scope** so its
 closure promotes promptly — promotion latency is scope granularity, not a
@@ -154,13 +154,13 @@ second mechanism.
 **Config arrives as global events.** `agent.started` seeds the global scope;
 the system prompt, project orientation, and each LLM node's
 prompt/model/allowlist are config facts a node `reads:` as a kv view — the
-wiring/behaviour split of [24 §A.4](./24-concept.md). Re-prompting a node is
+wiring/behaviour split of [24 §A.4](./outdated/24-concept.md). Re-prompting a node is
 one event, not a redeploy.
 
 ## 5. Connectivity validation is the engine's job
 
 The human does **not** eyeball the graph. The engine, run as a dry-run
-(`reflex validate`, the changeset validator of [20](./20-topology-management.md)/[24 §7](./24-concept.md)),
+(`reflex validate`, the changeset validator of [20](./outdated/20-topology-management.md)/[24 §7](./outdated/24-concept.md)),
 folds the subscriber list into a graph and reports:
 
 - **dead-ends** — a kind in some node's `Emits` that no node's `On`
@@ -189,7 +189,7 @@ folds the subscriber list into a graph and reports:
   kind's catalog schema is the body's own `.failed`; this is the schema half
   of the allowlist check, runnable only against the log;
 - **allowlist lints** — a node emitting outside its declared `Emits`
-  ([24 §A.4](./24-concept.md)).
+  ([24 §A.4](./outdated/24-concept.md)).
 
 The output is "connected" or a list of gaps with **LLM-bridge
 suggestions**. Add the suggested subscriber, re-run, converge.
@@ -243,14 +243,14 @@ gaps when it is not.
 
 ## See also
 
-- [24-concept.md](./24-concept.md) — three primitives, subject grammar (§2),
+- [24-concept.md](./outdated/24-concept.md) — three primitives, subject grammar (§2),
   config-as-facts (§A.4), changeset validation (§7), the standing test (§D).
 - [26-bare-substrate.md](./26-bare-substrate.md) — scope as a built-in
   projection, termination as a scope budget (the cycle budget-coverage
   check, §3a), the LLM emits allowlisted events not tool-calls (§4).
-- [25-regulation-concept.md](./25-regulation-concept.md) — global state as
+- [25-regulation-concept.md](./outdated/25-regulation-concept.md) — global state as
   `sys.` facts outside cones (the `project_context` pattern).
-- [20-topology-management.md](./20-topology-management.md) — the changeset
+- [20-topology-management.md](./outdated/20-topology-management.md) — the changeset
   validator this dry-run is the read-only mode of.
-- [19-projections.md](./19-projections.md) — the kv/log views the nodes
+- [19-projections.md](./outdated/19-projections.md) — the kv/log views the nodes
   `read:`; `in:` horizons incl. global.
