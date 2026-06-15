@@ -17,12 +17,14 @@ import "encoding/json"
 // rejected changeset, never a silent nil body. The name is passed so a factory
 // can stamp it into the body's identity (e.g. the llm node's name).
 //
-// Emits — the subscriber's emit allowlist — is passed because a body is NOT a
-// pure function of its config: the llm body advertises its Emits as the model's
-// function menu (doc 26 §4), and that wiring lives on the Subscriber, not in the
-// opaque body config. Passing it here is the deliberate alternative to mirroring
-// Emits into the config in the daemon — the body sees the wiring it depends on.
-type BodyResolver func(name, kind string, emits []string, config json.RawMessage) (Reaction, error)
+// The whole Subscriber is passed because a body is NOT a pure function of its
+// config: the llm body advertises its Emits as the model's function menu (doc 26
+// §4), and that wiring lives on the Subscriber, not in the opaque body config.
+// Passing the declared node (its Body field still nil — that is what the resolver
+// produces) is the deliberate alternative to mirroring Emits into the config in
+// the daemon: the body sees the full wiring it depends on, and future bodies may
+// read more than Emits without another contract change.
+type BodyResolver func(s Subscriber) (Reaction, error)
 
 // Option configures an Engine at construction (New / Load).
 type Option func(*Engine)

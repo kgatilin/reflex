@@ -86,11 +86,11 @@ func Load(log []engine.Event) (*Daemon, error) {
 // plugin Manager for the "plugin" kind, so plugin processes are owned per-daemon.
 func (d *Daemon) resolver() engine.BodyResolver {
 	base := nodes.Resolver()
-	return func(name, kind string, emits []string, config json.RawMessage) (engine.Reaction, error) {
-		if kind == proxy.Kind {
-			return d.plugins.Factory(name, emits, config)
+	return func(s engine.Subscriber) (engine.Reaction, error) {
+		if s.BodyKind == proxy.Kind {
+			return d.plugins.Factory(s)
 		}
-		return base(name, kind, emits, config)
+		return base(s)
 	}
 }
 

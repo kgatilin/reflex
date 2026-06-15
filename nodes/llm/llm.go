@@ -333,18 +333,18 @@ func Reaction(cfg Config) (engine.Reaction, error) {
 // nodes.Register("llm", llm.Factory). Kept as a plain func value so this package
 // does not import the registry (no import cycle; the registry imports engine
 // only).
-func Factory(name string, emits []string, config json.RawMessage) (engine.Reaction, error) {
+func Factory(s engine.Subscriber) (engine.Reaction, error) {
 	var cfg Config
-	if len(config) > 0 {
-		if err := json.Unmarshal(config, &cfg); err != nil {
+	if len(s.BodyConfig) > 0 {
+		if err := json.Unmarshal(s.BodyConfig, &cfg); err != nil {
 			return nil, err
 		}
 	}
-	cfg.Name = name
-	// The seat's function menu IS its emit allowlist (doc 26 §4), which is wiring
-	// on the Subscriber — the resolver passes it in rather than the operator
-	// duplicating it into the body config.
-	cfg.Emits = emits
+	cfg.Name = s.Name
+	// The node's function menu IS its emit allowlist (doc 26 §4), which is wiring
+	// on the Subscriber — the resolver passes the whole node in rather than the
+	// operator duplicating Emits into the body config.
+	cfg.Emits = s.Emits
 	return Reaction(cfg)
 }
 

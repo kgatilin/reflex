@@ -12,7 +12,6 @@
 package nodes
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -20,12 +19,12 @@ import (
 	"github.com/kgatilin/reflex/engine"
 )
 
-// Factory builds a node's Reaction from its name, emit allowlist, and opaque
-// config (the body descriptor's BodyConfig). It is the per-kind half of an
-// engine.BodyResolver. Emits is passed because some bodies (llm) derive their
+// Factory builds a node's Reaction from its declared Subscriber (name, emit
+// allowlist, body config, …). It is the per-kind half of an engine.BodyResolver.
+// The whole Subscriber is passed because some bodies (llm) derive their
 // behaviour — the model's function menu — from the subscriber's Emits, which is
-// wiring, not config; a factory that does not need it ignores the parameter.
-type Factory func(name string, emits []string, config json.RawMessage) (engine.Reaction, error)
+// wiring, not config; a factory that needs only the config reads s.BodyConfig.
+type Factory func(s engine.Subscriber) (engine.Reaction, error)
 
 // registry is the process-global kind → factory table. It is guarded by a mutex
 // so a daemon can register at startup while requests resolve; registration is
@@ -52,14 +51,14 @@ func Register(kind string, f Factory) {
 // changeset is rejected / the load fails), naming the kinds that ARE registered
 // so the operator sees the gap.
 func Resolver() engine.BodyResolver {
-	return func(name, kind string, emits []string, config json.RawMessage) (engine.Reaction, error) {
+	return func(s engine.Subscriber) (engine.Reaction, error) {
 		mu.RLock()
-		f, ok := registry[kind]
+		f, ok := registry[s.BodyKind]
 		mu.RUnlock()
 		if !ok {
-			return nil, fmt.Errorf("nodes: no factory for body kind %q (registered: %v)", kind, registered())
+			return nil, fmt.Errorf("nodes: no factory for body kind %q (registered: %v)", s.BodyKind, registered())
 		}
-		return f(name, emits, config)
+		return f(s)
 	}
 }
 

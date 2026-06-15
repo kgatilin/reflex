@@ -60,16 +60,16 @@ func ParseConfig(name string, config json.RawMessage) (Config, error) {
 // spawns a fresh process per call. The daemon uses a Manager instead (spawn-once
 // at launch + reuse when the resolver rebuilds the body); Factory is for direct
 // and test use where no manager is needed.
-func Factory(name string, _ []string, config json.RawMessage) (engine.Reaction, error) {
-	cfg, err := ParseConfig(name, config)
+func Factory(s engine.Subscriber) (engine.Reaction, error) {
+	cfg, err := ParseConfig(s.Name, s.BodyConfig)
 	if err != nil {
 		return nil, err
 	}
 	client, err := plugin.Spawn(cfg.Command...)
 	if err != nil {
-		return nil, fmt.Errorf("proxy %q: %w", name, err)
+		return nil, fmt.Errorf("proxy %q: %w", s.Name, err)
 	}
-	return reaction{name: name, client: client}, nil
+	return reaction{name: s.Name, client: client}, nil
 }
 
 // reaction adapts one plugin Client to the engine. Views are not forwarded —

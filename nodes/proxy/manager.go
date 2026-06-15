@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -116,16 +115,16 @@ func (m *Manager) Ensure(name string, command []string) (client *plugin.Client, 
 // Factory is the resolver entry for the "plugin" kind: it reuses the client the
 // launch path adopted, or spawns on demand (the engine.Load path, where the
 // resolver rebuilds the body from its descriptor and no launch pre-adopted one).
-func (m *Manager) Factory(name string, _ []string, config json.RawMessage) (engine.Reaction, error) {
-	cfg, err := ParseConfig(name, config)
+func (m *Manager) Factory(s engine.Subscriber) (engine.Reaction, error) {
+	cfg, err := ParseConfig(s.Name, s.BodyConfig)
 	if err != nil {
 		return nil, err
 	}
-	c, _, err := m.Ensure(name, cfg.Command)
+	c, _, err := m.Ensure(s.Name, cfg.Command)
 	if err != nil {
-		return nil, fmt.Errorf("proxy %q: %w", name, err)
+		return nil, fmt.Errorf("proxy %q: %w", s.Name, err)
 	}
-	return reaction{name: name, client: c}, nil
+	return reaction{name: s.Name, client: c}, nil
 }
 
 // Close tears down every plugin (daemon shutdown).
