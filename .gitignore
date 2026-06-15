@@ -3,6 +3,9 @@
 *.test
 *.out
 
+# scratch space (live-drive checkouts, venvs, throwaway programs, built binaries)
+/tmp/
+
 # archmotif scratch (graph cache, worktree state)
 /.arch/
 /.archai/
