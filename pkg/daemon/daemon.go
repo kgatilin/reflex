@@ -62,8 +62,11 @@ func registerFactories() {
 	nodes.Register("verifier", verifier.Factory)
 	// "changeset" is the in-graph control-plane bridge: a node that turns a
 	// topology document (a brain's "apply this topology" tool-call) into an
-	// engine changeset request, so an agent can BUILD topology at runtime.
+	// engine changeset request, so an agent can BUILD topology at runtime. It
+	// SELF-DESCRIBES its tool kinds + {document} schema (RegisterCatalog), so an
+	// operator topology wires it without re-declaring the schema.
 	nodes.Register("changeset", changeset.Factory)
+	nodes.RegisterCatalog("changeset", changeset.Catalog)
 }
 
 // New builds a daemon with a fresh engine and the body resolver installed, plus
@@ -207,6 +210,8 @@ func (d *Daemon) launchSectionPlugins(plugins []topology.PluginSpec) error {
 // config {plugin: <name>} — is still resolved for callers that name the plugin.
 func (d *Daemon) expandPluginRefs(decls []engine.Decl) ([]engine.Decl, error) {
 	out := make([]engine.Decl, 0, len(decls))
+	var contributed []engine.Decl
+	seen := map[string]bool{}
 	for _, dcl := range decls {
 		sub, ok := dcl.(engine.Subscriber)
 		if !ok {
@@ -228,8 +233,20 @@ func (d *Daemon) expandPluginRefs(decls []engine.Decl) ([]engine.Decl, error) {
 			sub = resolved
 		}
 		out = append(out, sub)
+		// In-process body self-description (the parallel of plugin self-registration):
+		// fold the catalog kinds + schema the body contributes (e.g. the changeset
+		// bridge's topology.apply.requested{document}), so an operator topology need
+		// not re-declare them. Appended after the subscribers (later registration
+		// wins), de-duplicated by kind within this delta.
+		for _, ek := range nodes.CatalogFor(sub) {
+			if ek.Kind == "" || seen[ek.Kind] {
+				continue
+			}
+			seen[ek.Kind] = true
+			contributed = append(contributed, ek)
+		}
 	}
-	return out, nil
+	return append(out, contributed...), nil
 }
 
 // backByKind backs a vanilla subscriber with the launched plugin that HANDLES its

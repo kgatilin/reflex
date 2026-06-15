@@ -26,12 +26,24 @@ import (
 // wiring, not config; a factory that needs only the config reads s.BodyConfig.
 type Factory func(s engine.Subscriber) (engine.Reaction, error)
 
-// registry is the process-global kind → factory table. It is guarded by a mutex
-// so a daemon can register at startup while requests resolve; registration is
-// expected at composition time, resolution during apply/load.
+// Describer optionally augments a Factory: it declares the catalog kinds a body
+// CONTRIBUTES for a given subscriber — the kind(s) it HANDLES (with the schema a
+// reasoning node advertises as that tool's parameter schema) and the kind(s) it
+// EMITS. It is the in-process parallel of a plugin's hello self-description: a
+// body that defines a tool registers that tool's schema WITH ITSELF, so an
+// operator topology wires the body without re-declaring its schema (exactly as
+// the fs plugin self-registers tool.fs.read.call's schema). Returns nil when the
+// body contributes nothing to the catalog.
+type Describer func(s engine.Subscriber) []engine.EventKind
+
+// registry is the process-global kind → factory table; describers is its sibling
+// kind → catalog-contribution table. Both are guarded by mu so a daemon can
+// register at startup while requests resolve; registration is expected at
+// composition time, resolution/description during apply/load.
 var (
-	mu       sync.RWMutex
-	registry = map[string]Factory{}
+	mu         sync.RWMutex
+	registry   = map[string]Factory{}
+	describers = map[string]Describer{}
 )
 
 // Register installs a body factory under a kind. Re-registering a kind replaces
@@ -44,6 +56,33 @@ func Register(kind string, f Factory) {
 	mu.Lock()
 	defer mu.Unlock()
 	registry[kind] = f
+}
+
+// RegisterCatalog installs a Describer for a body kind (alongside Register), so a
+// body that self-describes a tool contributes its catalog kinds + schema when it
+// is wired. The composition root calls it for such bodies (e.g. the changeset
+// bridge: topology.apply.requested{document} + its fail kind). A nil describer is
+// a programming error.
+func RegisterCatalog(kind string, d Describer) {
+	if d == nil {
+		panic("nodes: nil describer for kind " + kind)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	describers[kind] = d
+}
+
+// CatalogFor returns the catalog kinds the subscriber's body self-describes, or
+// nil when its body kind has no Describer. The daemon folds these into the
+// changeset so the body's tool kinds + schema are registered when it is wired.
+func CatalogFor(s engine.Subscriber) []engine.EventKind {
+	mu.RLock()
+	d, ok := describers[s.BodyKind]
+	mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	return d(s)
 }
 
 // Resolver returns an engine.BodyResolver backed by the registry: it dispatches

@@ -50,6 +50,38 @@ const (
 	defaultPrinc = "in-graph"
 )
 
+// Catalog self-describes the bridge's tool (a nodes.Describer): it registers the
+// kind(s) the bridge HANDLES — the subscriber's On — each carrying the {document}
+// parameter schema a reasoning node advertises, so the brain emits a document and
+// not an empty call; plus the FAIL kind it emits (registered so a subscription to
+// it is not dead). The changeset-request kind it emits is engine-owned
+// (self-registered there). This is the in-process parallel of a plugin announcing
+// its tool schema — an operator topology wires the bridge WITHOUT re-declaring the
+// schema. Register it with nodes.RegisterCatalog("changeset", changeset.Catalog).
+func Catalog(s engine.Subscriber) []engine.EventKind {
+	var cfg Config
+	if len(s.BodyConfig) > 0 {
+		_ = json.Unmarshal(s.BodyConfig, &cfg)
+	}
+	fail := cfg.Fail
+	if fail == "" {
+		fail = defaultFail
+	}
+	field := cfg.Field
+	if field == "" {
+		field = defaultField
+	}
+	schema := json.RawMessage(fmt.Sprintf(
+		`{"type":"object","properties":{%q:{"type":"string","description":"A reflex topology document (YAML) to apply — the worker subgraph to build or extend."}},"required":[%q]}`,
+		field, field))
+
+	out := []engine.EventKind{{Kind: fail}} // bridge → brain: parse-failure feedback
+	for _, k := range s.On {                // the apply-topology tool(s) the brain calls
+		out = append(out, engine.EventKind{Kind: k, Schema: schema})
+	}
+	return out
+}
+
 // Factory is the nodes.Factory for body kind "changeset". Register it with
 // nodes.Register("changeset", changeset.Factory).
 func Factory(s engine.Subscriber) (engine.Reaction, error) {
