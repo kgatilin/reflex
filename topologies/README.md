@@ -4,9 +4,11 @@ Declarative topology documents (the `pkg/topology` schema): scopes, subscribers,
 projections, and the domain event catalog. A document names a body by **kind +
 config** (a serialisable descriptor), never a Go closure, so it applies through
 the daemon and recovers from the log (G8). Body kinds: `llm` (the reasoning
-core), `entry` / `gate` / `verifier` (the control bodies), and the launched
-plugins (`fs`, `pytest`) which self-register — the document never writes a
-`plugin` node, it just emits the kinds the hands consume.
+core), `entry` / `gate` / `verifier` (the control bodies), and `plugin` (an
+out-of-process hand like `fs` / `pytest`). A launched plugin exposes a
+**capability** (the kinds it can handle + their schemas); USING it is a
+subscription the document declares — a `plugin`-bodied subscriber referencing the
+plugin by name (`config: {plugin: <name>}`), with an operator-chosen scope.
 
 ## coding-agent.yaml
 
@@ -14,13 +16,13 @@ The doc-29 §4b state-defined coding agent: a brain that loops read→edit→tes
 a checkout, **completion as a verified state** (the `verifier` re-runs the agreed
 check and writes `done` only if it passes), bounded by the `request` scope budget.
 
-It declares only domain kinds and wiring; the **fs + pytest hands self-register
-when the daemon launches them**, so it must be applied to a daemon started with
-`serve --root` (which brings those hands up). Applied to a daemon without them,
-`apply` correctly reports the tool kinds as gaps — the graph is only connected
-once the hands are present. (`reflexd validate coding-agent.yaml` is therefore a
-partial dry-run: it checks the document in isolation and will list the tool kinds
-as unconsumed; that is expected.)
+It declares the agent wiring **including** the `fs` + `pytest` handler
+subscriptions (scoped `In: request`, referencing the plugins by name). Those
+references resolve only against a daemon that has **launched** the plugins, so it
+must be applied to a daemon started with `serve --root` (which launches them); a
+reference to an unlaunched plugin is rejected. (`reflexd validate
+coding-agent.yaml` standalone — no daemon — cannot resolve the plugin references
+and is therefore only a partial dry-run.)
 
 ### Run it (Iteration 4 — local, real model)
 
