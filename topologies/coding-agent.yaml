@@ -1,56 +1,67 @@
 # coding-agent — the doc-29 §4b state-defined coding agent, as a topology document.
 #
-# This is the OPERATOR document. Launching a plugin only exposes its CAPABILITY
-# (the kinds it can handle + their schemas); USING a hand is a subscription this
-# document declares, like any other — a body-kind "plugin" subscriber referencing
-# the plugin by name, with an operator-chosen scope (here `request`, so the hand
-# sits inside the budgeted agent loop). So this doc must be applied to a daemon
-# started with `reflexd serve --root <repo>` (which launches the fs + pytest
-# plugins confined to <repo>); a reference to an unlaunched plugin is rejected.
-# See topologies/README.md for the run recipe.
+# This is the OPERATOR document. The fs + pytest HANDS are out-of-process plugins
+# launched by `reflexd serve --root <repo>` (which confines them to <repo>); this
+# document does not carry their spawn command or root — a host concern. Each hand
+# is a NORMAL subscriber here, named after the tool-call kind it serves, scoped
+# `in: request` (so it sits inside the budgeted agent loop). The daemon backs each
+# by the plugin that HANDLES its kind — the link is the kind, not a reference. See
+# topologies/README.md for the run recipe.
 #
-# The shape (CONCEPT §9, doc 29 §4b):
-#   task.new ──resolver──▶ request.received  (roots the `request` scope)
-#     brain (llm, loops): reads its history, calls fs/pytest, claims complete
-#       fs / pytest (plugins): tool.*.call ──▶ tool.*.result | .failed ──▶ brain
-#     claim.complete ──verifier──▶ VERIFIED state.updated.status{done} | verify.failed
-#       verify.failed ──▶ brain (another turn)
-#     state.updated.status{done} ──terminal-on-done──▶ request.terminal
-#     scope.request.budget_exhausted ──terminal-on-exhaust──▶ request.terminal{failed}
+# Completion model (CONCEPT §3/§9): the brain NEVER asserts done with a function.
+# A turn that calls NO function is the brain's CLAIM of completion — it surfaces as
+# llm.message (prose) or llm.empty (silence). The claim is then EVALUATED
+# independently, never trusted:
 #
-# Completion is a verified state (CONCEPT §3/§9): the brain only CLAIMS done; the
-# verifier re-runs the agreed check and writes done only if it passes. The loop is
-# event closure, bounded by the `request` scope budget (the termination backstop).
+#   brain turn ─┬─ tool.*.call ──▶ hand ──▶ tool.*.result|.failed ──▶ brain (loop)
+#               ├─ llm.message (prose CLAIM) ──▶ verifier (re-runs the tests)
+#               │      tests red  ──▶ verify.failed ──▶ brain (another turn)
+#               │      tests green ──▶ check.passed ──▶ judge (an independent llm)
+#               │            judge.approved ──▶ done ──▶ state.updated.status{done}
+#               │            judge.rejected ──▶ brain (the work games the tests)
+#               └─ llm.empty (silence)  ──▶ brain (bounded re-prompt)
+#
+#   state.updated.status{done}          ──▶ request.terminal
+#   scope.request.budget_exhausted      ──▶ request.terminal{failed}
+#
+# Done is a VERIFIED value (a deterministic check AND an llm reviewer), never the
+# model's word. The judge is just another llm node — adding a second opinion is a
+# config change, not a new abstraction. The loop is event closure, bounded by the
+# request scope budget (the termination backstop).
 
 scopes:
   - name: request
     root: request.received
     budget:
-      # The loop's termination backstop (CONCEPT §4): caps verification attempts
-      # and per-tool calls within the request cone. Tune per repo size (doc 29 §8).
-      claim.complete: 6
+      # The loop's termination backstop (CONCEPT §4): every brain turn emits exactly
+      # one of these (a tool call, the prose claim, or silence), so capping them caps
+      # the loop. Tune per repo size (doc 29 §8).
       tool.fs.read.call: 80
       tool.fs.edit.call: 80
       tool.fs.write.call: 40
       tool.fs.search.call: 80
       tool.py.test.call: 20
-      # llm.continue bounds prose-only "stall" turns: a turn that called no
-      # function re-drives the brain (it is an event, not a dead end), so this cap
-      # is what stops an endlessly chatty model — the backstop for non-acting turns.
-      llm.continue: 12
+      # llm.message caps verify+judge attempts (each prose claim re-runs the tests
+      # and, if green, the reviewer); llm.empty caps degenerate silent turns.
+      llm.message: 8
+      llm.empty: 6
 
 events:
   # Domain kinds only — the engine self-registers its own (scope.request.closed /
   # .budget_exhausted), and the fs/pytest plugins self-register the tool.* kinds.
   - kind: task.new            # external entry: the GitHub-issue text, fed by `emit`
   - kind: request.received    # roots the request scope
-  - kind: claim.complete      # the brain's UNVERIFIED claim of done
-  - kind: verify.failed       # the verifier kicked it back into the loop
+  - kind: check.passed        # the deterministic verifier's green (tests pass)
+  - kind: verify.failed       # the verifier (or judge) kicked it back into the loop
+  - kind: judge.approved      # the reviewer affirms the claim — the only path to done
+  - kind: judge.rejected      # the reviewer rejects (silence/prose fold to this)
   - kind: state.updated.status
   - kind: request.terminal    # the drive-to-terminal fact (`emit --wait`)
-  - kind: llm.message         # the brain's own prose voice (folded into its history)
-  - kind: llm.continue        # a prose-only turn re-drives the brain (never a dead end)
+    terminal: true            #   a graph output: consumed by the CLient, no in-graph consumer
+  - kind: llm.message         # a no-function turn: the brain's prose CLAIM of done
+  - kind: llm.empty           # a no-function EMPTY turn: a bounded re-prompt
   - kind: llm.usage           # token accounting
+    terminal: true            #   observability leaf, no consumer required
 
 subscribers:
   # resolver — the entry/resolver role: map the external task.new into the domain
@@ -63,10 +74,10 @@ subscribers:
       kind: entry
       config: { emit: request.received }
 
-  # brain — the reasoning core (llm). It hears the task and every tool/verify
-  # result, reads its assembled history, and emits tool calls or claim.complete.
-  # Its Emits allowlist IS the function menu (no separate tool wiring); the tool
-  # schemas come from the plugins via the catalog.
+  # brain — the reasoning core (llm). It hears the task and every tool/verify/judge
+  # result, reads its assembled history, and either CALLS a function or STOPS. A
+  # stop (prose ⇒ llm.message, silence ⇒ llm.empty) is its claim, evaluated
+  # downstream — it never calls a "done" function. Its Emits allowlist IS the menu.
   - name: brain
     on:
       - request.received
@@ -80,10 +91,11 @@ subscribers:
       - tool.fs.search.failed
       - tool.py.test.result
       - tool.py.test.failed
+      # the loop re-drives on rejection of a claim (tests red, or the reviewer
+      # rejected) and on its own degenerate silence (a bounded re-prompt).
       - verify.failed
-      # the brain hears its OWN continuation: a turn that produced no function call
-      # re-drives this seat (the non-tool answer is an event, not a stall).
-      - llm.continue
+      - judge.rejected
+      - llm.empty
     in: request
     reads: [brain.history]
     emits:
@@ -92,58 +104,93 @@ subscribers:
       - tool.fs.write.call
       - tool.fs.search.call
       - tool.py.test.call
-      - claim.complete
-      - llm.message
-      - llm.continue
+      - llm.message      # prose claim of done (the answer kind)
+      - llm.empty        # degenerate silent turn (the empty kind)
       - llm.usage
     body:
       kind: llm
       config:
-        model: vertex:gemini-2.5-pro
+        model: vertex:gemini-3.5-flash
         project: iow-uagent          # GCP project (Gemini on Vertex); override per deployment
         location: global
-        answer: llm.message
+        max_tokens: 8192             # headroom: a thinking model spends tokens before the visible turn
         system: |
           You are a coding agent resolving a software issue in a checked-out repository.
           Work in a read → edit → test loop using the provided functions:
             - tool.fs.search / tool.fs.read to find and read the relevant code,
             - tool.fs.edit / tool.fs.write to change it,
             - tool.py.test to run the tests.
-          After every edit, run tool.py.test. Signal completion ONLY by calling
-          claim.complete — never by describing it in prose — and only once the tests
-          pass. An independent verifier then re-runs the tests; if they fail you
-          receive verify.failed and continue. Completion is verified, not asserted.
+          After every edit, run tool.py.test. When — and ONLY when — the tests pass and
+          the issue is resolved, STOP CALLING FUNCTIONS and reply with a short prose
+          summary of the fix. That prose IS your claim of completion: an independent
+          verifier re-runs the tests and a reviewer inspects the change; if either
+          rejects it you receive feedback and continue. Never announce completion while
+          still calling functions, and never stop before the tests pass.
 
-  # fs / pytest — the hands, wired as operator subscriptions IN the request scope
-  # (so they sit inside the budgeted agent loop). Each references a launched plugin
-  # by name; the daemon fills its On (the kinds it handles) and Emits (the kinds it
-  # produces) from the plugin's self-description, and the spawn command from the
-  # launch. `reflexd serve --root <repo>` must have launched fs + pytest first.
-  - name: fs
-    in: request
-    body:
-      kind: plugin
-      config: { plugin: fs }
+  # fs / pytest hands — NORMAL subscribers, one per tool-call kind, scoped in the
+  # request loop. No plugin reference: the daemon backs each by the plugin that
+  # HANDLES its kind (fs / pytest, launched by `reflexd serve --root <repo>`), and
+  # defaults its Emits to the plugin's produced result/failed kinds. The link is
+  # the kind. On defaults to [name].
+  - { name: tool.fs.read.call,   in: request }
+  - { name: tool.fs.edit.call,   in: request }
+  - { name: tool.fs.write.call,  in: request }
+  - { name: tool.fs.search.call, in: request }
+  - { name: tool.py.test.call,   in: request }
 
-  - name: pytest
-    in: request
-    body:
-      kind: plugin
-      config: { plugin: pytest }
-
-  # verifier — the independent judge of done (CONCEPT §3/§9). On a claim it re-runs
-  # the agreed check; green → the VERIFIED done status, red → verify.failed back
-  # into the loop. `dir` should be the checkout the daemon serves (doc 29 §8: the
-  # verifier target is a per-run decision); empty ⇒ the daemon's working directory.
+  # verifier — the DETERMINISTIC check of the brain's claim (CONCEPT §3/§9). On the
+  # prose claim (llm.message) it re-runs the agreed test command: green ⇒ check.passed
+  # (handed to the reviewer), red ⇒ verify.failed back into the loop. It no longer
+  # writes done directly — green is necessary, not sufficient; the reviewer gates done.
   - name: verifier
-    on: [claim.complete]
+    on: [llm.message]
     in: request
-    emits: [state.updated.status, verify.failed]
+    emits: [check.passed, verify.failed]
     body:
       kind: verifier
       config:
         command: [python, -m, pytest, -q]
-        pass: done
+        status_kind: check.passed
+        pass: ok
+        fail_emit: verify.failed
+
+  # judge — the independent REVIEWER, just another llm node (config, not an
+  # abstraction). On check.passed it reads the task + the brain's claim + the test
+  # evidence and decides: call judge.approved to affirm, or stay silent / explain to
+  # reject (Answer == Empty == judge.rejected folds prose AND silence to rejection,
+  # so only an affirmative function call approves). Catches tests-pass-but-gamed.
+  - name: judge
+    on: [check.passed]
+    in: request
+    reads: [judge.history]
+    emits: [judge.approved, judge.rejected, llm.usage]
+    body:
+      kind: llm
+      config:
+        model: vertex:gemini-3.5-flash
+        project: iow-uagent
+        location: global
+        max_tokens: 8192
+        answer: judge.rejected       # prose (no approval call) ⇒ rejected
+        empty: judge.rejected        # silence ⇒ rejected
+        system: |
+          You are an independent reviewer. A coding agent claims it resolved the issue,
+          and an automated check has confirmed the tests pass. Decide whether the change
+          GENUINELY resolves the described issue rather than gaming the tests (hardcoding
+          expected values, deleting or weakening tests, masking the bug). If it genuinely
+          resolves the issue, call judge.approved. Otherwise reply with a short reason —
+          prose or silence both count as NOT approved and send the agent back to work.
+
+  # done — the verified terminal status: on the reviewer's affirmation, write
+  # state.updated.status{done}. This is the ONLY writer of done (a deterministic
+  # green AND a reviewer approval upstream of it).
+  - name: done
+    on: [judge.approved]
+    in: request
+    emits: [state.updated.status]
+    body:
+      kind: entry
+      config: { emit: state.updated.status, payload: { status: done } }
 
   # terminal-on-done — lifecycle watcher (global cone): turn the verified terminal
   # status into the single drive-to-terminal fact.
@@ -165,45 +212,30 @@ subscribers:
       kind: entry
       config: { emit: request.terminal, payload: { status: failed } }
 
-  # terminal — the terminal sink: consumes request.terminal so the closure path
-  # never stalls (the stalled-closure validator check).
-  - name: terminal
-    on: [request.terminal]
-    in: global
-
-  # lifecycle — consumes the request cone's closure (the OTel trace end / audit).
-  - name: lifecycle
-    on: [scope.request.closed]
-    in: global
-
-  # costs — the usage sink.
-  - name: costs
-    on: [llm.usage]
-    in: request
-
 projections:
-  # brain.history — the llm.history view the brain reads: the task as the first
-  # user message, the brain's own calls/prose as assistant turns, tool results and
-  # verify.failed as user turns. params must mirror the brain's identity + menu.
+  # brain.history — the llm.history view the brain reads: the task as the first user
+  # message, the brain's own calls/prose as assistant turns, tool results and the
+  # rejection feedback (verify.failed / judge.rejected) and the re-prompt (llm.empty)
+  # as user turns. params.emits must mirror the brain's menu MINUS llm.empty, so the
+  # empty re-prompt is roled a user turn ("you produced nothing, continue").
   - name: brain.history
     on:
       - request.received
       - llm.message
       - tool.>
       - verify.failed
-      # the continuation nudge enters the transcript as a user turn (it is NOT in
-      # params.emits below, so the builder roles it user) — the model sees "you did
-      # not act, continue" after a prose-only turn.
-      - llm.continue
+      - judge.rejected
+      - llm.empty
     in: request
     type: llm.history
     params:
       system: |
         You are a coding agent resolving a software issue in a checked-out repository.
         Work in a read → edit → test loop using the provided functions. After every
-        edit, run tool.py.test. Signal completion ONLY by calling claim.complete —
-        never by describing it in prose — and only once the tests pass. Completion is
-        verified, not asserted; a turn that calls no function is simply re-prompted.
+        edit, run tool.py.test. When the tests pass and the issue is resolved, STOP
+        calling functions and reply with a short prose summary — that is your claim of
+        completion, which a verifier and a reviewer then evaluate. Never stop before
+        the tests pass.
       answer: llm.message
       task_kinds: [request.received]
       emits:
@@ -212,6 +244,29 @@ projections:
         - tool.fs.write.call
         - tool.fs.search.call
         - tool.py.test.call
-        - claim.complete
         - llm.message
+        - llm.usage
+
+  # judge.history — the reviewer's view: the task, the brain's prose claim, and the
+  # test evidence (all user turns — none are the judge's own emits). params.emits is
+  # the judge's menu so its own approval/rejection role as assistant.
+  - name: judge.history
+    on:
+      - request.received
+      - llm.message
+      - tool.py.test.result
+    in: request
+    type: llm.history
+    params:
+      system: |
+        You are an independent reviewer. A coding agent claims it resolved the issue and
+        an automated check has confirmed the tests pass. Decide whether the change
+        genuinely resolves the described issue rather than gaming the tests. If it does,
+        call judge.approved; otherwise reply with a short reason (prose or silence both
+        count as NOT approved).
+      answer: judge.rejected
+      task_kinds: [request.received]
+      emits:
+        - judge.approved
+        - judge.rejected
         - llm.usage
