@@ -148,7 +148,16 @@ func (m *Manager) Factory(s engine.Subscriber) (engine.Reaction, error) {
 	if err != nil {
 		return nil, err
 	}
-	c, _, err := m.Ensure(s.Name, cfg.Command)
+	// Key the client by the PLUGIN identity, not the subscriber name. Several
+	// handler subscribers (tool.fs.read.call, tool.fs.edit.call, …) are backed by
+	// the same plugin; they must share ONE process so the plugin's own state (e.g.
+	// fs's read-before-edit guard) is coherent across them — and so the process the
+	// launch path adopted (under the announced name) is reused, not re-spawned.
+	key := cfg.Plugin
+	if key == "" {
+		key = s.Name
+	}
+	c, _, err := m.Ensure(key, cfg.Command)
 	if err != nil {
 		return nil, fmt.Errorf("proxy %q: %w", s.Name, err)
 	}

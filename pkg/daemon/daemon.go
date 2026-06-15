@@ -233,7 +233,7 @@ func (d *Daemon) backByKind(sub engine.Subscriber) (engine.Subscriber, error) {
 		kinds = []string{sub.Name}
 	}
 	for _, k := range kinds {
-		_, command, outKinds, ok := d.plugins.HandlerFor(k)
+		name, command, outKinds, ok := d.plugins.HandlerFor(k)
 		if !ok {
 			continue
 		}
@@ -243,7 +243,10 @@ func (d *Daemon) backByKind(sub engine.Subscriber) (engine.Subscriber, error) {
 		if len(sub.Emits) == 0 {
 			sub.Emits = outKinds
 		}
-		raw, err := json.Marshal(proxy.Config{Command: command})
+		// Carry the plugin NAME (not just the command) so the body keys its client
+		// by plugin identity — every handler backed by this plugin shares one
+		// process (the plugin's read-before-edit guard et al. stay coherent).
+		raw, err := json.Marshal(proxy.Config{Command: command, Plugin: name})
 		if err != nil {
 			return sub, err
 		}
@@ -277,7 +280,7 @@ func (d *Daemon) resolvePluginRef(sub engine.Subscriber) (engine.Subscriber, err
 	if len(sub.Emits) == 0 {
 		sub.Emits = outKinds
 	}
-	raw, err := json.Marshal(proxy.Config{Command: command})
+	raw, err := json.Marshal(proxy.Config{Command: command, Plugin: cfg.Plugin})
 	if err != nil {
 		return sub, err
 	}
