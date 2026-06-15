@@ -17,6 +17,7 @@ import (
 
 	"github.com/kgatilin/reflex/engine"
 	"github.com/kgatilin/reflex/nodes"
+	"github.com/kgatilin/reflex/nodes/changeset"
 	"github.com/kgatilin/reflex/nodes/entry"
 	"github.com/kgatilin/reflex/nodes/gate"
 	"github.com/kgatilin/reflex/nodes/llm"
@@ -59,6 +60,10 @@ func registerFactories() {
 	nodes.Register("entry", entry.Factory)
 	nodes.Register("gate", gate.Factory)
 	nodes.Register("verifier", verifier.Factory)
+	// "changeset" is the in-graph control-plane bridge: a node that turns a
+	// topology document (a brain's "apply this topology" tool-call) into an
+	// engine changeset request, so an agent can BUILD topology at runtime.
+	nodes.Register("changeset", changeset.Factory)
 }
 
 // New builds a daemon with a fresh engine and the body resolver installed, plus
