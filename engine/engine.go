@@ -25,6 +25,11 @@ type Engine struct {
 	// Reactions (resolver.go). nil for the in-process path (live Body closures);
 	// the daemon/YAML path installs one via WithBodyResolver.
 	resolver BodyResolver
+	// expander rewrites a changeset's delta decls before validation (resolver.go
+	// DeclExpander): the daemon installs one that backs plugin-handler nodes with
+	// their process. Applied by commitChangeset to BOTH the Apply method and the
+	// in-graph changeset path. nil for the in-process path.
+	expander DeclExpander
 	// live is the cached live topology — a memoisation of foldTopology(log,
 	// bodies), nothing more (G8: it is recomputed from the log, never the truth).
 	// Apply rebuilds it after writing the changeset's facts; liveDecls lazily
@@ -118,6 +123,40 @@ func (e *Engine) resolveBody(s Subscriber) (Reaction, error) {
 // facts are dispatched on the next Drain, so an audit subscriber of the sys.*
 // kinds sees them like any other event.
 func (e *Engine) Apply(ctx context.Context, decls ...Decl) error {
+	req := e.appendSys("", SubjChangesetRequested, ChangesetRequestPayload(decls, "apply"))
+	_, err := e.commitChangeset(req.Trace.SpanID, decls)
+	return err
+}
+
+// commitChangeset is the shared apply core (doc 20): given the changeset's delta
+// decls and the requested-event span they hang under, it expands the delta
+// (plugin backing), validates the RESULTING graph (live table + delta) as a
+// whole, resolves every descriptor body, and on success writes the object facts +
+// changeset.applied (committing the bodies and rebuilding the live table), else
+// writes changeset.rejected and writes no object facts (the live table is
+// unchanged by construction). It returns whether the changeset applied — the
+// in-graph caller uses that to refresh the running drain's live node/scope set.
+//
+// Both clients route through here, so an operator Apply and a node-emitted
+// in-graph changeset get identical expansion, validation, body resolution, and
+// fact-writing — the control plane is "one pipeline, every source of change"
+// (changeset.go), the only difference being the principal on the request fact.
+func (e *Engine) commitChangeset(cause string, decls []Decl) (bool, error) {
+	// Expand the delta (plugin backing) exactly as an operator Apply's caller
+	// would, so an in-graph changeset that names a plugin-handled kind is backed
+	// by the process too. The expander runs BEFORE opsOf so the facts carry the
+	// resolved body descriptor (rebuildable from the log, G8).
+	if e.expander != nil {
+		expanded, xerr := e.expander(decls)
+		if xerr != nil {
+			e.appendSys(cause, SubjChangesetRejected, mustMarshal(rejectedPayload{
+				Changeset: cause, Reasons: []string{xerr.Error()},
+			}))
+			return false, xerr
+		}
+		decls = expanded
+	}
+
 	live := e.liveDecls()
 	resulting := make([]Decl, 0, len(live)+len(decls))
 	resulting = append(resulting, live...)
@@ -125,7 +164,7 @@ func (e *Engine) Apply(ctx context.Context, decls ...Decl) error {
 
 	rep, err := Validate(resulting...)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Resolve every descriptor-based body up front (a body that cannot be built
@@ -153,39 +192,54 @@ func (e *Engine) Apply(ctx context.Context, decls ...Decl) error {
 		}
 	}
 
-	req := e.appendSys("", SubjChangesetRequested, mustMarshal(changesetPayload{
-		Ops:       opsOf(decls),
-		Principal: "apply",
-	}))
-
 	if !rep.Connected || len(bodyErrs) > 0 {
-		e.appendSys(req.Trace.SpanID, SubjChangesetRejected, mustMarshal(rejectedPayload{
-			Changeset: req.Trace.SpanID,
+		e.appendSys(cause, SubjChangesetRejected, mustMarshal(rejectedPayload{
+			Changeset: cause,
 			Reasons:   append(append([]string(nil), rep.Suggestions...), bodyErrs...),
 		}))
 		if !rep.Connected {
-			return &ValidationError{Report: rep}
+			return false, &ValidationError{Report: rep}
 		}
-		return fmt.Errorf("engine: changeset rejected — %d node body(ies) failed to resolve: %v", len(bodyErrs), bodyErrs)
+		return false, fmt.Errorf("engine: changeset rejected — %d node body(ies) failed to resolve: %v", len(bodyErrs), bodyErrs)
 	}
 
 	for _, op := range opsOf(decls) {
 		if subject, payload := factOf(op); subject != "" {
-			e.appendSys(req.Trace.SpanID, subject, payload)
+			e.appendSys(cause, subject, payload)
 		}
 	}
 	for name, r := range resolved {
 		e.bodies[name] = r
 	}
-	e.appendSys(req.Trace.SpanID, SubjChangesetApplied, mustMarshal(appliedPayload{
-		Changeset: req.Trace.SpanID,
+	e.appendSys(cause, SubjChangesetApplied, mustMarshal(appliedPayload{
+		Changeset: cause,
 		Count:     len(decls),
 	}))
 
 	// The live table is exactly the fold of the facts just written (G8): rebuild
 	// the memoisation from the log so the hot dispatch paths read it in O(1).
 	e.live = foldTopology(e.log, e.bodies)
-	return nil
+	return true, nil
+}
+
+// changesetResolved reports whether a changeset.requested span already has an
+// applied/rejected outcome on the log — the discriminator the in-graph dispatch
+// hook uses to tell a request the Apply method ALREADY committed (synchronously,
+// before this drain reached the request fact) from one a node just emitted and
+// nobody has applied. It folds the log, no privileged state.
+func (e *Engine) changesetResolved(reqSpan string) bool {
+	for _, ev := range e.log {
+		_, _, kind := splitSubject(ev.Subject)
+		if kind != KindChangesetApplied && kind != KindChangesetRejected {
+			continue
+		}
+		for _, c := range ev.Trace.CausedBy {
+			if c == reqSpan {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // liveDecls returns the cached live topology, lazily folding it from the log on
@@ -321,7 +375,7 @@ func (e *Engine) Drain(ctx context.Context) error {
 		if e.isDispatched(idx) {
 			continue
 		}
-		e.process(ctx, idx, nodes, sr)
+		e.process(ctx, idx, sr)
 	}
 	return nil
 }
@@ -388,7 +442,7 @@ func (e *Engine) rebuildScopes(nodes []Subscriber) *scopeRuntime {
 // (so the child's increments land BEFORE this event's decrement — the
 // false-zero guard), and finally leaves the cones (−1 each), closing any whose
 // count crossed to zero.
-func (e *Engine) process(ctx context.Context, idx int, nodes []Subscriber, sr *scopeRuntime) {
+func (e *Engine) process(ctx context.Context, idx int, sr *scopeRuntime) {
 	e.markDispatched(idx)
 	ev := e.log[idx]
 	cls, scope, kind := splitSubject(ev.Subject)
@@ -423,7 +477,30 @@ func (e *Engine) process(ctx context.Context, idx int, nodes []Subscriber, sr *s
 	}
 
 	sr.enter(ev.Trace.SpanID)
-	e.fanOut(ctx, idx, cls, scope, kind, nodes, sr)
+
+	// In-graph control plane (doc 20 / changeset.go): a node may DRIVE a topology
+	// changeset by emitting KindChangesetRequested as an ordinary event. When THIS
+	// event is such a request that no outcome has resolved yet — i.e. a node
+	// emitted it, not the Apply method, which commits synchronously and leaves an
+	// applied/rejected fact before this drain ever reaches the request — run the
+	// same changeset pipeline now. On success, refresh this drain's live node and
+	// scope set from the rebuilt live table so a subgraph the changeset adds is
+	// live for the VERY NEXT sibling emit (e.g. the node's own task-dispatch emit
+	// in the same turn). The applied/rejected fact is appended caused by this
+	// request, so it inherits this event's cone membership and the requesting node
+	// hears the outcome later in the same drain.
+	if kind == KindChangesetRequested && !e.changesetResolved(ev.Trace.SpanID) {
+		if decls, derr := declsOfOps(opsFromPayload(ev.Payload)); derr != nil {
+			e.appendSys(ev.Trace.SpanID, SubjChangesetRejected, mustMarshal(rejectedPayload{
+				Changeset: ev.Trace.SpanID, Reasons: []string{derr.Error()},
+			}))
+		} else if applied, _ := e.commitChangeset(ev.Trace.SpanID, decls); applied {
+			sr.nodes = e.liveSubscribers()
+			sr.declared = declaredScopes(e.liveDecls())
+		}
+	}
+
+	e.fanOut(ctx, idx, cls, scope, kind, sr)
 
 	// Leave the cones; any that reach zero quiesce and close exactly once.
 	for _, key := range sr.membership[ev.Trace.SpanID] {
@@ -436,9 +513,12 @@ func (e *Engine) process(ctx context.Context, idx int, nodes []Subscriber, sr *s
 // fanOut runs every matching live node and recursively processes each emit as
 // a child of ev. A React error is not fatal (§4 G3): it becomes a non-terminal
 // {node}.failed event in the same cone and the drain continues.
-func (e *Engine) fanOut(ctx context.Context, idx int, cls, scope, kind string, nodes []Subscriber, sr *scopeRuntime) {
+func (e *Engine) fanOut(ctx context.Context, idx int, cls, scope, kind string, sr *scopeRuntime) {
 	ev := e.log[idx]
-	for _, n := range nodes {
+	// Iterate the scope runtime's live node set, NOT a slice captured at Drain
+	// entry: an in-graph changeset (above) refreshes sr.nodes mid-drain, and a
+	// sibling emit processed after it must see the just-added subgraph.
+	for _, n := range sr.nodes {
 		if !sr.deliver(n, ev.Trace.SpanID, scope, kind) {
 			continue
 		}
@@ -466,7 +546,7 @@ func (e *Engine) fanOut(ctx context.Context, idx int, cls, scope, kind string, n
 		if err != nil {
 			p, _ := json.Marshal(map[string]string{"error": err.Error()})
 			child := e.appendEmit(ev, cls, Emit{Kind: n.Name + ".failed", Payload: p})
-			e.process(ctx, child, nodes, sr)
+			e.process(ctx, child, sr)
 			continue
 		}
 		for _, em := range emits {
@@ -488,12 +568,12 @@ func (e *Engine) fanOut(ctx context.Context, idx int, cls, scope, kind string, n
 						"kind":  em.Kind,
 					})
 					child := e.appendEmit(ev, cls, Emit{Kind: n.Name + ".failed", Payload: p})
-					e.process(ctx, child, nodes, sr)
+					e.process(ctx, child, sr)
 					continue
 				}
 			}
 			child := e.appendEmit(ev, cls, em)
-			e.process(ctx, child, nodes, sr)
+			e.process(ctx, child, sr)
 		}
 	}
 }
@@ -566,7 +646,7 @@ func (e *Engine) emitScopeFact(ctx context.Context, inst *scopeInstance, reason,
 		},
 	}
 	e.log = append(e.log, ev)
-	e.process(ctx, idx, sr.nodes, sr)
+	e.process(ctx, idx, sr)
 }
 
 // catalogSchema returns the declared catalog schema for a kind and whether the

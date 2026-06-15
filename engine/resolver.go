@@ -35,6 +35,19 @@ type Option func(*Engine)
 // Apply rejects a descriptor node when no resolver is installed.
 func WithBodyResolver(r BodyResolver) Option { return func(e *Engine) { e.resolver = r } }
 
+// DeclExpander rewrites a changeset's delta decls before validation — the
+// resolver's sibling seam. The daemon installs one that backs a plugin-handler
+// subscriber (a vanilla node whose subscribed kind a launched plugin handles)
+// with that plugin's process: it fills the node's body descriptor from the
+// plugin, so the node runs out-of-process. It is applied to BOTH apply paths —
+// the Apply method (an operator document) and the in-graph changeset dispatch (a
+// node-emitted changeset) — so a topology a node builds at runtime gets the same
+// plugin backing an operator apply does. nil for the in-process path.
+type DeclExpander func([]Decl) ([]Decl, error)
+
+// WithDeclExpander installs the changeset delta expander (see DeclExpander).
+func WithDeclExpander(x DeclExpander) Option { return func(e *Engine) { e.expander = x } }
+
 // subscriberBodyDescriptor reports whether a node carries a serializable body
 // descriptor (a body kind to resolve) rather than a live in-process closure.
 func subscriberBodyDescriptor(n Subscriber) bool { return n.Body == nil && n.BodyKind != "" }

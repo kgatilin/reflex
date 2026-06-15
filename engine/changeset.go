@@ -1,6 +1,9 @@
 package engine
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // The control plane (doc 20 / CONCEPT §8): managing the topology — adding or
 // removing nodes, subscriptions, scopes, projections, and event types — is
@@ -44,6 +47,16 @@ const (
 	// SubjChangesetRejected records a refused changeset with its reasons; no
 	// object facts are written, so the live table is unchanged by construction.
 	SubjChangesetRejected = "sys.topology.changeset.rejected"
+
+	// KindChangesetRequested/Applied/Rejected are the KIND TAILS of the three
+	// changeset facts (the Subj* constants above are the full sys subjects;
+	// splitSubject strips the "sys." class). A node drives the control plane
+	// in-graph by emitting KindChangesetRequested as an ordinary event, and hears
+	// the outcome on KindChangesetApplied / KindChangesetRejected. The engine
+	// self-registers all three in the catalog (catalog.go), terminal.
+	KindChangesetRequested = "topology.changeset.requested"
+	KindChangesetApplied   = "topology.changeset.applied"
+	KindChangesetRejected  = "topology.changeset.rejected"
 
 	subjSubscriberRegistered   = "sys.subscriber.registered"
 	subjSubscriberDeregistered = "sys.subscriber.deregistered"
@@ -148,10 +161,79 @@ func opsOf(decls []Decl) []Op {
 		case Projection:
 			out = append(out, Op{Verb: verbAdd, Kind: opKindProjection, Name: v.Name, Spec: mustMarshal(projectionSpecOf(v))})
 		case EventKind:
-			out = append(out, Op{Verb: verbAdd, Kind: opKindEvent, Name: v.Kind, Spec: mustMarshal(registration{Kind: v.Kind, Schema: v.Schema})})
+			out = append(out, Op{Verb: verbAdd, Kind: opKindEvent, Name: v.Kind, Spec: mustMarshal(registration{Kind: v.Kind, Schema: v.Schema, Terminal: v.Terminal})})
 		}
 	}
 	return out
+}
+
+// OpsOf is the exported changeset serializer (opsOf): it turns a batch of Decls
+// into add-ops, the unit a node emits to DRIVE a topology changeset in-graph.
+// The reflex-side bridge that translates a topology document into a changeset
+// request builds the request payload from OpsOf(decls); the engine parses it back
+// with declsOfOps and runs the same validate+commit pipeline as an operator Apply.
+func OpsOf(decls []Decl) []Op { return opsOf(decls) }
+
+// ChangesetRequestPayload builds the payload of an in-graph changeset request
+// (the KindChangesetRequested event a node emits): the add-ops for decls plus a
+// principal tag. The engine's in-graph dispatch hook unmarshals exactly this.
+func ChangesetRequestPayload(decls []Decl, principal string) json.RawMessage {
+	return mustMarshal(changesetPayload{Ops: opsOf(decls), Principal: principal})
+}
+
+// opsFromPayload reads the ops out of a changeset request payload (the inverse of
+// ChangesetRequestPayload's marshal). A malformed payload yields no ops, so the
+// resulting empty changeset is a connected no-op rather than a crash.
+func opsFromPayload(payload json.RawMessage) []Op {
+	var p changesetPayload
+	_ = json.Unmarshal(payload, &p)
+	return p.Ops
+}
+
+// declsOfOps rebuilds Decls from add-ops — the inverse of opsOf — for the
+// in-graph changeset path: a node emits ops, the engine turns them back into
+// decls to run the same validate+commit pipeline an operator Apply runs. Bodies
+// ride as their descriptor (BodyKind+BodyConfig), resolved by the engine's
+// resolver exactly as a loaded-from-log node is. Remove-ops are not modelled
+// in-graph yet (a node grows a topology); a remove yields an error so the
+// changeset is cleanly rejected rather than silently dropped.
+func declsOfOps(ops []Op) ([]Decl, error) {
+	var out []Decl
+	for _, op := range ops {
+		if op.Verb == verbRemove {
+			return nil, fmt.Errorf("engine: in-graph changeset: remove op (%s %q) not supported", op.Kind, op.Name)
+		}
+		switch op.Kind {
+		case opKindSubscriber:
+			var s subscriberSpec
+			if err := json.Unmarshal(op.Spec, &s); err != nil {
+				return nil, fmt.Errorf("engine: changeset op subscriber %q: %w", op.Name, err)
+			}
+			out = append(out, Subscriber{
+				Name: s.Name, On: s.On, In: s.In, Reads: s.Reads, Emits: s.Emits, Scope: s.Scope,
+				BodyKind: s.BodyKind, BodyConfig: s.BodyConfig,
+			})
+		case opKindScope:
+			var s scopeSpec
+			if err := json.Unmarshal(op.Spec, &s); err != nil {
+				return nil, fmt.Errorf("engine: changeset op scope %q: %w", op.Name, err)
+			}
+			out = append(out, Scope{Name: s.Name, Root: s.Root, Budget: s.Budget})
+		case opKindProjection:
+			var s projectionSpec
+			if err := json.Unmarshal(op.Spec, &s); err != nil {
+				return nil, fmt.Errorf("engine: changeset op projection %q: %w", op.Name, err)
+			}
+			out = append(out, Projection{Name: s.Name, On: s.On, In: s.In, Type: s.Type, Key: s.Key, Value: s.Value, Params: s.Params})
+		case opKindEvent:
+			var r registration
+			if err := json.Unmarshal(op.Spec, &r); err != nil {
+				return nil, fmt.Errorf("engine: changeset op event %q: %w", op.Name, err)
+			}
+			out = append(out, EventKind{Kind: r.Kind, Schema: r.Schema, Terminal: r.Terminal})
+		}
+	}
+	return out, nil
 }
 
 func subscriberSpecOf(n Subscriber) subscriberSpec {
@@ -215,7 +297,7 @@ func foldTopology(log []Event, bodies map[string]Reaction) []Decl {
 	var scopeOrder []string
 	projs := map[string]projectionSpec{}
 	var projOrder []string
-	events := map[string]json.RawMessage{}
+	events := map[string]eventReg{}
 	var eventOrder []string
 
 	addOrder := func(order *[]string, present map[string]bool, name string) {
@@ -256,9 +338,9 @@ func foldTopology(log []Event, bodies map[string]Reaction) []Decl {
 		case subjProjectionDeregistered:
 			delete(projs, nameField(ev.Payload))
 		case subjEventRegistered:
-			if kind, schema, ok := parseRegistration(ev.Payload); ok && kind != "" {
+			if kind, schema, terminal, ok := parseRegistration(ev.Payload); ok && kind != "" {
 				addOrder(&eventOrder, eventPresent, kind)
-				events[kind] = schema
+				events[kind] = eventReg{schema: schema, terminal: terminal}
 			}
 		}
 	}
@@ -286,11 +368,20 @@ func foldTopology(log []Event, bodies map[string]Reaction) []Decl {
 		}
 	}
 	for _, kind := range eventOrder {
-		if schema, ok := events[kind]; ok {
-			out = append(out, EventKind{Kind: kind, Schema: schema})
+		if reg, ok := events[kind]; ok {
+			out = append(out, EventKind{Kind: kind, Schema: reg.schema, Terminal: reg.terminal})
 		}
 	}
 	return out
+}
+
+// eventReg is the folded form of an event-catalog registration on the log: the
+// kind's schema and its terminal-leaf flag, both restored from the
+// sys.event.registered fact (registration carries terminal so the fold preserves
+// it).
+type eventReg struct {
+	schema   json.RawMessage
+	terminal bool
 }
 
 // nameField reads the {"name": ...} payload of a deregistration/retirement fact.

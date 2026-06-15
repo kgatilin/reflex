@@ -72,6 +72,19 @@ func foldCatalog(decls []Decl, log []Event) catalog {
 	c := catalog{schemas: map[string]json.RawMessage{}, terminal: map[string]struct{}{}}
 	c.schemas[seedKind] = seedSchema // the axiom, always known
 
+	// The engine also owns the in-graph control plane (doc 20 / changeset.go): a
+	// node may DRIVE a topology changeset by emitting KindChangesetRequested, and
+	// HEAR the outcome on KindChangesetApplied / KindChangesetRejected. Those three
+	// kinds are engine-owned (the engine consumes the request and writes the
+	// outcome), so it self-registers them — terminal, like scope closures: the
+	// request's consumer is the engine, not a node, and the outcome facts are
+	// observability/feedback leaves a node MAY subscribe to but need not. Without
+	// this the validator would flag a node-emitted changeset request as a dead-end.
+	for _, k := range []string{KindChangesetRequested, KindChangesetApplied, KindChangesetRejected} {
+		c.schemas[k] = nil
+		c.terminal[k] = struct{}{}
+	}
+
 	// The engine self-registers the kinds IT owns, through the same catalog
 	// (CONCEPT §6): a subscriber and the engine machinery register events by the
 	// one primitive operation, so the operator never hand-declares engine
@@ -108,11 +121,14 @@ func foldCatalog(decls []Decl, log []Event) catalog {
 		if kind != seedKind {
 			continue
 		}
-		regKind, regSchema, ok := parseRegistration(ev.Payload)
+		regKind, regSchema, regTerminal, ok := parseRegistration(ev.Payload)
 		if !ok || regKind == "" {
 			continue
 		}
 		c.schemas[regKind] = regSchema
+		if regTerminal {
+			c.terminal[regKind] = struct{}{}
+		}
 		c.declared++
 	}
 	return c
@@ -178,22 +194,27 @@ func (c catalog) schemaOf(kind string) (json.RawMessage, bool) {
 
 // registration is the event.registered payload shape (doc 26 §4a): {kind,
 // schema}. Exported as a helper for tests and the runtime registration path so
-// a caller does not hand-roll the seed payload.
+// a caller does not hand-roll the seed payload. Terminal persists the catalog
+// leaf flag (EventKind.Terminal) through the op→fact→fold round-trip, so a kind
+// declared terminal stays terminal in the folded live table — without it an
+// iterative/in-graph changeset that re-validates against the live table would
+// see a previously-terminal kind as an ordinary dead-end.
 type registration struct {
-	Kind   string          `json:"kind"`
-	Schema json.RawMessage `json:"schema,omitempty"`
+	Kind     string          `json:"kind"`
+	Schema   json.RawMessage `json:"schema,omitempty"`
+	Terminal bool            `json:"terminal,omitempty"`
 }
 
-// parseRegistration reads an event.registered payload's two declared fields
+// parseRegistration reads an event.registered payload's declared fields
 // mechanically. A malformed payload yields ok=false (the registration is
 // ignored — it never poisons the fold; a non-conforming event.registered would
 // itself be caught by payload-conformance against the seed schema).
-func parseRegistration(payload json.RawMessage) (kind string, schema json.RawMessage, ok bool) {
+func parseRegistration(payload json.RawMessage) (kind string, schema json.RawMessage, terminal bool, ok bool) {
 	var r registration
 	if err := json.Unmarshal(payload, &r); err != nil {
-		return "", nil, false
+		return "", nil, false, false
 	}
-	return r.Kind, r.Schema, true
+	return r.Kind, r.Schema, r.Terminal, true
 }
 
 // RegisterPayload builds the payload of an event.registered emit (doc 26 §4a):

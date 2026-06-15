@@ -61,11 +61,16 @@ func registerFactories() {
 	nodes.Register("verifier", verifier.Factory)
 }
 
-// New builds a daemon with a fresh engine and the body resolver installed.
+// New builds a daemon with a fresh engine and the body resolver installed, plus
+// the changeset delta expander that backs plugin-handler nodes by the process
+// handling their kind. The expander runs inside engine.commitChangeset, so BOTH
+// an operator Apply and an in-graph node-emitted changeset get plugin backing —
+// a topology a brain node builds at runtime wires its fs/pytest hands exactly as
+// a file-applied one does.
 func New() *Daemon {
 	registerFactories()
 	d := &Daemon{plugins: proxy.NewManager(), launchedCmds: map[string]bool{}}
-	d.e = engine.New(engine.WithBodyResolver(d.resolver()))
+	d.e = engine.New(engine.WithBodyResolver(d.resolver()), engine.WithDeclExpander(d.expandPluginRefs))
 	return d
 }
 
@@ -76,7 +81,7 @@ func New() *Daemon {
 func Load(log []engine.Event) (*Daemon, error) {
 	registerFactories()
 	d := &Daemon{plugins: proxy.NewManager(), launchedCmds: map[string]bool{}}
-	e, err := engine.Load(log, engine.WithBodyResolver(d.resolver()))
+	e, err := engine.Load(log, engine.WithBodyResolver(d.resolver()), engine.WithDeclExpander(d.expandPluginRefs))
 	if err != nil {
 		return nil, err
 	}
@@ -143,10 +148,10 @@ func (d *Daemon) Apply(ctx context.Context, doc topology.Document) error {
 	if err := d.launchSectionPlugins(doc.Plugins); err != nil {
 		return err
 	}
-	decls, err = d.expandPluginRefs(decls)
-	if err != nil {
-		return err
-	}
+	// Plugin-ref expansion now runs inside the engine (WithDeclExpander), so it
+	// applies uniformly to this operator Apply and to any in-graph changeset a
+	// node emits. The daemon only launches the plugins and folds their not-yet-live
+	// catalog kinds ahead of the operator delta.
 	pending := d.pendingPluginDecls()
 	delta := make([]engine.Decl, 0, len(pending)+len(decls))
 	delta = append(delta, pending...)
