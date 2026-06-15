@@ -1,0 +1,183 @@
+# coding-agent — the doc-29 §4b state-defined coding agent, as a topology document.
+#
+# This is the OPERATOR document. It declares only domain kinds and the wiring;
+# the hands (fs, pytest) self-register when the daemon launches them, so this doc
+# must be applied to a daemon started with `reflexd serve --root <repo>` (which
+# brings up the fs + pytest plugins confined to <repo>). Applied standalone via
+# `reflexd validate`, it reports gaps for the tool kinds — that is correct, the
+# hands are not present in a dry run. See topologies/README.md for the run recipe.
+#
+# The shape (CONCEPT §9, doc 29 §4b):
+#   task.new ──resolver──▶ request.received  (roots the `request` scope)
+#     brain (llm, loops): reads its history, calls fs/pytest, claims complete
+#       fs / pytest (plugins): tool.*.call ──▶ tool.*.result | .failed ──▶ brain
+#     claim.complete ──verifier──▶ VERIFIED state.updated.status{done} | verify.failed
+#       verify.failed ──▶ brain (another turn)
+#     state.updated.status{done} ──terminal-on-done──▶ request.terminal
+#     scope.request.budget_exhausted ──terminal-on-exhaust──▶ request.terminal{failed}
+#
+# Completion is a verified state (CONCEPT §3/§9): the brain only CLAIMS done; the
+# verifier re-runs the agreed check and writes done only if it passes. The loop is
+# event closure, bounded by the `request` scope budget (the termination backstop).
+
+scopes:
+  - name: request
+    root: request.received
+    budget:
+      # The loop's termination backstop (CONCEPT §4): caps verification attempts
+      # and per-tool calls within the request cone. Tune per repo size (doc 29 §8).
+      claim.complete: 6
+      tool.fs.read.call: 80
+      tool.fs.edit.call: 80
+      tool.fs.write.call: 40
+      tool.fs.search.call: 80
+      tool.py.test.call: 20
+
+events:
+  # Domain kinds only — the engine self-registers its own (scope.request.closed /
+  # .budget_exhausted), and the fs/pytest plugins self-register the tool.* kinds.
+  - kind: task.new            # external entry: the GitHub-issue text, fed by `emit`
+  - kind: request.received    # roots the request scope
+  - kind: claim.complete      # the brain's UNVERIFIED claim of done
+  - kind: verify.failed       # the verifier kicked it back into the loop
+  - kind: state.updated.status
+  - kind: request.terminal    # the drive-to-terminal fact (`emit --wait`)
+  - kind: llm.message         # the brain's own prose voice (folded into its history)
+  - kind: llm.usage           # token accounting
+
+subscribers:
+  # resolver — the entry/resolver role: map the external task.new into the domain
+  # root request.received, carrying the issue text through.
+  - name: resolver
+    on: [task.new]
+    in: global
+    emits: [request.received]
+    body:
+      kind: entry
+      config: { emit: request.received }
+
+  # brain — the reasoning core (llm). It hears the task and every tool/verify
+  # result, reads its assembled history, and emits tool calls or claim.complete.
+  # Its Emits allowlist IS the function menu (no separate tool wiring); the tool
+  # schemas come from the plugins via the catalog.
+  - name: brain
+    on:
+      - request.received
+      - tool.fs.read.result
+      - tool.fs.read.failed
+      - tool.fs.edit.result
+      - tool.fs.edit.failed
+      - tool.fs.write.result
+      - tool.fs.write.failed
+      - tool.fs.search.result
+      - tool.fs.search.failed
+      - tool.py.test.result
+      - tool.py.test.failed
+      - verify.failed
+    in: request
+    reads: [brain.history]
+    emits:
+      - tool.fs.read.call
+      - tool.fs.edit.call
+      - tool.fs.write.call
+      - tool.fs.search.call
+      - tool.py.test.call
+      - claim.complete
+      - llm.message
+      - llm.usage
+    body:
+      kind: llm
+      config:
+        model: vertex:gemini-2.5-pro
+        project: iow-uagent          # GCP project (Gemini on Vertex); override per deployment
+        location: global
+        answer: llm.message
+        system: |
+          You are a coding agent resolving a software issue in a checked-out repository.
+          Work in a read → edit → test loop using the provided functions:
+            - tool.fs.search / tool.fs.read to find and read the relevant code,
+            - tool.fs.edit / tool.fs.write to change it,
+            - tool.py.test to run the tests.
+          When and ONLY when the tests you can run pass and you believe the issue is
+          resolved, call claim.complete. An independent verifier re-runs the tests; if
+          they fail you will receive verify.failed and must continue. Do not claim
+          completion on a hunch — completion is verified, not asserted.
+
+  # verifier — the independent judge of done (CONCEPT §3/§9). On a claim it re-runs
+  # the agreed check; green → the VERIFIED done status, red → verify.failed back
+  # into the loop. `dir` should be the checkout the daemon serves (doc 29 §8: the
+  # verifier target is a per-run decision); empty ⇒ the daemon's working directory.
+  - name: verifier
+    on: [claim.complete]
+    in: request
+    emits: [state.updated.status, verify.failed]
+    body:
+      kind: verifier
+      config:
+        command: [python, -m, pytest, -q]
+        pass: done
+
+  # terminal-on-done — lifecycle watcher (global cone): turn the verified terminal
+  # status into the single drive-to-terminal fact.
+  - name: terminal-on-done
+    on: [state.updated.status]
+    in: global
+    emits: [request.terminal]
+    body:
+      kind: gate
+      config: { emit: request.terminal, when: [done] }
+
+  # terminal-on-exhaust — the budget backstop: exhaustion maps straight to a failed
+  # terminal so a stuck loop still terminates with a verdict (not in the void).
+  - name: terminal-on-exhaust
+    on: [scope.request.budget_exhausted]
+    in: global
+    emits: [request.terminal]
+    body:
+      kind: entry
+      config: { emit: request.terminal, payload: { status: failed } }
+
+  # terminal — the terminal sink: consumes request.terminal so the closure path
+  # never stalls (the stalled-closure validator check).
+  - name: terminal
+    on: [request.terminal]
+    in: global
+
+  # lifecycle — consumes the request cone's closure (the OTel trace end / audit).
+  - name: lifecycle
+    on: [scope.request.closed]
+    in: global
+
+  # costs — the usage sink.
+  - name: costs
+    on: [llm.usage]
+    in: request
+
+projections:
+  # brain.history — the llm.history view the brain reads: the task as the first
+  # user message, the brain's own calls/prose as assistant turns, tool results and
+  # verify.failed as user turns. params must mirror the brain's identity + menu.
+  - name: brain.history
+    on:
+      - request.received
+      - llm.message
+      - tool.>
+      - verify.failed
+    in: request
+    type: llm.history
+    params:
+      system: |
+        You are a coding agent resolving a software issue in a checked-out repository.
+        Work in a read → edit → test loop using the provided functions, and call
+        claim.complete only when the tests pass. Completion is verified, not asserted.
+      answer: llm.message
+      task_kinds: [request.received]
+      emits:
+        - tool.fs.read.call
+        - tool.fs.edit.call
+        - tool.fs.write.call
+        - tool.fs.search.call
+        - tool.py.test.call
+        - claim.complete
+        - llm.message
+        - llm.usage

@@ -255,11 +255,47 @@ determines it and passes it at launch (`reflexd plugin fs --root <dir>`, wired
 from `serve --root`), never an operator topology config. The root confines the
 process; it is not part of the graph the operator declares.
 
-**Iteration 4 — The coding-agent topology + verification flow, run locally.**
-Express §4 as a changeset/YAML; wire the real model (Gemini, `iow-uagent`,
-`location global`). Run a *synthetic* coding task on a local checkout end-to-end
-— prove the loop, the verification flow, and the terminal-state drive on the real
-stack, no benchmark yet.
+**Iteration 4 — The coding-agent topology + verification flow, run locally.
+✅ MOSTLY DONE (`16150d0`, `d3c69bc`, `aba7af0`, this iteration); one manual
+step remains.** §4b is now a committed topology document
+([`topologies/coding-agent.yaml`](../topologies/coding-agent.yaml)) wiring the
+real Gemini brain (`vertex:gemini-2.5-pro`) to the launched fs/pytest hands. What
+shipped:
+
+- **The control bodies** the §4b graph needed beyond `llm`: `entry` (the
+  entry/resolver role — boundary kind → domain kind), `gate` (the terminal gate —
+  drive `request.terminal` only when a state field is terminal), and `verifier`
+  (completion as a *verified* state: re-run the agreed check, green →
+  `state.updated.status{done}`, red → `verify.failed` back into the loop). Each is
+  a registered `nodes.Factory`, unit-tested. The brain only *claims* done; the
+  verifier writes it.
+- **A deterministic integration test** (`pkg/daemon/coding_loop_test.go`) drives
+  the whole loop on the real engine with the model + hands replaced by stand-ins:
+  the green path (claim → verified done → `request.terminal`) and the red path
+  (the check never passes → the loop re-claims until the `request` scope budget
+  caps it → `budget_exhausted` → a failed terminal). Proves the loop, the
+  verification flow, and the terminal drive without spend.
+- **A real-hands apply test** (`coding_agent_topology_test.go`) launches the
+  actual fs + pytest plugins, folds them with the document, and asserts the graph
+  is connected and the `llm` body resolves its Gemini provider (lazily — no model
+  call). The structural proof up to the live-model boundary.
+
+*Finding (Iteration 4) — RESOLVED in this iteration (`aba7af0`):* the agent loop
+is `brain ↔ fs/pytest`, but a launched plugin is a **global** subscriber (doc 29
+Iteration 3: a plugin is scope-agnostic). The connectivity validator's
+unbounded-cycle check marked boundedness **per node** (is its `In` a budgeted
+scope?), so the global hands made the budgeted agent loop read as an unbounded
+cycle — the first topology to close a loop *through* a plugin tripped it. The
+check is now **edge-kind based** (doc 24 §5's intended rule, previously deferred):
+an SCC is bounded iff some budgeted scope bounds a kind on an edge *within* the
+SCC while anchoring the cone. This admits the global-plugin loop and tightens the
+unrelated-kind case.
+
+**Remaining (the one manual step):** the actual **live Gemini drive** — `emit
+task.new --wait request.terminal` against a `serve --root <checkout>` daemon — is
+a credentialled, billable run, documented in
+[`topologies/README.md`](../topologies/README.md), not a committed test. That run
+closes Iteration 4 and is the immediate lead-in to Iteration 5.
 
 **Iteration 5 — External bash harness + first real instance.**
 Pick one small-repo instance (requests/flask/pytest). Bash: pull/build the
