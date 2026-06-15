@@ -7,10 +7,6 @@ import (
 	graphval "github.com/kgatilin/archmotif/pkg/graphval"
 )
 
-// attrBudgeted tags whether a graph node sits within a budgeted scope; the
-// unbounded-cycle check reads it back per node ("true"/"false").
-const attrBudgeted = "budgeted"
-
 // Report is the connectivity validator's structured output (doc 27 §5). It is
 // the read-only result of folding a subscriber list into a graph and checking
 // it: either Connected, or a set of gaps with human-readable bridge
@@ -99,22 +95,15 @@ func Validate(decls ...Decl) (Report, error) {
 	nodes := foldSubscribers(decls)
 	consumers := foldConsumers(decls, nodes)
 
-	// Build the node graph (doc 27 §4): one graphval node per reaction node,
-	// carrying a "budgeted" marker (is its scope budget-bounded?); a directed
-	// edge X→Y iff a kind X emits is matched by a pattern Y subscribes to.
-	budgeted := budgetedScopes(decls)
+	// Build the node graph (doc 27 §4): one graphval node per reaction node; a
+	// directed edge X→Y iff a kind X emits is matched by a pattern Y subscribes
+	// to. Boundedness of a cycle is NOT a per-node attribute (a global plugin in
+	// a budgeted loop has no budgeted In yet its emits land in the budgeted cone),
+	// so it is decided reflex-side over each SCC's edge kinds — see budgetCones /
+	// unboundedCycles.
 	gvNodes := make([]graphval.Node, 0, len(nodes))
 	for _, n := range nodes {
-		mark := "false"
-		if _, ok := budgeted[n.In]; ok {
-			mark = "true"
-		}
-		gvNodes = append(gvNodes, graphval.Node{
-			Name: n.Name,
-			Attrs: map[string]string{
-				attrBudgeted: mark,
-			},
-		})
+		gvNodes = append(gvNodes, graphval.Node{Name: n.Name})
 	}
 
 	// emitsByNode is each node's effective produced kinds: its declared Emits
@@ -160,7 +149,7 @@ func Validate(decls ...Decl) (Report, error) {
 	}
 	rep.UnreachableNodes = unreachable(g, nodes, roots)
 	rep.Fragments = append([]string(nil), rep.UnreachableNodes...)
-	rep.UnboundedCycles = unboundedCycles(g)
+	rep.UnboundedCycles = unboundedCycles(g, nodes, emitsByNode, budgetCones(decls, nodes))
 	rep.StalledClosures = stalledClosures(decls, nodes)
 	rep.CoRootedScopes = coRootedScopes(decls, nodes)
 
@@ -455,33 +444,98 @@ func unreachable(g *graphval.Graph, nodes []Subscriber, roots []string) []string
 // deterministic nodes A: on Y → emit X and B: on X → emit Y ping-pong
 // X→Y→X… forever). So the basis is scope-budget coverage, not node kind.
 //
-// It walks NonTrivialSCCsAsNames and reports each SCC that contains any node
-// whose "budgeted" attr is "false" — i.e. a node outside every budgeted scope.
-// graphval's SCCsMissingAttr has the wrong orientation here (it returns SCCs
-// where NO node satisfies a predicate, an all-fail test; this is an any-fail
-// test), so the per-node budgeted lookup is folded reflex-side over the SCCs.
+// The precise rule (doc 24 §5): an SCC is bounded iff some budgeted scope's
+// Budget bounds a kind that actually appears on an edge WITHIN the SCC, and that
+// scope's cone covers the cycle (anchored by at least one SCC node living in the
+// scope). An SCC missing such a scope is unbounded.
 //
-// APPROXIMATION (refinement TODO, doc 24 §5): the precise rule is that the
-// budget must bound a kind that actually appears on the cycle's edges. Step 1
-// approximates that with the coarser "every cycle node is within a budgeted
-// scope" — a node in a budgeted scope whose budget bounds an unrelated kind is
-// still treated as bounded here. Tightening this to match the cycle's edge
-// kinds against the scope's Budget keys is left as future work.
-func unboundedCycles(g *graphval.Graph) [][]string {
+// This is the refinement the earlier coarse marker deferred: it both (a) tightens
+// — a budgeted scope whose budget bounds only a kind NOT on the cycle no longer
+// counts — and (b) admits the legitimate case the marker rejected — a global
+// node (a launched plugin) in a budgeted loop. The plugin has no budgeted In, but
+// the loop's tool-call kinds ARE budgeted in the scope its in-cone neighbours
+// (the brain) live in, and the engine places the plugin's emits in that cone by
+// causality (doc 24 §5). So the cone, not the node's In, decides boundedness.
+func unboundedCycles(g *graphval.Graph, nodes []Subscriber, emitsByNode map[string][]string, cones []budgetCone) [][]string {
+	byName := make(map[string]Subscriber, len(nodes))
+	for _, n := range nodes {
+		byName[n.Name] = n
+	}
 	var out [][]string
 	for _, scc := range g.NonTrivialSCCsAsNames() {
-		for _, name := range scc {
-			i, ok := g.Index(name)
-			if !ok {
-				continue
-			}
-			if g.Attrs(i)[attrBudgeted] != "true" {
-				out = append(out, scc)
-				break
-			}
+		if !sccBounded(scc, byName, emitsByNode, cones) {
+			out = append(out, scc)
 		}
 	}
 	return out
+}
+
+// budgetCone is a budgeted scope's relevant facts for the unbounded-cycle check:
+// the kinds its Budget bounds and the nodes that live in it (its cone anchors).
+type budgetCone struct {
+	budgetKeys map[string]struct{}
+	members    map[string]struct{}
+}
+
+// budgetCones builds the budgeted-scope view used by unboundedCycles: per scope
+// carrying a non-empty Budget, the set of bounded kinds and the set of nodes
+// whose In is that scope.
+func budgetCones(decls []Decl, nodes []Subscriber) []budgetCone {
+	var out []budgetCone
+	for _, d := range decls {
+		s, ok := d.(Scope)
+		if !ok || len(s.Budget) == 0 {
+			continue
+		}
+		keys := make(map[string]struct{}, len(s.Budget))
+		for k := range s.Budget {
+			keys[k] = struct{}{}
+		}
+		members := map[string]struct{}{}
+		for _, n := range nodes {
+			if n.In == s.Name {
+				members[n.Name] = struct{}{}
+			}
+		}
+		out = append(out, budgetCone{budgetKeys: keys, members: members})
+	}
+	return out
+}
+
+// sccBounded reports whether some budgeted scope bounds a kind on an edge inside
+// the SCC while anchoring the cone (an SCC node lives in the scope). edgeKinds is
+// the kinds a member emits and another member consumes — the kinds that actually
+// drive the cycle's re-entry.
+func sccBounded(scc []string, byName map[string]Subscriber, emitsByNode map[string][]string, cones []budgetCone) bool {
+	edgeKinds := map[string]struct{}{}
+	for _, x := range scc {
+		for _, k := range emitsByNode[x] {
+			for _, yName := range scc {
+				if producesFor([]string{k}, byName[yName]) {
+					edgeKinds[k] = struct{}{}
+					break
+				}
+			}
+		}
+	}
+	for _, c := range cones {
+		anchored := false
+		for _, name := range scc {
+			if _, ok := c.members[name]; ok {
+				anchored = true
+				break
+			}
+		}
+		if !anchored {
+			continue
+		}
+		for k := range edgeKinds {
+			if _, ok := c.budgetKeys[k]; ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // stalledClosures returns the scope names whose engine-emitted
@@ -707,19 +761,6 @@ func deadSubscriptions(consumers []consumer, cat catalog) []string {
 		out = append(out, p)
 	}
 	sort.Strings(out)
-	return out
-}
-
-// budgetedScopes collects the names of declared Scopes carrying a non-empty
-// Budget (doc 24 §5): the scopes that actually bound a per-kind count within a
-// cone. A node is "bounded" iff its (defaulted) In names one of these.
-func budgetedScopes(decls []Decl) map[string]struct{} {
-	out := map[string]struct{}{}
-	for _, d := range decls {
-		if s, ok := d.(Scope); ok && len(s.Budget) > 0 {
-			out[s.Name] = struct{}{}
-		}
-	}
 	return out
 }
 
