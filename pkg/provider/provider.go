@@ -56,6 +56,12 @@ type Usage struct {
 	OutputTokens        int64 `json:"output_tokens"`
 	CacheReadTokens     int64 `json:"cache_read_tokens"`
 	CacheCreationTokens int64 `json:"cache_creation_tokens"`
+	// ThoughtsTokens is a thinking model's internal-reasoning tokens (Gemini
+	// thoughtsTokenCount), billed but never surfaced as visible output. A turn
+	// that is all-thinking shows ThoughtsTokens > 0 with empty Text — the signal
+	// behind an llm.empty (reasoning spent, no answer/tool-call emitted). Zero on
+	// non-thinking backends.
+	ThoughtsTokens int64 `json:"thoughts_tokens,omitempty"`
 }
 
 // Request is one completion call: system + messages + tool menu in, exactly

@@ -16,6 +16,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 
 	"github.com/kgatilin/reflex/engine"
@@ -383,6 +384,8 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 			msgs = h.Messages()
 		}
 
+		logTurnRequest(ctx, cfg.Name, system, msgs, tools)
+
 		resp, err := p.Complete(ctx, provider.Request{
 			Model:     cfg.Model,
 			System:    system,
@@ -393,6 +396,7 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 		if err != nil {
 			return nil, err // → {node}.failed
 		}
+		logTurnResponse(cfg.Name, resp)
 
 		// First, the actions: every allowlisted function call advances the loop.
 		var emits []engine.Emit
@@ -422,9 +426,19 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 				})
 			default:
 				if _, wants := allow[cfg.Empty]; wants {
+					// Carry WHY the turn was blank (G4 — no silent dead ends): the
+					// model's finish reason and its thinking-token spend. A thinking
+					// model that stopped after only thought parts shows stop_reason
+					// "stop" with thoughts_tokens > 0; one that ran out mid-reasoning
+					// shows "max_tokens" — the two call for different fixes.
 					emits = append(emits, engine.Emit{
-						Kind:    cfg.Empty,
-						Payload: mustMarshal(map[string]string{"reason": "the model returned no text and called no function"}),
+						Kind: cfg.Empty,
+						Payload: mustMarshal(map[string]any{
+							"reason":          "the model returned no text and called no function",
+							"stop_reason":     resp.StopReason,
+							"thoughts_tokens": resp.Usage.ThoughtsTokens,
+							"output_tokens":   resp.Usage.OutputTokens,
+						}),
 					})
 				}
 			}
@@ -432,6 +446,38 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 		emits = append(emits, engine.Emit{Kind: UsageKind, Payload: mustMarshal(resp.Usage)})
 		return emits, nil
 	})
+}
+
+// logTurnRequest logs the exact prompt a turn sends — the view's System and each
+// Message (role + length + a one-line preview) — so an operator can verify the
+// llm.history projection assembled the transcript correctly. Debug level only;
+// the per-message previews are built only when debug is enabled.
+func logTurnRequest(ctx context.Context, name, system string, msgs []provider.Message, tools []provider.ToolSchema) {
+	if !slog.Default().Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	slog.Debug("llm turn request", "node", name, "system_bytes", len(system), "messages", len(msgs), "tools", len(tools))
+	for i, m := range msgs {
+		slog.Debug("llm turn message", "node", name, "i", i, "role", m.Role, "bytes", len(m.Text), "preview", preview(m.Text))
+	}
+}
+
+// logTurnResponse logs a one-line outcome — the finish reason, the token split
+// (note thoughts: a thinking model spends them before any visible part), and how
+// the turn decoded (text vs calls). Debug level only.
+func logTurnResponse(name string, r provider.Response) {
+	slog.Debug("llm turn response", "node", name, "stop", r.StopReason,
+		"in", r.Usage.InputTokens, "out", r.Usage.OutputTokens, "thoughts", r.Usage.ThoughtsTokens,
+		"text_bytes", len(r.Text), "calls", len(r.ToolCalls))
+}
+
+// preview renders s as a single-line, length-capped snippet for a log line.
+func preview(s string) string {
+	s = strings.ReplaceAll(s, "\n", "⏎")
+	if len(s) > 100 {
+		s = s[:100] + "…"
+	}
+	return s
 }
 
 func mustMarshal(v any) json.RawMessage {

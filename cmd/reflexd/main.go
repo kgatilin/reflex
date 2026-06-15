@@ -9,8 +9,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/kgatilin/reflex/engine"
@@ -28,16 +30,52 @@ func main() {
 }
 
 func root() *cobra.Command {
-	var socket string
+	var socket, logLevel string
 	cmd := &cobra.Command{
 		Use:           "reflexd",
 		Short:         "reflex daemon + control-plane CLI (new kernel)",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// Configure the process-wide structured logger before any command runs, so
+		// every component (engine, daemon, llm bodies) logs through one leveled
+		// handler. Debug surfaces the llm turn traces; the default (info) is quiet.
+		PersistentPreRunE: func(*cobra.Command, []string) error { return setupLogging(logLevel) },
 	}
 	cmd.PersistentFlags().StringVar(&socket, "socket", "/tmp/reflexd.sock", "daemon unix socket path")
+	cmd.PersistentFlags().StringVar(&logLevel, "log-level", envOr("REFLEX_LOG_LEVEL", "info"), "log level: debug, info, warn, error")
 	cmd.AddCommand(serveCmd(&socket), applyCmd(&socket), topologyCmd(&socket), emitCmd(&socket), eventsCmd(&socket), validateCmd(), pluginCmd())
 	return cmd
+}
+
+// setupLogging installs the process-wide slog default: a text handler to stderr
+// at the requested level. It is the framework's one logging seam — components
+// call slog.Debug/Info/… and this decides what surfaces. Debug-level args (e.g.
+// the per-message llm trace) are built only when debug is enabled (the callers
+// guard on slog.Default().Enabled), so info runs pay nothing.
+func setupLogging(level string) error {
+	var lv slog.Level
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "debug":
+		lv = slog.LevelDebug
+	case "", "info":
+		lv = slog.LevelInfo
+	case "warn", "warning":
+		lv = slog.LevelWarn
+	case "error":
+		lv = slog.LevelError
+	default:
+		return fmt.Errorf("unknown --log-level %q (want debug, info, warn, error)", level)
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lv})))
+	return nil
+}
+
+// envOr returns the environment variable value or a fallback (for flag defaults).
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // serveCmd hosts the daemon until interrupted. --root, when set, launches the

@@ -186,6 +186,7 @@ func decodeGeminiResponse(resp *genai.GenerateContentResponse) Response {
 			InputTokens:     int64(m.PromptTokenCount),
 			OutputTokens:    int64(m.CandidatesTokenCount),
 			CacheReadTokens: int64(m.CachedContentTokenCount),
+			ThoughtsTokens:  int64(m.ThoughtsTokenCount),
 			// Gemini does not surface a separate cache-creation token count.
 		}
 	}
