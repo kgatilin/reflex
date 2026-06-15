@@ -50,8 +50,14 @@ last sender *opinion* in an envelope of facts):
 | `trace` | `{ session_id, request_id?, span_id, caused_by[] }` — engine-stamped |
 | `payload` | domain data, opaque to the engine |
 
-- **Classes:** `sys.{kind}` (session-less machinery), `app.session.{id}.{kind}`
-  (domain), `app.ingress.{surface}.{event}` (pre-resolution inbound).
+- **The kernel knows only TWO structural classes:** `sys.{kind}` (its own
+  machinery) and `app.session.{id}.{kind}` (the session scope). **Everything else
+  is a plain domain event whose subject IS its kind** — no class prefix, no scope
+  token. There is **no "ingress" class**: an externally appended event (a CLI
+  task, a webhook) is just a *registered domain event* whose name the operator
+  chose; the kernel knows no domain event names. Its entry-point-ness is a graph
+  property (consumed by some subscriber, produced by none — the validator's
+  `isRoot`), never a subject namespace.
 - **`caused_by[]` is engine-stamped, never sender-chosen.** Membership in a
   scope is a fact of the log. `caused_by[0]` is the OTel parent, the rest are
   links (join nodes have N causes).
@@ -141,11 +147,21 @@ a **type axis** orthogonal to wiring, not a fourth primitive.
   schema}` facts; `event.registered` is the one primordial seed kind the engine
   knows natively. Static `EventKind` decls are the bootstrap form; runtime
   registration is just emitting the fact.
+- **Registering an event is a first-class operation**, distinct from subscribing
+  to one or emitting one (the three operations). The schema lives with the
+  *registration*, never with a subscriber — a subscriber names a kind, it never
+  declares the kind's schema.
+- **The engine self-registers the kinds IT owns**, through the same catalog: the
+  seed `event.registered`, and for every declared scope the
+  `scope.{name}.closed` / `.budget_exhausted` kinds. So the operator declares
+  *only domain kinds*; engine internals need no boilerplate registration. A
+  subscriber and the engine machinery register events by one primitive operation.
 - **Three checks:** unknown-kind (`Emits` a kind absent from the catalog),
   dead-subscription (`On` pattern matching no catalog kind) — both static in
   `Validate`; and **payload-conformance** at runtime (a non-conforming emit
-  becomes the body's own `.failed`). The catalog is **opt-in-until-adopted**:
-  dormant while empty.
+  becomes the body's own `.failed`). Validation is **always on** — a subscription
+  to an unregistered event is a wiring bug, caught unconditionally (no opt-in
+  dormancy).
 - The catalog schema **is** what the body hands the model as function
   parameters, so the allowed schema subset must be the intersection target
   providers accept (the LLM-tool-compatible subset).
@@ -295,20 +311,22 @@ All on branch `feat/connectivity-validation`, verified with `go test -race`
   `Views.Schema(kind)`; a callable is a kind in `Emits`, the catalog (populated
   dynamically by the plugin's announced schemas) is the schema source — no
   per-tool wiring.
-- **Catalog adoption is all-or-nothing** (found in 3a): a non-empty catalog
-  gates `Connected` (opt-in dormancy), so the moment a plugin contributes one
-  kind the whole topology must declare every kind — including engine-internal
-  `scope.*.closed` and ingress kinds. Right end-state (we want a full catalog),
-  but a follow-up should **auto-register scope-closure + ingress kinds** to cut
-  operator boilerplate.
+- ~~**Catalog adoption is all-or-nothing**~~ — **resolved**: validation is now
+  always-on (opt-in dormancy removed), and the engine **self-registers the kinds
+  it owns** (the seed + each scope's `scope.*.closed` / `.budget_exhausted`)
+  through the same catalog, so the operator declares only domain kinds. There is
+  no ingress kind to auto-register — the ingress class is gone (see below).
 - **Context budget & view compaction** — the largest standing hole (carried from
   [24 Part II](./outdated/24-concept.md)): engine budgets count *events*, agents
   die of *tokens*; a compaction event as a horizon cut is unspecified.
 - **Log payload weight** — `tool.fs.read.result` carries file content; decide a
   sha-keyed sidecar vs accept the log as a blob store.
-- **Ingress-root detection vs dispatch match diverge** (found wiring the stage-3
-  run): the validator marks an ingress root by the `app.ingress.*` pattern, but
-  dispatch matches `On` against the kind tail — reconcile.
+- ~~**Ingress-root detection vs dispatch match diverge**~~ — **resolved**: the
+  `app.ingress.*` subject class is gone. An external event is a plain registered
+  domain event; a root is derived structurally (an `On` matching a kind no
+  subscriber produces — `isRoot`), so the validator and the dispatcher agree on
+  one string. The old `["app.ingress.*", "cli.task"]` double-pattern workaround
+  is deleted.
 - **`provider.Message` is coarse** (`{Role, Text}`, no tool_use/result block
   pairing); proper tool-calling needs a richer message at the provider layer.
 - **Daemon log persistence** (new with Iteration 2): the daemon's log is

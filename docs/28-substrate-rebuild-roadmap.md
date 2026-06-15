@@ -19,7 +19,7 @@
 | **Stage 2a — `Append` + `Drain` to quiescence** (deterministic) | `engine/` | **done, verified** |
 | **Stage 2b — scope instances, obligation counting, `scope.closed`, budget cap** (docs 24 §5 / 26 §3d/§3f) | `engine/scope.go` + `engine/engine.go` + `validate.go` | **done, verified** (`306fc6e`); co-rooting reject (`47dcf3d`) |
 | **Stage 2c — projection evaluation (backward-walk views) + per-scope state + closure carries snapshot** (docs 26 §2a / 24 §6) | `engine/projection.go` + `engine.go` + `scope.go` | **done, verified** (`e8f5c55`); also fixed a latent multi-ingress drain defect (frontier → per-index dispatched) |
-| **Stage 2d — event catalog (`kind → schema`) self-hosted over `event.registered`; unknown-kind / dead-subscription / payload-conformance checks** (doc 26 §4a) | `engine/catalog.go` + `topology.go` + `validate.go` + `engine.go` | **done, verified** (`2fdee6e`); catalog opt-in-until-adopted |
+| **Stage 2d — event catalog (`kind → schema`) self-hosted over `event.registered`; unknown-kind / dead-subscription / payload-conformance checks** (doc 26 §4a) | `engine/catalog.go` + `topology.go` + `validate.go` + `engine.go` | **done, verified** (`2fdee6e`); catalog validation later made **always-on** (opt-in dormancy removed) with the engine self-registering its own kinds (seed + per-scope `scope.*.closed`/`.budget_exhausted`) |
 | **Stage 3a — open the projection view type** (`Shape`→`Type` registry; `RegisterType`/`Views.Value`/`ViewAs[T]`; validate unknown-type & dangling-reads) (doc 26 §4b) | `engine/topology.go` + `projection.go` + `reaction.go` + `subject.go` + `validate.go` | **done, verified** (`fd794d3`); `KindOf`/`MatchKind` exported for builders |
 | **Stage 3b — `llm.history` view type (positional system/message split) + `llm` body (provider call → allowlisted emits + `llm.usage`)** (doc 26 §4/§4b) | `nodes/llm/llm.go` (+ history/run tests) | **done, verified** (`8b04898`); a doc-27-style run reconciles `new→…→task.answered`, scope closed once, usage per seat, on a stub provider (`-race`) |
 | **Control plane — topology is a fold of changeset facts** (doc 29 Iteration 1 / doc 20 / CONCEPT §8): `Apply` = the in-process changeset client (`requested → facts + applied \| rejected`); live table is `foldTopology(log, bodies)`, bodies resolved by name from a process registry; `Topology()` read + `install()` test seam | `engine/changeset.go` + `engine.go` | **done, verified** (`645a0bc`); rejected changesets write no object facts; live table round-trips as a fold of the log (G8); pipeline-applied topology drives a real run to terminal + closes once (`-race`) |
@@ -218,23 +218,21 @@ The doc-24 §5 / doc-26 runtime.
   (e.g. `oneOf`/`allOf`/`$ref` often unavailable). The 2d in-package validator
   (top-level `type:object` + `required` + one-level `properties[].type`) is a
   start; tighten it to the provider-tool subset when wiring stage 3.
-- **`app.ingress.*` is the perimeter.** Exempt from the dead-subscription check
-  (it is a pre-resolution surface, not a catalog kind); ingress handlers convert
-  inbound into in-scope events. Revisit only if ingress needs first-class
-  catalog typing.
+- ~~**`app.ingress.*` is the perimeter.**~~ **RESOLVED**: the `app.ingress`
+  subject class was removed. There is no perimeter namespace — an external event
+  is a plain registered domain event, and a root is structural (a subscriber
+  whose `On` matches a kind no subscriber produces — `isRoot`). The external
+  entry kind is registered in the catalog like any other.
 - **Stage-0 `provider.Message` is coarse** (`{Role, Text}`, no tool_use/
   tool_result block pairing): tool results flatten into user text. Fine for the
   stub run; proper tool-calling needs a richer `provider.Message` (provider
-  layer, not engine).
-- **Ingress-root detection vs dispatch match diverge** (found wiring the stage-3
-  run): the validator marks a node an ingress root only if its `On` contains
-  `app.ingress.*`/`.>` (`isIngressRoot`), but the dispatcher matches `On`
-  against the **kind tail** (`cli.task` for `app.ingress.cli.task`), so an
-  ingress pattern that satisfies the validator does NOT actually dispatch. The
-  stage-3 run works around it by giving the resolver BOTH patterns
-  (`["app.ingress.*", "cli.task"]`). Reconcile: either dispatch matches ingress
-  `On` against the full subject, or `isIngressRoot` keys off the ingress
-  *class* of the appended subject, not the `On` pattern.
+  layer, not engine). `provider` is the egress adapter the `llm` body calls — it
+  is below the three primitives, not one of them. STILL OPEN.
+- ~~**Ingress-root detection vs dispatch match diverge**~~ **RESOLVED**: with the
+  `app.ingress` class gone, `splitSubject` no longer strips a prefix, so the
+  validator and the dispatcher match the same string. Root detection is
+  structural (`isRoot`), not pattern-based, so the
+  `["app.ingress.*", "cli.task"]` double-pattern workaround is deleted.
 - **Tool schemas not yet wired into the llm body**: tools are advertised by
   name only (`provider.ToolSchema{Name}`), schema empty — the catalog→tool-param
   schema wiring (a catalog kv-view the body reads) is deferred; the stub ignores

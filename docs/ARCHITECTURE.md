@@ -8,7 +8,7 @@
 The whole system is **three primitives** (Event, Reaction, Projection) over one
 append-only log, plus a control plane that is *itself* events on that log. Below:
 the layers, the domain model, then the four sequences that matter (apply a
-topology, launch a plugin, reconcile an ingress, close a scope).
+topology, launch a plugin, reconcile an external event, close a scope).
 
 ---
 
@@ -55,7 +55,7 @@ flowchart TB
 ```
 
 - **One write path:** everything reaches the log through `engine.Append`
-  (ingress) or the engine's own fact writes (dispatch emits, changeset facts).
+  (an external event) or the engine's own fact writes (dispatch emits, changeset facts).
 - **Nothing is a store.** Topology, catalog, scope state are *folds over the
   log* (G8). The cached `live` table is a memoisation of `foldTopology(log)`.
 - **The only non-fact part is a `Reaction` body** (Go code) — resolved by name
@@ -251,9 +251,10 @@ sequenceDiagram
 
 ---
 
-## 5. Reconcile an ingress — Drain, with a hop out to a plugin
+## 5. Reconcile an external event — Drain, with a hop out to a plugin
 
-One ingress event, drained to quiescence. Dispatch is **depth-first**: a child's
+One externally appended event (a plain registered domain event — there is no
+"ingress" class), drained to quiescence. Dispatch is **depth-first**: a child's
 obligations are counted before the parent's are released, so a cone closes
 exactly once.
 
@@ -267,11 +268,11 @@ sequenceDiagram
   participant T as terminal (sink)
   participant L as Log
 
-  U->>E: Emit app.ingress.cli.task (drain=true)
-  E->>L: append ingress event
-  E->>R: deliver (On matches kind tail)
+  U->>E: Emit cli.task (drain=true)   %% a registered domain kind, produced by no subscriber
+  E->>L: append external event
+  E->>R: deliver (On "cli.task" matches; resolver is a root)
   R-->>E: Emit request.received (roots scope request)
-  E->>L: append (caused_by ingress), scope request opens, obligations +1
+  E->>L: append (caused_by the external event), scope request opens, obligations +1
   E->>B: deliver request.received (in scope)
   B-->>E: Emit tool.fs.read.call (allowlisted, schema from catalog)
   E->>FS: deliver tool.fs.read.call (global subscriber)
@@ -328,9 +329,10 @@ cycles, stalled closures, co-rooted scopes, unknown kinds, dead subscriptions.
 - **Built & green:** the engine (append/drain, scopes/budgets/closure,
   projections, catalog), `llm`/`tool` bodies, the daemon + control plane + HTTP
   API, the stdio plugin seam, `fs`/`pytest`/`echo` plugins, self-registering
-  plugins, the `Subscriber` substrate naming.
-- **Pending (known):** a **built-in catalog** the engine seeds from the kinds it
-  owns (`event.registered`, `scope.*.closed`/`.budget_exhausted` per scope,
-  ingress) so the operator declares only domain kinds (see [29](./29-swebench-target.md)
-  *Finding (3a)*); Iteration 4 (express the coding-agent topology, real model)
-  and Iteration 5 (SWE-bench instance end-to-end).
+  plugins, the `Subscriber` substrate naming. **No `app.ingress` class** — an
+  external event is a plain registered domain event; a root is structural
+  (`isRoot`). **Always-on catalog**, with the engine self-registering its own
+  kinds (seed + per-scope `scope.*.closed`/`.budget_exhausted`), so the operator
+  declares only domain kinds (the *Finding (3a)* follow-up, now done).
+- **Pending (known):** Iteration 4 (express the coding-agent topology, real
+  model) and Iteration 5 (SWE-bench instance end-to-end).

@@ -59,7 +59,7 @@ reflexd validate FILE                  # local dry-run: connectivity gap report 
 ```
 
 `emit --wait <kind>` is the send-message / drive-to-terminal verb: it appends an
-ingress event, drains the engine, and asserts the named kind occurred. `apply`
+external event, drains the engine, and asserts the named kind occurred. `apply`
 against a running daemon is live topology config — adding a node does not require
 a restart, because the topology is a fold of the log.
 

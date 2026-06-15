@@ -86,7 +86,7 @@ spine is `status`; `done`/`failed` are terminal values.
 
 | node | `on:` | `in:` | emits (allowlist) |
 |---|---|---|---|
-| `resolver` | `app.ingress.*` | `global` | `request.received{task}` (roots `request`) |
+| `resolver` | `task.new` (an external entry kind, registered, produced by none) | `global` | `request.received{task}` (roots `request`) |
 | `brain` (llm, **loops**) | `request.received`, `tool.fs.*.result/failed`, `tool.py.test.result/failed`, `verify.failed` | `request` | `tool.fs.read/edit/write/search.call`, `tool.py.test.call`, `claim.complete`, `llm.usage` |
 | `fs` (subscriber) | `tool.fs.>.call` | `request` | `tool.fs.*.result/failed` |
 | `pytest` (subscriber) | `tool.py.test.call` | `request` | `tool.py.test.result/failed` |
@@ -211,17 +211,19 @@ only launches the hands it is told to (`serve --root` brings up `fs`+`pytest`;
 a non-filesystem agent simply launches neither). The protocol is
 language-agnostic (a plugin can be native Python).
 
-*Finding (3a):* adopting the catalog — a plugin contributing even one kind —
-flips on **full catalog enforcement** (`validate.go`: a non-empty catalog gates
-`Connected`), so the whole topology must then declare every kind, including
-engine-internal `scope.*.closed` and ingress kinds. This is the right end-state
-for the agent (we want a full catalog so the `llm` body can advertise function
-schemas), but a follow-up should **auto-register scope-closure + ingress kinds**
-to cut operator boilerplate. The self-registering model makes "have ≥1 plugin"
-the common case, so a launched plugin almost always trips enforcement — which
-sharpens the case for a **built-in catalog** the engine seeds from the kinds it
-owns (the seed `event.registered`, `scope.{name}.closed`/`.budget_exhausted` per
-declared scope, ingress) so the operator declares only domain kinds. Pending.
+*Finding (3a) — RESOLVED (follow-up):* adopting the catalog used to flip on
+**full catalog enforcement** (`validate.go`: a non-empty catalog gated
+`Connected`), so the whole topology then had to declare every kind including
+engine internals. That all-or-nothing dormancy is **gone**: validation is now
+**always on** (registering an event is a first-class, required operation), and
+**the engine self-registers the kinds it owns** through the same catalog — the
+seed `event.registered` and, per declared scope, `scope.{name}.closed` /
+`.budget_exhausted`. So the operator declares **only domain kinds**; a launched
+plugin tripping enforcement is fine because engine internals carry themselves.
+There is no "ingress kind" to auto-register — the `app.ingress` class was
+removed (an external event is a plain registered domain event; a root is
+structural). The `llm` body still gets a full catalog to advertise function
+schemas — that was always the goal, now reached without boilerplate.
 
 *Vocabulary (this iteration):* the substrate wiring unit is a **`Subscriber`**,
 not a "node". The type, the fact (`sys.subscriber.registered`), the changeset

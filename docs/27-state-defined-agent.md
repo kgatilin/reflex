@@ -93,7 +93,7 @@ read-only**):
 
 | node | `on:` | `in:` | reads | emits (allowlist) |
 |---|---|---|---|---|
-| `resolver` | `app.ingress.*` | `global` | session binding | `request.received` (roots `request`) |
+| `resolver` | `task.new` (an external entry kind — registered, produced by none) | `global` | session binding | `request.received` (roots `request`) |
 | `understand` (llm, **read-only**) | `request.received` | `request` | `task` | `state.updated.goal`, `state.updated.status`, **only** `tool.fs.read.call` / `tool.fs.search.call` |
 | `gather` (llm) | `tool.fs.*.result` | `request` | `project_context` (joins global state) + `task_context` (request) | `state.updated.context.found` (writes **own** request state), `state.updated.sufficiency`; then loop `tool.fs.read.call` **/** `plan.requested` **/** `task.needs_clarification` |
 | `promote` (llm or det.) | `scope.request.closed` | `global` | request's final state (from the closure payload) | `state.updated.project_context` (writes **global** state) — the only request→global path (§4 / [26 §2a](./26-bare-substrate.md)) |
@@ -167,8 +167,8 @@ folds the subscriber list into a graph and reports:
   consumes (an unbridged gap → suggest an LLM node emitting the entry kinds
   of the disconnected fragment);
 - **unreachable nodes** — a node whose `On` kinds are emitted by nobody and
-  are not an ingress root;
-- **disconnected fragments** — islands with no path from an ingress root;
+  which is not itself a root (an entry consuming an external kind);
+- **disconnected fragments** — islands with no path from a root;
 - **unbounded cycles** — a non-trivial SCC not covered by a scope that
   declares a budget ([26 §3a](./26-bare-substrate.md)) → reject;
 - **stalled closures** — `scope.X.closed` is an engine-emitted kind; a scope
