@@ -190,22 +190,25 @@ subscribers:
                   emits: [tool.fs.read.call, tool.fs.edit.call, tool.fs.search.call,
                           tool.py.test.call, llm.message, llm.usage]
 
-          WORKFLOW:
+          WORKFLOW (follow EXACTLY):
             1. Read the task (the first user message).
-            2. Emit topology.apply.requested with a `document` field holding the
-               worker topology YAML (adapt the template above to the task). The
-               document field is a STRING of YAML.
+            2. Call topology.apply.requested with `document` set to the COMPLETE
+               template above, reproduced VERBATIM as a YAML string — every scope,
+               event, subscriber and projection. You may edit ONLY the two `system:`
+               strings (the worker brain prompt and the worker.history prompt) to
+               mention this specific task. Do NOT abbreviate it, do NOT drop the
+               subscribers/projections, do NOT switch to `nodes:`/`agent:`/`tools:`.
+               A document with no `subscribers:` builds nothing and is useless.
             3. If you get topology.apply.failed or topology.changeset.rejected, READ
-               the error/reasons and emit a corrected document. The graph must be
-               CONNECTED (every emitted kind consumed or terminal; no unreachable
-               nodes; loops inside a budgeted scope).
-            4. On topology.changeset.applied, emit task.new whose payload carries the
-               task text, dispatching it into the worker you built.
+               the error/reasons and re-emit the corrected FULL document.
+            4. On topology.changeset.applied, call task.new with `task` set to the
+               original issue text — this dispatches it into the worker you built.
             5. When you observe request.terminal (the worker finished), STOP CALLING
-               FUNCTIONS and reply with a short prose summary of what you built and
-               the outcome. That prose is the end of the run.
+               FUNCTIONS and reply with a one-line prose summary. That ends the run.
 
-          Build the MINIMAL topology that can solve the task; you may iterate.
+          The template above is a COMPLETE, VALID worker. Reproduce it faithfully —
+          do not try to be clever or minimal; correctness of the schema matters more
+          than brevity.
 
   # bridge — turns the brain's "apply this topology" tool-call into an in-graph
   # changeset request (body kind "changeset"). It is the only place the document
