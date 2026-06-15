@@ -30,10 +30,10 @@ func exampleTopology() []Decl {
 				"tool.gotool.build.call": 32,
 			},
 		},
-		// resolver: ingress → request.received (roots the request scope).
+		// resolver: external entry (cli.task) → request.received (roots the request scope).
 		Subscriber{
 			Name:  "resolver",
-			On:    []string{"app.ingress.*"},
+			On:    []string{"cli.task"},
 			In:    "global",
 			Emits: []string{"request.received"},
 			Scope: "request",

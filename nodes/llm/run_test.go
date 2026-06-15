@@ -37,7 +37,7 @@ func (s scripted) Complete(_ context.Context, _ provider.Request) (provider.Resp
 // TestRun_Doc27Reconciles wires a doc-27-style topology — resolver → understand
 // → fs → gather → plan → execute → notify — with llm seats (scripted stubs) and
 // a tool node, applies it (so it passes connectivity validation), feeds one
-// ingress task, drains, and asserts the request reconciles to task.answered with
+// external task event, drains, and asserts the request reconciles to task.answered with
 // the scope closed and llm.usage logged for every seat (doc 28 stage 3).
 func TestRun_Doc27Reconciles(t *testing.T) {
 	ctx := context.Background()
@@ -83,11 +83,10 @@ func TestRun_Doc27Reconciles(t *testing.T) {
 
 	resolver := engine.Subscriber{
 		Name: "resolver",
-		// "app.ingress.*" marks it an ingress root for the validator; "cli.task"
-		// is what actually matches at dispatch (the ingress kind tail of
-		// app.ingress.cli.task). Both are needed today — the validator's
-		// ingress-root heuristic and the dispatcher's kind-tail match differ.
-		On:    []string{"app.ingress.*", "cli.task"},
+		// "cli.task" is the external entry kind appended below; subscribing to it
+		// both delivers the event at dispatch and makes the resolver a reachability
+		// root (a kind no subscriber emits).
+		On:    []string{"cli.task"},
 		In:    "global",
 		Emits: []string{"request.received"},
 		Body: engine.ReactionFunc(func(_ context.Context, _ engine.Event, _ engine.Views) ([]engine.Emit, error) {
@@ -115,7 +114,7 @@ func TestRun_Doc27Reconciles(t *testing.T) {
 		t.Fatalf("Apply: %v\n  DeadEnds=%v\n  Unreachable=%v\n  Fragments=%v\n  UnboundedCycles=%v\n  Stalled=%v\n  DanglingReads=%v\n  UnknownViewTypes=%v",
 			err, rep.DeadEnds, rep.UnreachableNodes, rep.Fragments, rep.UnboundedCycles, rep.StalledClosures, rep.DanglingReads, rep.UnknownViewTypes)
 	}
-	if _, err := e.Append(ctx, "app.ingress.cli.task", json.RawMessage(`{}`)); err != nil {
+	if _, err := e.Append(ctx, "cli.task", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	if err := e.Drain(ctx); err != nil {

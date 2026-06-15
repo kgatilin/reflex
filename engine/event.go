@@ -20,8 +20,8 @@ import "encoding/json"
 type Event struct {
 	// Subject is {class}.{scope...}.{kind...} in NATS grammar (§2):
 	// sys.{kind} for session-less machinery, app.session.{id}.{kind}
-	// for domain events, app.ingress.{surface}.{event} for pre-resolution
-	// inbound.
+	// for session-scoped domain events; every other subject IS the kind of
+	// a plain domain event (an externally appended event names its own kind).
 	Subject string
 
 	// Trace is the correlation axis, engine-stamped (§2).

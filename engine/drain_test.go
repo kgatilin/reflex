@@ -32,7 +32,7 @@ func emitKind(kind string) ReactionFunc {
 
 // acyclicTopology builds the spec's chain:
 //
-//	resolver  On app.ingress.test.msg   → emits request.received
+//	resolver  On test.msg               → emits request.received
 //	echo      On request.received       → emits tool.noop.call
 //	noop      (tool)                    → emits tool.noop.result
 //	done      On tool.noop.result       → emits task.done   (terminal, no consumer)
@@ -40,7 +40,7 @@ func acyclicTopology() []Decl {
 	return []Decl{
 		Subscriber{
 			Name:  "resolver",
-			On:    []string{"test.msg"}, // kind tail of app.ingress.test.msg
+			On:    []string{"test.msg"}, // the external entry kind
 			Emits: []string{"request.received"},
 			Body:  emitKind("request.received"),
 		},
@@ -80,7 +80,7 @@ func TestDrain_AcyclicChainFlowsToQuiescence(t *testing.T) {
 		// Validate flags as a dead-end. The test exercises Drain, not Validate, so
 		// store the decls directly.
 		e.install(acyclicTopology()...)
-		if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{"text":"hi"}`)); err != nil {
+		if _, err := e.Append(ctx, "test.msg", json.RawMessage(`{"text":"hi"}`)); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
 		if err := e.Drain(ctx); err != nil {
@@ -102,11 +102,11 @@ func TestDrain_AcyclicChainFlowsToQuiescence(t *testing.T) {
 		}
 	}
 
-	// caused_by chains: the ingress event is uncaused; each emit links to its
+	// caused_by chains: the external event is uncaused; each emit links to its
 	// trigger's span id.
 	log := collect(e)
 	if len(log[0].Trace.CausedBy) != 0 {
-		t.Fatalf("ingress event must be uncaused, got caused_by=%v", log[0].Trace.CausedBy)
+		t.Fatalf("external event must be uncaused, got caused_by=%v", log[0].Trace.CausedBy)
 	}
 	for i := 1; i < len(log); i++ {
 		cb := log[i].Trace.CausedBy
@@ -119,7 +119,7 @@ func TestDrain_AcyclicChainFlowsToQuiescence(t *testing.T) {
 		}
 	}
 
-	// session stays empty: the ingress event is pre-resolution, and 2a does not
+	// session stays empty: the external event carries no session, and 2a does not
 	// resolve sessions in the chain.
 	for _, ev := range log {
 		if ev.Trace.SessionID != "" {
@@ -154,7 +154,7 @@ func TestDrain_ReactionErrorBecomesFailedEventAndDrainCompletes(t *testing.T) {
 		}),
 	})
 
-	if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{}`)); err != nil {
+	if _, err := e.Append(ctx, "test.msg", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	if err := e.Drain(ctx); err != nil {

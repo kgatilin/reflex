@@ -27,9 +27,9 @@ func TestSubjectMatch(t *testing.T) {
 		{"a.>", "a.b.c.d", true},
 		{"a.>", "a", false}, // > needs at least one trailing token
 		{">", "a.b.c", true},
-		{"app.ingress.>", "app.ingress.cli.message", true},
-		{"app.ingress.*", "app.ingress.cli", true},
-		{"app.ingress.*", "app.ingress.cli.message", false},
+		{"cli.>", "cli.task.message", true},
+		{"cli.*", "cli.task", true},
+		{"cli.*", "cli.task.message", false},
 
 		// mixed
 		{"tool.fs.>", "tool.fs.read.call", true},
@@ -45,6 +45,38 @@ func TestSubjectMatch(t *testing.T) {
 	for _, c := range cases {
 		if got := subjectMatch(c.pattern, c.subject); got != c.want {
 			t.Errorf("subjectMatch(%q, %q) = %v; want %v", c.pattern, c.subject, got, c.want)
+		}
+	}
+}
+
+// TestSplitSubject pins the grammar contract (CONCEPT §2): the framework knows
+// only two structural classes — sys and app.session — and EVERYTHING ELSE is a
+// plain domain event whose subject IS its kind (no class prefix, no scope
+// token). There is no "ingress" class: an externally appended event is just a
+// registered domain event.
+func TestSplitSubject(t *testing.T) {
+	cases := []struct {
+		subject               string
+		class, scope, kind    string
+	}{
+		// sys: scope-less machinery.
+		{"sys.event.registered", "sys", "", "event.registered"},
+		{"sys.topology.changeset.applied", "sys", "", "topology.changeset.applied"},
+		// app.session.{id}: the one scoped class.
+		{"app.session.s1.state.updated.goal", "app.session.s1", "session", "state.updated.goal"},
+		// domain events: the subject IS the kind, class-less, no scope token.
+		{"cli.task", "", "", "cli.task"},
+		{"request.received", "", "", "request.received"},
+		{"tool.fs.read.call", "", "", "tool.fs.read.call"},
+		{"scope.request.closed", "", "", "scope.request.closed"},
+		// a former "ingress" subject is now just a domain kind, no special split.
+		{"app.ingress.cli.task", "", "", "app.ingress.cli.task"},
+	}
+	for _, c := range cases {
+		cls, scope, kind := splitSubject(c.subject)
+		if cls != c.class || scope != c.scope || kind != c.kind {
+			t.Errorf("splitSubject(%q) = (%q,%q,%q); want (%q,%q,%q)",
+				c.subject, cls, scope, kind, c.class, c.scope, c.kind)
 		}
 	}
 }

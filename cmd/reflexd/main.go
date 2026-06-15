@@ -115,14 +115,14 @@ func topologyCmd(socket *string) *cobra.Command {
 	}
 }
 
-// emitCmd sends one ingress event, drains, and prints the produced event kinds.
+// emitCmd sends one external event, drains, and prints the produced event kinds.
 // --wait names a kind that must appear in the reconciliation, else it errors.
 func emitCmd(socket *string) *cobra.Command {
 	var subject, payload, wait string
 	var noDrain bool
 	cmd := &cobra.Command{
 		Use:   "emit",
-		Short: "append an ingress event and drive the engine",
+		Short: "append an external event and drive the engine",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if subject == "" {
 				return fmt.Errorf("--subject is required")
@@ -145,8 +145,8 @@ func emitCmd(socket *string) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&subject, "subject", "", "ingress subject, e.g. app.ingress.cli.task")
-	cmd.Flags().StringVar(&payload, "payload", "{}", "ingress payload JSON")
+	cmd.Flags().StringVar(&subject, "subject", "", "external event subject, e.g. cli.task")
+	cmd.Flags().StringVar(&payload, "payload", "{}", "external event payload JSON")
 	cmd.Flags().StringVar(&wait, "wait", "", "require this kind to appear in the reconciliation")
 	cmd.Flags().BoolVar(&noDrain, "no-drain", false, "append without draining to quiescence")
 	return cmd

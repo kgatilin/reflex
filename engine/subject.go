@@ -51,35 +51,38 @@ func subjectMatch(pattern, subject string) bool {
 // splitSubject decomposes a concrete subject into its three axes per the §2
 // grammar {class}.{scope...}.{kind...}, by class:
 //
-//   - sys.{kind}                       → class "sys",        scope "",         kind "{kind}"
-//   - app.session.{id}.{kind...}       → class "app.session",scope "session",  kind "{kind...}"
-//   - app.ingress.{surface}.{event...} → class "app.ingress",scope "",         kind "{surface}.{event...}"
+//   - sys.{kind}                 → class "sys",          scope "",         kind "{kind}"
+//   - app.session.{id}.{kind...} → class "app.session.{id}", scope "session", kind "{kind...}"
+//   - {kind...} (anything else)  → class "",             scope "",         kind "{kind...}"
+//
+// The framework knows only TWO structural classes — sys (its own machinery) and
+// app.session (the session scope). Everything else is a plain DOMAIN event: the
+// subject IS the kind, with no class prefix and no scope token. The kernel does
+// not carve special namespaces for "inbound"/"ingress" events — an externally
+// appended event is just a registered domain event whose name the operator
+// chose (CONCEPT §2: the framework knows no domain event names). Its
+// entry-point-ness is a graph property (consumed by some subscriber, produced by
+// none — validate.go isRoot), not a subject-class marker.
 //
 // The scope token is the qualifier a node's In matches against (§5); only the
-// session class carries one in 2a. The kind tail is what a node's On patterns
-// match after handler desugar (§2). Unknown shapes fall back to class = first
-// token, no scope, kind = the rest — best-effort so dispatch never panics.
-//
-// 2a note: the session id itself is not surfaced here — scope matching uses the
-// class-level token "session", not the instance id; per-instance cones are 2b.
+// session class carries one. The kind tail is what a node's On patterns match
+// (§2). Scope membership for domain cones is causal (caused_by geometry, doc 24
+// §5), not derived from the subject string, so a class-less domain subject loses
+// nothing the runtime needs.
 func splitSubject(subject string) (class, scope, kind string) {
 	toks := strings.Split(subject, ".")
 	switch {
-	case len(toks) >= 1 && toks[0] == "sys":
+	case len(toks) == 0:
+		return "", "", subject
+	case toks[0] == "sys":
 		return "sys", "", strings.Join(toks[1:], ".")
 	case len(toks) >= 3 && toks[0] == "app" && toks[1] == "session":
 		// app.session.{id}.{kind...}: class+scope is app.session.{id}; the
 		// scope token a node matches on is "session".
 		return "app.session." + toks[2], "session", strings.Join(toks[3:], ".")
-	case len(toks) >= 2 && toks[0] == "app" && toks[1] == "ingress":
-		// app.ingress.{surface}.{event...}: pre-resolution, no session scope;
-		// the kind is the surface+event tail.
-		return "app.ingress", "", strings.Join(toks[2:], ".")
 	default:
-		if len(toks) == 0 {
-			return "", "", subject
-		}
-		return toks[0], "", strings.Join(toks[1:], ".")
+		// A plain domain event: no class prefix, the whole subject is the kind.
+		return "", "", subject
 	}
 }
 
@@ -101,7 +104,7 @@ func MatchKind(pattern, kind string) bool { return subjectMatch(pattern, kind) }
 // kind tail (§2 uprightness: the dispatcher, not the reaction, places scope).
 // class already carries the resolved scope prefix produced by splitSubject
 // (e.g. "app.session.s1"), so the subject is simply class + "." + kind. A
-// scope-less class (sys, app.ingress) joins the same way.
+// class-less domain event (class == "") places flat: the subject is just the kind.
 func placeSubject(class, kind string) string {
 	if class == "" {
 		return kind

@@ -35,7 +35,7 @@ func declarativeDoc() topology.Document {
 	return topology.Document{
 		Scopes: []topology.ScopeSpec{{Name: "request", Root: "request.received"}},
 		Subscribers: []topology.SubscriberSpec{
-			{Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global", Emits: []string{"request.received"},
+			{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"request.received"},
 				Body: topology.BodySpec{Kind: "emit", Config: map[string]any{"kind": "request.received"}}},
 			{Name: "worker", On: []string{"request.received"}, In: "request", Emits: []string{"task.answered"},
 				Body: topology.BodySpec{Kind: "emit", Config: map[string]any{"kind": "task.answered"}}},
@@ -46,7 +46,7 @@ func declarativeDoc() topology.Document {
 }
 
 // TestDaemon_ApplyEmitReconciles drives the daemon end-to-end in-process: apply a
-// declarative document, emit one ingress with drain, and confirm the
+// declarative document, emit one external event with drain, and confirm the
 // reconciliation reaches the terminal answer and closes the scope once. This is
 // the daemon's Apply/Emit surface working over the descriptor/resolver path.
 func TestDaemon_ApplyEmitReconciles(t *testing.T) {
@@ -58,7 +58,7 @@ func TestDaemon_ApplyEmitReconciles(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	produced, err := d.Emit(ctx, "app.ingress.cli.task", []byte(`{}`), true)
+	produced, err := d.Emit(ctx, "cli.task", []byte(`{}`), true)
 	if err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestDaemon_ApplyEmitReconciles(t *testing.T) {
 // that announcement into a GLOBAL subscriber node + two catalog kinds — the
 // operator document never mentions the plugin. The operator topology wires who
 // emits echo.request (resolver) and who consumes echo.reply (notify); folded with
-// the plugin's self-registration it is a connected graph. One ingress then drives
+// the plugin's self-registration it is a connected graph. One external event then drives
 // a reconciliation that reaches the plugin's emit and closes the scope.
 func TestDaemon_LaunchPluginSelfRegisters(t *testing.T) {
 	if testing.Short() {
@@ -117,9 +117,9 @@ func TestDaemon_LaunchPluginSelfRegisters(t *testing.T) {
 		Scopes: []topology.ScopeSpec{{Name: "request", Root: "echo.request"}},
 		Events: []topology.EventSpec{{Kind: "cli.task"}, {Kind: "scope.request.closed"}},
 		Subscribers: []topology.SubscriberSpec{
-			// app.ingress.* marks the ingress root; cli.task is the kind tail of
-			// app.ingress.cli.task, the pattern that actually delivers the ingress.
-			{Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global", Emits: []string{"echo.request"},
+			// cli.task is the external entry kind (registered in Events above): it
+			// makes the resolver a reachability root and delivers the event at dispatch.
+			{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"echo.request"},
 				Body: topology.BodySpec{Kind: "emit", Config: map[string]any{"kind": "echo.request"}}},
 			{Name: "notify", On: []string{"echo.reply"}, In: "request"},
 			{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
@@ -137,7 +137,7 @@ func TestDaemon_LaunchPluginSelfRegisters(t *testing.T) {
 		}
 	}
 
-	produced, err := d.Emit(ctx, "app.ingress.cli.task", []byte(`{}`), true)
+	produced, err := d.Emit(ctx, "cli.task", []byte(`{}`), true)
 	if err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestDaemon_ApplyRejectsUnknownBodyKind(t *testing.T) {
 	err := d.Apply(ctx, topology.Document{
 		Scopes: []topology.ScopeSpec{{Name: "request", Root: "request.received"}},
 		Subscribers: []topology.SubscriberSpec{
-			{Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global", Emits: []string{"request.received"},
+			{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"request.received"},
 				Body: topology.BodySpec{Kind: "nonesuch"}},
 			{Name: "sink", On: []string{"request.received"}, In: "request"},
 			{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},

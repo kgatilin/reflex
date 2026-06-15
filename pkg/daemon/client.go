@@ -77,7 +77,7 @@ func (c *Client) Validate(ctx context.Context, doc topology.Document) (engine.Re
 	return resp.Report, nil
 }
 
-// Emit sends one ingress event and returns the events produced (drain controls
+// Emit sends one external event and returns the events produced (drain controls
 // whether the daemon drives to quiescence before replying).
 func (c *Client) Emit(ctx context.Context, subject string, payload json.RawMessage, drain bool) ([]engine.Event, error) {
 	body, err := json.Marshal(emitRequest{Subject: subject, Payload: payload, Drain: drain})

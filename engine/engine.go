@@ -37,11 +37,11 @@ type Engine struct {
 	// dispatched[i] records that log[i] was driven by process (dispatched to
 	// its subscribers and its caused subtree). Depth-first dispatch appends a
 	// reaction's children at the END of the log and drives them immediately, so
-	// the dispatched set is NOT a contiguous prefix when several ingress events
-	// are appended before one Drain (each ingress roots its own cone; the first
-	// cone's children sit past the later ingress roots). Tracking dispatch
-	// per-index — instead of a single high-water frontier — lets Drain still
-	// reach every un-driven ingress root, so N parallel request cones in one
+	// the dispatched set is NOT a contiguous prefix when several externally
+	// appended events are appended before one Drain (each external root roots
+	// its own cone; the first cone's children sit past the later external roots).
+	// Tracking dispatch per-index — instead of a single high-water frontier —
+	// lets Drain still reach every un-driven external root, so N parallel request cones in one
 	// Drain all run (doc 26 §2a isolation needs N cones to exist). It is a fold
 	// over the log (rebuildScopes recomputes it), not a privileged store.
 	dispatched []bool
@@ -201,7 +201,7 @@ func (e *Engine) liveDecls() []Decl {
 // install records a topology directly into the live-table cache, bypassing the
 // changeset pipeline and its connectivity validation. It is a TEST seam:
 // white-box engine tests construct deliberately-disconnected topologies (no
-// ingress root, intentional dead-ends, raw cycles) to exercise the dispatcher,
+// external root, intentional dead-ends, raw cycles) to exercise the dispatcher,
 // scope, and projection mechanics in isolation — graphs Apply's validator is
 // built to reject. Production code goes through Apply, where the live table is a
 // genuine fold of the changeset facts (G8). install commits the nodes' bodies
@@ -258,7 +258,7 @@ func (e *ValidationError) Error() string {
 
 // Append puts one event on the log — the sole write (§4) — and stamps
 // it: span id minted, session resolved, request id derived. Adapters and
-// the operator surface call this for ingress; reactions never do (their
+// the operator surface call this for external events; reactions never do (their
 // Emits are appended by the dispatcher).
 func (e *Engine) Append(_ context.Context, subject string, payload json.RawMessage) (Event, error) {
 	ev := Event{
@@ -269,13 +269,13 @@ func (e *Engine) Append(_ context.Context, subject string, payload json.RawMessa
 			SessionID: sessionOf(subject),
 			// request_id is the narrowest request-scope covering all causes
 			// (§2), derived in Drain's dispatch once cone membership is known
-			// (see process). An externally-appended ingress event has no cause
+			// (see process). An externally-appended event has no cause
 			// and is in no request cone yet, so it is empty here — correct, not
 			// pending.
 			RequestID: "",
-			// CausedBy is empty: an externally-appended event is ingress, it has
+			// CausedBy is empty: an externally-appended event has
 			// no cause inside the log (§2 uprightness — causality is a fact of
-			// the log, and an ingress event roots its own chain).
+			// the log, and an externally-appended event roots its own chain).
 			CausedBy: nil,
 		},
 	}
@@ -302,7 +302,7 @@ func (e *Engine) mintSpan() string {
 // cones BEFORE the parent decrements, and an instance whose count crosses to
 // zero closes exactly once (G6). The flat 2a frontier loop only drives the
 // roots of that recursion — events at the frontier with no open cone above
-// them (ingress) — and a re-drive resumes from the recomputed frontier.
+// them (externally appended)— and a re-drive resumes from the recomputed frontier.
 func (e *Engine) Drain(ctx context.Context) error {
 	nodes := e.liveSubscribers()
 	sr := e.rebuildScopes(nodes)
@@ -310,7 +310,7 @@ func (e *Engine) Drain(ctx context.Context) error {
 	// Drive each undispatched event depth-first to quiescence. process dispatches
 	// the event AND its whole caused subtree (marking each dispatched), appending
 	// as it goes; the loop's cursor skips events process already drove. The
-	// cursor scans the whole log — not a contiguous frontier — so a later ingress
+	// cursor scans the whole log — not a contiguous frontier — so a later external
 	// root that an earlier cone's depth-first dispatch jumped over is still
 	// reached: N parallel cones in one Drain all run. Quiescence is every event
 	// dispatched with no open obligation.
@@ -356,7 +356,7 @@ func (e *Engine) rebuildScopes(nodes []Subscriber) *scopeRuntime {
 	// Replay DISPATCHED events in log order, re-rooting and re-stamping
 	// membership. Obligations are not replayed (they are an in-flight quantity of
 	// a drain in progress); a fresh drain re-derives them as it dispatches. Closed
-	// instances are marked so closure is not re-emitted. Un-dispatched ingress
+	// instances are marked so closure is not re-emitted. Un-dispatched external
 	// roots interleaved below the high-water frontier are skipped — they have no
 	// dispatched descendants yet, so they contribute nothing to the resumed fold.
 	for i := 0; i < e.frontier && i < len(e.log); i++ {
@@ -616,7 +616,7 @@ func subscriberMatches(n Subscriber, scope, kind string) bool {
 // 2a simplification: scope is matched as a single equality on the scope token
 // (e.g. In == "session"), not the full per-instance cone membership of §5 —
 // instances and cone delivery are stage 2b. A session-class event carries
-// scope token "session"; sys/ingress events carry "" and are admitted only by
+// scope token "session"; sys/external events carry "" and are admitted only by
 // a "global" node.
 func scopeAdmits(in, scope string) bool {
 	if in == "" || in == "global" {

@@ -190,9 +190,9 @@ func (d *Daemon) Validate(doc topology.Document) (engine.Report, error) {
 	return engine.Validate(resulting...)
 }
 
-// Emit appends one ingress event and, when drain is set, drives the engine to
-// quiescence. It returns the events produced from this ingress onward (the slice
-// appended at or after the ingress), so a caller can inspect the reconciliation
+// Emit appends one external event and, when drain is set, drives the engine to
+// quiescence. It returns the events produced from this event onward (the slice
+// appended at or after the external event), so a caller can inspect the reconciliation
 // — including any terminal fact — without re-reading the whole log.
 func (d *Daemon) Emit(ctx context.Context, subject string, payload []byte, drain bool) ([]engine.Event, error) {
 	d.mu.Lock()

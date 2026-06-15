@@ -33,7 +33,7 @@ func tempSocket(t *testing.T) string {
 
 // TestServerClient_RoundTrip starts a daemon HTTP server on a temp unix socket
 // and drives it through the client: apply a declarative document, read the
-// topology back, emit one ingress, and confirm the reconciliation reaches the
+// topology back, emit one external event, and confirm the reconciliation reaches the
 // terminal answer. This is the daemon's whole transport surface end-to-end.
 func TestServerClient_RoundTrip(t *testing.T) {
 	nodes.Register("emit", emitFactory)
@@ -64,7 +64,7 @@ func TestServerClient_RoundTrip(t *testing.T) {
 		t.Errorf("topology = %d nodes, %d scopes; want 4/1", len(doc.Subscribers), len(doc.Scopes))
 	}
 
-	events, err := c.Emit(ctx, "app.ingress.cli.task", json.RawMessage(`{}`), true)
+	events, err := c.Emit(ctx, "cli.task", json.RawMessage(`{}`), true)
 	if err != nil {
 		t.Fatalf("client Emit: %v", err)
 	}

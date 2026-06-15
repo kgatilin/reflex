@@ -7,17 +7,18 @@ import (
 	"testing"
 )
 
-// catalogTopology is a small, connected, catalog-bearing topology: an ingress
-// resolver, a worker, and a sink, with EventKind decls registering every kind
+// catalogTopology is a small, connected, catalog-bearing topology: a resolver on
+// an external entry kind, a worker, and a sink, with EventKind decls registering every kind
 // the nodes emit/consume. It exercises the static catalog checks (unknown-kind,
 // dead-subscription) without dragging in the full example topology.
 func catalogTopology() []Decl {
 	objSchema := json.RawMessage(`{"type":"object"}`)
 	return []Decl{
+		EventKind{Kind: "cli.task", Schema: objSchema},
 		EventKind{Kind: "request.received", Schema: objSchema},
 		EventKind{Kind: "work.done", Schema: objSchema},
 
-		Subscriber{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}},
+		Subscriber{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"request.received"}},
 		Subscriber{Name: "worker", On: []string{"request.received"}, In: "global", Emits: []string{"work.done"}},
 		Subscriber{Name: "sink", On: []string{"work.done"}, In: "global"},
 	}
@@ -188,10 +189,10 @@ func TestCatalog_DynamicRegistrationGrowsTheFold(t *testing.T) {
 
 // conformanceTopology drives one node that emits a payload we control, with a
 // catalog schema (an EventKind decl) that the payload either satisfies or
-// violates. The node fires once on an ingress event. Like the drain tests, it
+// violates. The node fires once on an external event. Like the drain tests, it
 // installs decls directly (the test seam) and exercises Drain — the runtime
-// payload-conformance path, not Validate — so the resolver's On is the ingress
-// event's kind tail (matching the dispatch convention of drain_test.go).
+// payload-conformance path, not Validate — so the resolver's On is the external
+// entry kind (matching the dispatch convention of drain_test.go).
 func conformanceTopology(t *testing.T, emit Emit, schema json.RawMessage) *Engine {
 	t.Helper()
 	e := New()
@@ -199,7 +200,7 @@ func conformanceTopology(t *testing.T, emit Emit, schema json.RawMessage) *Engin
 		EventKind{Kind: "echo.done", Schema: schema},
 		Subscriber{
 			Name:  "resolver",
-			On:    []string{"surface.in"}, // kind tail of app.ingress.surface.in
+			On:    []string{"surface.in"}, // the external entry kind
 			In:    "global",
 			Emits: []string{"echo.done"},
 			Body: ReactionFunc(func(_ context.Context, _ Event, _ Views) ([]Emit, error) {
@@ -209,8 +210,8 @@ func conformanceTopology(t *testing.T, emit Emit, schema json.RawMessage) *Engin
 		// A sink so echo.done has a consumer (matches the runtime fanout shape).
 		Subscriber{Name: "sink", On: []string{"echo.done"}, In: "global"},
 	)
-	if _, err := e.Append(context.Background(), "app.ingress.surface.in", json.RawMessage(`{}`)); err != nil {
-		t.Fatalf("Append ingress: %v", err)
+	if _, err := e.Append(context.Background(), "surface.in", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Append external event: %v", err)
 	}
 	if err := e.Drain(context.Background()); err != nil {
 		t.Fatalf("Drain: %v", err)

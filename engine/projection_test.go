@@ -109,7 +109,7 @@ func TestProjection_KVAndLogViewsReproduceTheFold(t *testing.T) {
 
 	e := New()
 	e.install(decls...)
-	if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{}`)); err != nil {
+	if _, err := e.Append(ctx, "test.msg", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	if err := e.Drain(ctx); err != nil {
@@ -156,7 +156,7 @@ func TestProjection_KVAndLogViewsReproduceTheFold(t *testing.T) {
 // TestProjection_ReadAtTriggerIsolationAcrossParallelRequestCones is Stage 2c
 // acceptance test 2 (the key correctness test): two request instances run in one
 // Drain; each reaction's request-horizon view sees ONLY its own cone's facts,
-// never the sibling's. The two ingress events carry distinct payloads so the
+// never the sibling's. The two external events carry distinct payloads so the
 // resolver writes a distinct goal in each cone; the reader in cone A must read
 // cone A's goal and not cone B's, and vice versa — read-at-trigger isolation is
 // the disjoint backward walk (doc 26 §2a).
@@ -164,7 +164,7 @@ func TestProjection_ReadAtTriggerIsolationAcrossParallelRequestCones(t *testing.
 	ctx := context.Background()
 	obs := newObserved()
 
-	// resolver, on its ingress, copies the ingress "tag" into state.updated.goal
+	// resolver, on the external event, copies the "tag" into state.updated.goal
 	// for its own request cone, then emits probe.go for the reader.
 	resolver := Subscriber{
 		Name:  "resolver",
@@ -178,7 +178,7 @@ func TestProjection_ReadAtTriggerIsolationAcrossParallelRequestCones(t *testing.
 		In:    "request",
 		Emits: []string{"state.updated.goal", "probe.go"},
 		Body: ReactionFunc(func(_ context.Context, ev Event, _ Views) ([]Emit, error) {
-			// The ingress tag rode the request.received payload (the resolver's
+			// The external event tag rode the request.received payload (the resolver's
 			// emitKind emits `{}`, so we instead read the request_id to make the
 			// per-cone value distinct). Use the request id as the goal value.
 			val, _ := json.Marshal(map[string]string{"req": ev.Trace.RequestID})
@@ -207,11 +207,11 @@ func TestProjection_ReadAtTriggerIsolationAcrossParallelRequestCones(t *testing.
 
 	e := New()
 	e.install(decls...)
-	// Two ingress events ⇒ two parallel request cones in one Drain.
-	if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{"tag":"A"}`)); err != nil {
+	// Two external events ⇒ two parallel request cones in one Drain.
+	if _, err := e.Append(ctx, "test.msg", json.RawMessage(`{"tag":"A"}`)); err != nil {
 		t.Fatalf("Append A: %v", err)
 	}
-	if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{"tag":"B"}`)); err != nil {
+	if _, err := e.Append(ctx, "test.msg", json.RawMessage(`{"tag":"B"}`)); err != nil {
 		t.Fatalf("Append B: %v", err)
 	}
 	if err := e.Drain(ctx); err != nil {
@@ -319,10 +319,10 @@ func TestProjection_PromoteViaClosure(t *testing.T) {
 
 	e := New()
 	e.install(decls...)
-	if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{"tag":"A"}`)); err != nil {
+	if _, err := e.Append(ctx, "test.msg", json.RawMessage(`{"tag":"A"}`)); err != nil {
 		t.Fatalf("Append A: %v", err)
 	}
-	if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{"tag":"B"}`)); err != nil {
+	if _, err := e.Append(ctx, "test.msg", json.RawMessage(`{"tag":"B"}`)); err != nil {
 		t.Fatalf("Append B: %v", err)
 	}
 	if err := e.Drain(ctx); err != nil {

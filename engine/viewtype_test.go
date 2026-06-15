@@ -28,7 +28,7 @@ func init() {
 func TestViewType_CustomBuilderResolvesThroughViewAs(t *testing.T) {
 	decls := []Decl{
 		Scope{Name: "request", Root: "request.received"},
-		Subscriber{Name: "resolver", On: []string{"app.ingress.*"}, In: "global", Emits: []string{"request.received"}, Scope: "request"},
+		Subscriber{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"request.received"}, Scope: "request"},
 		// A reader node whose body asserts the custom view through ViewAs.
 		Subscriber{
 			Name:  "reader",
@@ -56,7 +56,7 @@ func TestViewType_CustomBuilderResolvesThroughViewAs(t *testing.T) {
 	ctx := context.Background()
 	e := New()
 	e.install(decls...)
-	if _, err := e.Append(ctx, "app.ingress.cli.task", []byte(`{}`)); err != nil {
+	if _, err := e.Append(ctx, "cli.task", []byte(`{}`)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	if err := e.Drain(ctx); err != nil {

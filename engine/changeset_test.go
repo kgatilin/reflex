@@ -7,17 +7,16 @@ import (
 )
 
 // connectedTopology is a minimal valid agent shape used by the control-plane
-// tests: an ingress resolver roots the request scope, a worker answers, a notify
+// tests: a resolver on an external entry kind roots the request scope, a worker answers, a notify
 // sink consumes the answer, and a lifecycle sink consumes the closure (so no
 // dead-end and no stalled closure). It passes the connectivity validator.
 func connectedTopology() []Decl {
 	return []Decl{
 		Scope{Name: "request", Root: "request.received"},
 		Subscriber{
-			// "app.ingress.*" marks it an ingress root for the validator; "cli.task"
-			// is the kind tail of app.ingress.cli.task that actually matches at
-			// dispatch (the ingress-root/dispatch-match divergence, CONCEPT §12).
-			Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global", Emits: []string{"request.received"},
+			// "cli.task" is the external entry kind appended below; subscribing to
+			// it makes the resolver a reachability root (a kind no subscriber emits).
+			Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"request.received"},
 			Body: emitKind("request.received"),
 		},
 		Subscriber{
@@ -106,7 +105,7 @@ func TestApply_RejectedChangesetWritesNoObjectFacts(t *testing.T) {
 	ctx := context.Background()
 	e := New()
 
-	// A worker with no ingress root and a dead-end answer — disconnected.
+	// A worker with no external root and a dead-end answer — disconnected.
 	bad := []Decl{
 		Subscriber{Name: "orphan", On: []string{"never.happens"}, In: "global", Emits: []string{"goes.nowhere"}, Body: emitKind("goes.nowhere")},
 	}
@@ -168,7 +167,7 @@ func TestApply_LiveTableIsAFoldOfTheLog(t *testing.T) {
 }
 
 // TestApply_ChangesetPipelineDrivesARun proves the topology applied through the
-// changeset pipeline actually dispatches: one ingress event reconciles to the
+// changeset pipeline actually dispatches: one external event reconciles to the
 // terminal answer and the scope closes exactly once (G6). This is the control
 // plane and the dispatcher working together end-to-end.
 func TestApply_ChangesetPipelineDrivesARun(t *testing.T) {
@@ -177,7 +176,7 @@ func TestApply_ChangesetPipelineDrivesARun(t *testing.T) {
 	if err := e.Apply(ctx, connectedTopology()...); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if _, err := e.Append(ctx, "app.ingress.cli.task", json.RawMessage(`{}`)); err != nil {
+	if _, err := e.Append(ctx, "cli.task", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	if err := e.Drain(ctx); err != nil {

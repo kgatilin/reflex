@@ -48,7 +48,7 @@ func TestDrain_BoundedLoopBudgetCapTerminates(t *testing.T) {
 			Root:   "request.received",
 			Budget: map[string]int{"tool.fs.read.call": budget},
 		},
-		// resolver: ingress → request.received (roots the work scope).
+		// resolver: external entry (test.msg) → request.received (roots the work scope).
 		Subscriber{
 			Name:  "resolver",
 			On:    []string{"test.msg"},
@@ -77,7 +77,7 @@ func TestDrain_BoundedLoopBudgetCapTerminates(t *testing.T) {
 
 	e := New()
 	e.install(decls...)
-	if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{}`)); err != nil {
+	if _, err := e.Append(ctx, "test.msg", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	if err := e.Drain(ctx); err != nil {
@@ -110,7 +110,7 @@ func TestDrain_BoundedLoopBudgetCapTerminates(t *testing.T) {
 	// Determinism: replay yields the identical log.
 	e2 := New()
 	e2.install(decls...)
-	if _, err := e2.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{}`)); err != nil {
+	if _, err := e2.Append(ctx, "test.msg", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Append (replay): %v", err)
 	}
 	if err := e2.Drain(ctx); err != nil {
@@ -151,7 +151,7 @@ func TestDrain_JoinBarrierClosesOnceWhenAllResultsIn(t *testing.T) {
 			// fanout scope rooted by the fan-out event; budget bounds the call
 			// kind so the topology has a covered cycle-free cone (here acyclic).
 			Scope{Name: "fanout", Root: "fan.out", Budget: map[string]int{"tool.noop.call": n + 1}},
-			// dispatcher: ingress → fan.out (roots the fanout scope), emitting N
+			// dispatcher: external event → fan.out (roots the fanout scope), emitting N
 			// parallel calls inside the cone.
 			Subscriber{
 				Name:  "dispatcher",
@@ -184,7 +184,7 @@ func TestDrain_JoinBarrierClosesOnceWhenAllResultsIn(t *testing.T) {
 		}
 		e := New()
 		e.install(decls...)
-		if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{}`)); err != nil {
+		if _, err := e.Append(ctx, "test.msg", json.RawMessage(`{}`)); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
 		if err := e.Drain(ctx); err != nil {
@@ -238,7 +238,7 @@ func TestDrain_StallReDrivesIntoNewChildCone(t *testing.T) {
 		// quiesces on a non-terminal value (no terminal emitted) — a stall.
 		Scope{Name: "attempt", Root: "attempt.start"},
 
-		// opener: ingress → session.open (roots session), then kicks the first
+		// opener: external event → session.open (roots session), then kicks the first
 		// attempt by emitting attempt.start inside the session cone.
 		Subscriber{
 			Name:  "opener",
@@ -284,7 +284,7 @@ func TestDrain_StallReDrivesIntoNewChildCone(t *testing.T) {
 
 	e := New()
 	e.install(decls...)
-	if _, err := e.Append(ctx, "app.ingress.test.msg", json.RawMessage(`{}`)); err != nil {
+	if _, err := e.Append(ctx, "test.msg", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	if err := e.Drain(ctx); err != nil {

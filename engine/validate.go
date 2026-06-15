@@ -7,16 +7,6 @@ import (
 	graphval "github.com/kgatilin/archmotif/pkg/graphval"
 )
 
-// ingressPatterns are the subscription patterns that mark a node as an
-// ingress root (doc 27 §3): the resolver subscribes to app.ingress.* to turn
-// pre-resolution inbound into request.received. A node whose On contains any
-// pattern matching an ingress kind roots the reachable set; it has no
-// upstream producer inside the topology and is correct to be a source.
-var ingressPatterns = []string{
-	"app.ingress.*",
-	"app.ingress.>",
-}
-
 // attrBudgeted tags whether a graph node sits within a budgeted scope; the
 // unbounded-cycle check reads it back per node ("true"/"false").
 const attrBudgeted = "budgeted"
@@ -34,11 +24,11 @@ type Report struct {
 	// §5): an unbridged gap. Sorted ascending.
 	DeadEnds []string
 
-	// UnreachableNodes are nodes with no path from any ingress root and which
-	// are not themselves ingress roots. Sorted ascending.
+	// UnreachableNodes are nodes with no path from any root (entry point) and
+	// which are not themselves roots. Sorted ascending.
 	UnreachableNodes []string
 
-	// Fragments is the complement of the reachable-from-ingress node set:
+	// Fragments is the complement of the reachable-from-roots node set:
 	// island nodes with no path from an entry point. (Same membership as
 	// UnreachableNodes; reported separately because §5 names both the gap —
 	// "unreachable node" — and its grouping — "disconnected fragment".)
@@ -149,7 +139,19 @@ func Validate(decls ...Decl) (Report, error) {
 		return Report{}, fmt.Errorf("engine: build topology graph: %w", err)
 	}
 
-	roots := ingressRoots(nodes)
+	// produced is every concrete kind some subscriber emits (declared Emits plus
+	// engine-emitted scope closures). A kind consumed by some subscriber but
+	// produced by none is fed from OUTSIDE the topology — the entry-point signal
+	// (a root). This is purely a graph property; there is no special "ingress"
+	// subject class (CONCEPT §2).
+	produced := map[string]struct{}{}
+	for _, ks := range emitsByNode {
+		for _, k := range ks {
+			produced[k] = struct{}{}
+		}
+	}
+
+	roots := rootNodes(nodes, produced)
 	rep := Report{}
 
 	rep.DeadEnds, err = deadEnds(nodes, consumers)
@@ -343,12 +345,17 @@ func effectiveEmits(decls []Decl, nodes []Subscriber) map[string][]string {
 	return out
 }
 
-// ingressRoots returns the names of nodes that subscribe to an ingress kind
-// (doc 27 §3): the topology's entry points.
-func ingressRoots(nodes []Subscriber) []string {
+// rootNodes returns the names of the topology's entry points: nodes that
+// subscribe to a kind fed from OUTSIDE the topology (CONCEPT §2/§9). produced is
+// the set of concrete kinds some subscriber emits; a node is a root iff it has
+// an On pattern that no produced kind satisfies — i.e. it consumes something the
+// graph never produces, so the events arrive externally (appended by an operator
+// surface / adapter). There is no special "ingress" subject class: entry-point-
+// ness is derived from the emit/subscribe relation, not from a name.
+func rootNodes(nodes []Subscriber, produced map[string]struct{}) []string {
 	var out []string
 	for _, n := range nodes {
-		if isIngressRoot(n) {
+		if isRoot(n, produced) {
 			out = append(out, n.Name)
 		}
 	}
@@ -356,26 +363,22 @@ func ingressRoots(nodes []Subscriber) []string {
 	return out
 }
 
-// isIngressPattern reports whether a subscription pattern is an ingress-root
-// pattern: it literally is one of the ingress namespace patterns, or it matches
-// a representative ingress subject. Such a pattern subscribes to pre-resolution
-// inbound (doc 27 §3) and is never a dead subscription — its producers are
-// adapters appending ingress events, not topology nodes / catalog kinds.
-func isIngressPattern(pat string) bool {
-	for _, ing := range ingressPatterns {
-		if pat == ing || subjectMatch(pat, "app.ingress.surface") {
-			return true
+// isExternalPattern reports whether an On pattern matches no kind the topology
+// produces — so any event satisfying it must come from outside (a root's entry
+// kind). Such a pattern is never a dead subscription: its producer is an
+// external surface, by design, not a missing internal node.
+func isExternalPattern(pat string, produced map[string]struct{}) bool {
+	for k := range produced {
+		if subjectMatch(pat, k) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
-func isIngressRoot(n Subscriber) bool {
-	// A node is an ingress root if any subscription matches the ingress namespace
-	// — either by literally carrying an app.ingress.* / .> pattern or by matching
-	// a representative ingress subject.
+func isRoot(n Subscriber, produced map[string]struct{}) bool {
 	for _, pat := range n.On {
-		if isIngressPattern(pat) {
+		if isExternalPattern(pat, produced) {
 			return true
 		}
 	}
@@ -426,7 +429,7 @@ func deadEnds(nodes []Subscriber, consumers []consumer) ([]string, error) {
 	return dead, nil
 }
 
-// unreachable returns the nodes that are neither an ingress root nor reachable
+// unreachable returns the nodes that are neither a root nor reachable
 // from one (doc 27 §5). ReachableFromNames(roots) includes each root and
 // everything downstream; the complement is the unreachable set.
 func unreachable(g *graphval.Graph, nodes []Subscriber, roots []string) []string {
@@ -678,15 +681,14 @@ func deadSubscriptions(consumers []consumer, cat catalog) []string {
 	seen := map[string]struct{}{}
 	for _, c := range consumers {
 		for _, pat := range c.on {
-			// An ingress-root pattern (app.ingress.*) is NOT dead: it matches
-			// externally-appended ingress events (pre-resolution inbound, doc 27
-			// §3), which are not produced catalog kinds — there is no internal
-			// producer, by design. The reachability check already treats these as
-			// entry points (ingressPatterns / isIngressRoot); the catalog check
-			// must agree, else adopting a catalog would flag every entry point.
-			if isIngressPattern(pat) {
-				continue
-			}
+			// A subscription is dead iff its pattern matches NO catalog kind: the
+			// type layer carries nothing it could ever fire on. An EXTERNAL input
+			// event (a root's entry kind, produced by no subscriber) is NOT dead —
+			// the operator registers it in the catalog like any kind (CONCEPT §2),
+			// so it matches here. The "produced by none" property is the
+			// reachability root signal (isRoot), orthogonal to catalog membership:
+			// a typo matches no catalog kind (dead); a registered external kind
+			// matches one (live, and a root).
 			matched := false
 			for _, k := range kinds {
 				if subjectMatch(pat, k) {
@@ -732,7 +734,7 @@ func suggestions(rep Report) []string {
 	}
 	for _, n := range rep.UnreachableNodes {
 		out = append(out, fmt.Sprintf(
-			"node %q is unreachable — no path from an ingress root; wire a producer of one of its On kinds, or make it an ingress root",
+			"node %q is unreachable — no path from a root; wire a producer of one of its On kinds, or make it a root (subscribe to an external entry kind no subscriber produces)",
 			n))
 	}
 	for _, scc := range rep.UnboundedCycles {

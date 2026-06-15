@@ -48,7 +48,7 @@ func descriptorTopology() []engine.Decl {
 	return []engine.Decl{
 		engine.Scope{Name: "request", Root: "request.received"},
 		engine.Subscriber{
-			Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global",
+			Name: "resolver", On: []string{"cli.task"}, In: "global",
 			Emits: []string{"request.received"}, BodyKind: "emit", BodyConfig: mustJSON(emitConfig{Kind: "request.received"}),
 		},
 		engine.Subscriber{
@@ -84,7 +84,7 @@ func reconciledCounts(e *engine.Engine) (answered, closed int) {
 // path (Iteration 2a): a declarative topology applies, runs, and — crucially —
 // is RECOVERABLE FROM THE LOG ALONE. A second engine is built with engine.Load
 // over the first engine's topology facts (it never sees the Go closures) and
-// reconciles the same ingress to the terminal answer. This is G8 for behaviour:
+// reconciles the same external event to the terminal answer. This is G8 for behaviour:
 // the body kind + config are facts, the resolver rebuilds the code.
 func TestDescriptorTopologyRunsAndRecovers(t *testing.T) {
 	ctx := context.Background()
@@ -104,7 +104,7 @@ func TestDescriptorTopologyRunsAndRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if _, err := eB.Append(ctx, "app.ingress.cli.task", json.RawMessage(`{}`)); err != nil {
+	if _, err := eB.Append(ctx, "cli.task", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	if err := eB.Drain(ctx); err != nil {
@@ -128,7 +128,7 @@ func TestApply_UnknownBodyKindRejected(t *testing.T) {
 	e := engine.New(engine.WithBodyResolver(nodes.Resolver()))
 	err := e.Apply(ctx, engine.Scope{Name: "request", Root: "request.received"},
 		engine.Subscriber{
-			Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global",
+			Name: "resolver", On: []string{"cli.task"}, In: "global",
 			Emits: []string{"request.received"}, BodyKind: "nonesuch", BodyConfig: json.RawMessage(`{}`),
 		},
 		engine.Subscriber{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
@@ -149,7 +149,7 @@ func TestApply_DescriptorWithNoResolverRejected(t *testing.T) {
 	e := engine.New() // no resolver
 	err := e.Apply(ctx, engine.Scope{Name: "request", Root: "request.received"},
 		engine.Subscriber{
-			Name: "resolver", On: []string{"app.ingress.*", "cli.task"}, In: "global",
+			Name: "resolver", On: []string{"cli.task"}, In: "global",
 			Emits: []string{"request.received"}, BodyKind: "emit", BodyConfig: json.RawMessage(`{}`),
 		},
 		engine.Subscriber{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
