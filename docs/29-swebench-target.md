@@ -267,8 +267,7 @@ from `serve --root`), never an operator topology config. The root confines the
 process; it is not part of the graph the operator declares.
 
 **Iteration 4 — The coding-agent topology + verification flow, run locally.
-✅ MOSTLY DONE (`16150d0`, `d3c69bc`, `aba7af0`, this iteration); one manual
-step remains.** §4b is now a committed topology document
+✅ DONE — the live Gemini drive is green.** §4b is now a committed topology document
 ([`topologies/coding-agent.yaml`](../topologies/coding-agent.yaml)) wiring the
 real Gemini brain (`vertex:gemini-2.5-pro`) to the launched fs/pytest hands. What
 shipped:
@@ -306,11 +305,44 @@ ordinary way and the validator needed **no** change — the earlier edge-kind
 tightening was reverted (it was patching a symptom). This reverses the auto-global
 node of `faf9f64`: a plugin self-describes its kinds; the operator owns the wiring.
 
-**Remaining (the one manual step):** the actual **live Gemini drive** — `emit
-task.new --wait request.terminal` against a `serve --root <checkout>` daemon — is
-a credentialled, billable run, documented in
-[`topologies/README.md`](../topologies/README.md), not a committed test. That run
-closes Iteration 4 and is the immediate lead-in to Iteration 5.
+**The live Gemini drive — done, green.** Against a `serve --root <checkout>`
+daemon (real `vertex:gemini-2.5-pro` on `iow-uagent`, real fs/pytest hands) a
+synthetic task (a buggy `add` whose test fails) drove to a *verified* terminal:
+`task.new → search → test(fail) → read → edit → test(pass) → claim.complete →`
+verifier re-ran the suite green `→ state.updated.status{done} → request.terminal`.
+The brain produced the correct one-line fix; an independent `pytest` re-run after
+the drive confirmed green. The flow, the verification gate, and the terminal
+drive all hold on the real stack. The drive is a credentialled, billable run
+(documented in [`topologies/README.md`](../topologies/README.md)), not a committed
+test.
+
+*Finding (Iteration 4, the live drive) — two real bugs the structural tests
+could not see, both about the model actually acting:*
+
+1. **The brain got no tools (`fix(daemon)`).** The `llm` body advertises its
+   `Emits` as the model's function menu, but the `BodyResolver` is handed only
+   `(name, kind, config)` — never the subscriber's `Emits`. Through the
+   descriptor/replay path the menu was therefore empty: Gemini received no
+   functions and *narrated* prose ("I will read the file…", `input_tokens=116`,
+   zero tool calls) instead of calling them. The apply test never caught it — it
+   checks connectivity + catalog, not a real completion. Fix: the daemon mirrors
+   the subscriber's `Emits` into the `llm` body descriptor (`mirrorLLMEmits`), so
+   the rebuildable fact carries its own menu (G8). The subscriber's `Emits` stays
+   the single source of truth.
+2. **A non-tool turn was a dead end (`feat(llm)`).** After editing, the model
+   replied in prose ("done") with no function call; nothing re-triggered it and
+   the loop stalled at quiescence short of `claim.complete`. The wrong fix is a
+   prompt forbidding prose — it will not hold. The right fix is structural: a
+   non-tool answer is an **event** (`llm.continue`) that re-drives the seat. A
+   seat that opts in (lists `llm.continue` in its `Emits`) re-drives on any turn
+   that called no function — prose-only *or* empty (also closing the G4
+   silent-dead-end when a thinking model spends its whole budget reasoning). It
+   re-triggers on `llm.continue`, not on its prose answer kind, so a turn with
+   both a tool call and prose advances once, never forking; and the scope budget
+   on `llm.continue` is the backstop for an endlessly chatty model.
+
+These reinforce a §7 line: **completion is a verified state, never quiescence.**
+A loop that "ends" because the model went quiet is a bug, not a terminal.
 
 **Iteration 5 — External bash harness + first real instance.**
 Pick one small-repo instance (requests/flask/pytest). Bash: pull/build the
