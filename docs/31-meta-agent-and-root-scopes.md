@@ -135,18 +135,68 @@ root scope**, hence top-level regardless of what triggered it."
   rooting the worker cone) is a **port**, not an in-graph edge: causally linked,
   scope-detached.
 
+### Two orthogonal axes: execution isolation vs projection visibility
+
+The isolation is on EXECUTION only. A scope is an **execution scope**: a cone that
+bounds *dispatch* — a node receives only events in its own cone. That is the
+isolation that frees kind reuse and kills the cross-scope cycle.
+
+**Projections are a separate axis and need not be isolated.** A projection is a
+*read* over the shared log (one log, G8); its horizon can be **global**, folding
+events from NEIGHBORING execution scopes when wanted. So observation is decoupled
+from execution: a meta-agent can *read* its sub-scope through a global projection
+without that sub-scope's events ever being *delivered* to it as triggers. Active
+(dispatch) is scope-local; passive (a view) can be global. No new node type is
+needed for "watching" — it is just a projection with a wider horizon.
+
+### A changeset may only mutate a FOREIGN scope
+
+The meta-agent builds *another* scope, never its own. A changeset issued from
+inside scope X (the `changeset.requested` event is a member of an X cone) may add
+or modify subscribers/scopes that live in OTHER scopes, but **not** scope X
+itself. The architect (running in `architect`) builds `request`; it cannot rewrite
+the `architect` loop it is running in. This keeps the live-refresh coherent (a
+running cone is never mutated out from under itself) and is the natural authority
+boundary: you compose *downstream* topology, you do not self-modify. Enforcement
+is a check in `commitChangeset`: reject ops whose target scope equals the issuing
+event's scope. (Open: an external operator `Apply` has no issuing scope, so the
+rule applies only to in-graph changesets.)
+
+### Identifying the port (entry detection) — a basic graph operation
+
+The validator already finds entry points structurally: a node is a **root** when
+it consumes a kind no node produces (`isRoot`, `engine/validate.go`). A root
+scope's Root kind is an entry of the **same structural shape**, with one twist —
+it may ALSO be produced by a node in a *different* component (the meta-agent's
+launch). That production is a **port**, not an internal edge, so the validator
+**cuts** it: a root-scope Root kind is treated as an external entry to its
+component even when some node elsewhere emits it.
+
+Two equivalent ways to mark the entry (your call):
+- **Flag it** — like the existing `terminal: true` (a declared graph *output*),
+  but the other way: a declared *input*. A root scope's Root kind is implicitly
+  this.
+- **Detect it** — structurally: a node with **0 `on` and >0 `emits`** is a pure
+  input (an injector); and any root-scope Root kind is an entry. No flag needed.
+
+With the ports cut, partitioning is a **basic graph operation**: weakly-connected
+components (or directed reachability from each entry — `graphval.ReachableFromNames`,
+already used here). Each component is one root scope's subgraph; validate
+connectivity + the unbounded-cycle check **per component**. The architect↔worker
+cycle disappears because the `task.new` port is cut at the worker's entry — they
+are two components, each acyclic on its own.
+
 ---
 
 ## 5. Open problems (not yet settled)
 
-1. **The static validator must respect root-scope boundaries.** Today
-   `unboundedCycles` / reachability are global and scope-blind, so the
-   architect→worker port reads as an internal edge and closes a spurious cycle. A
-   root-scope boundary should be treated like an external entry/exit: each root
-   scope's subgraph is validated **independently**, with a cross-root edge as a
-   boundary (an exit from the producer's subgraph, the root/entry of the
-   consumer's). Open: how the validator partitions decls by reachable root scope
-   without re-introducing the "graph" abstraction it is trying to avoid.
+1. **Per-component validation is the easy part** (see §4 "Identifying the port").
+   Cut the root-scope ports, then run weakly-connected components / reachability
+   (`graphval`, already available) and validate each component independently. The
+   only real choice is how to mark the port — a declared `input` flag (the mirror
+   of `terminal`) vs. structural detection (0 `on` + >0 `emits`, plus any
+   root-scope Root kind). No "graph" abstraction is introduced: a component is
+   just the reachable set of one root scope.
 
 2. **How is a dispatch "detached" decided — by the SCOPE or by the EMIT?** Two
    options: (a) the *scope* is declared root (any instance is top-level, however
@@ -155,13 +205,16 @@ root scope**, hence top-level regardless of what triggered it."
    but splits caused_by from membership at the emit site, which is the invariant
    doc 26 §2 leans on. §4 prefers (a).
 
-3. **Monitoring across root scopes.** A meta-agent that DOES want to watch its
-   sub-computation cannot subscribe (subscriptions are cone-scoped, by design). It
-   reads a **projection over the shared log** instead — the log is one, so a view
-   folding the worker root cone is available to the architect as a `reads:` view,
-   not as a subscription. This keeps "build/launch" (active, cross-cone control
-   ops) separate from "observe" (passive, a projection) — and observe never
-   re-nests the child in the parent.
+3. **Monitoring is the projection axis, not the execution axis** (see §4 "Two
+   orthogonal axes"). A meta-agent that wants to WATCH its sub-computation does not
+   subscribe (dispatch is cone-local, by design) — it declares a **global
+   projection** that folds the sub-scope's events from the shared log and `reads:`
+   it. Observation never re-nests the child in the parent. Open: a node only *acts*
+   on a trigger, and triggers are cone-local — so a meta-agent that must *react* to
+   (not just read) the sub-computation needs an explicit **port** back (a declared
+   cross-scope trigger, the inbound mirror of launch), or that reaction belongs to
+   a node inside the sub-scope / a global terminal handler. The fire-and-forget
+   architect needs neither: it builds, launches, and is done.
 
 4. **Relation to the control plane.** Build (`topology.changeset.requested`) and
    launch (`task.new` into a root scope) are the meta-agent's two control ops.
@@ -184,7 +237,14 @@ root scope**, hence top-level regardless of what triggered it."
   fresh cone that does not inherit its trigger's cones, so the sub-computation is
   a sibling of the meta-agent, not a child — isolating dispatch and freeing kind
   reuse, with no new primitive.
-- Settling it needs: a root-scope property on scopes, `admit` not inheriting
-  parents for root-scope instances, and a validator that treats root-scope
-  boundaries as entry/exit ports. Monitoring is a projection over the shared log,
+- **Two orthogonal axes**: an *execution scope* isolates DISPATCH (a node receives
+  only its cone's events); a *projection* is a separate READ axis whose horizon can
+  be global, folding neighboring scopes from the shared log. So observation is
+  decoupled from execution — a meta-agent reads its sub-scope via a global
+  projection, never by a subscription.
+- Settling it needs: a root-scope property on scopes; `admit` not inheriting
+  parents for a root-scope instance; a changeset that may only mutate a FOREIGN
+  scope; and a validator that **cuts the root-scope ports** and validates each
+  weakly-connected component independently (a basic graph op — `graphval` already
+  has reachability/SCCs). Monitoring is a global projection over the shared log,
   not a subscription.
