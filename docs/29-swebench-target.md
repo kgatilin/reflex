@@ -87,21 +87,39 @@ spine is `status`; `done`/`failed` are terminal values.
 | node | `on:` | `in:` | emits (allowlist) |
 |---|---|---|---|
 | `resolver` | `task.new` (an external entry kind, registered, produced by none) | `global` | `request.received{task}` (roots `request`) |
-| `brain` (llm, **loops**) | `request.received`, `tool.fs.*.result/failed`, `tool.py.test.result/failed`, `verify.failed` | `request` | `tool.fs.read/edit/write/search.call`, `tool.py.test.call`, `claim.complete`, `llm.usage` |
-| `fs` (subscriber) | `tool.fs.>.call` | `request` | `tool.fs.*.result/failed` |
-| `pytest` (subscriber) | `tool.py.test.call` | `request` | `tool.py.test.result/failed` |
-| `verifier` | `claim.complete` | `request` | runs the agreed test command; green → `state.updated.status{done}`, red → `verify.failed` |
+| `brain` (llm, **loops**) | `request.received`, `tool.fs.*.result/failed`, `tool.py.test.result/failed`, `verify.failed`, `judge.rejected`, `llm.empty` | `request` | `tool.fs.read/edit/write/search.call`, `tool.py.test.call`, `llm.message`, `llm.empty`, `llm.usage` |
+| `tool.fs.*.call` / `tool.py.test.call` (hands) | their own kind | `request` | the plugin's `*.result/failed` (the daemon backs each by the plugin that handles its kind) |
+| `verifier` | `llm.message` (the prose claim) | `request` | re-runs the agreed test command; green → `check.passed`, red → `verify.failed` |
+| `judge` (llm, independent) | `check.passed` | `request` | `judge.approved` (an affirmative call) / `judge.rejected` (its `Answer==Empty` fold — prose *or* silence) |
+| `done` | `judge.approved` | `request` | `state.updated.status{done}` |
 | `terminal` | `state.updated.status` | `request` | when terminal → `request.terminal` |
 | `costs` (sink) | `llm.usage` | `request` | — |
 
-- **The loop is event closure**, bounded by a `Budget` on the `request` scope
-  (the tool-call kinds) — the termination backstop (`CONCEPT.md` §4). `brain`
-  reads its `llm.history` view (`CONCEPT.md` §7); the issue text is the first
-  user message, file/test results are the appended tail.
-- **Completion is verified, not claimed.** `brain` emits `claim.complete` when it
-  *thinks* it is done; `verifier` re-runs the tests deterministically and writes
-  `status=done` **only if green**, else `verify.failed` back into the loop. "Done"
-  is a state the verifier sets, surfaced by `terminal` — exactly closure ≠
+- **The loop is event closure**, bounded by a `Budget` on the `request` scope —
+  the termination backstop (`CONCEPT.md` §4). Every brain turn emits exactly one
+  of the budgeted loop kinds (`tool.fs.*.call`, `tool.py.test.call`, `llm.message`,
+  `llm.empty`), so capping them caps the loop. `brain` reads its `llm.history` view
+  (`CONCEPT.md` §7); the issue text is the first user message, file/test results
+  are the appended tail.
+- **History replays as *structured* function calls, not text.** The `llm.history`
+  view re-emits the model's own tool calls and their results as function-call /
+  function-response parts (the function name is the event kind), not narrated prose
+  — required for reliable multi-turn function calling on Gemini. A thinking model's
+  per-call `thoughtSignature` rides on the call event via an engine-blind `Meta`
+  channel (`engine.Emit`/`Event` carry an opaque `Meta` field) and is echoed back on
+  replay, or the API rejects the request.
+- **The brain never asserts done with a function. A turn that calls NO function
+  IS its claim of completion** — prose surfaces as `llm.message`, empty/silence as
+  `llm.empty`. The claim is then *evaluated*, never trusted: `llm.message` →
+  `verifier` re-runs the tests deterministically (green → `check.passed`, red →
+  `verify.failed` back into the loop); `check.passed` → `judge` (an independent
+  llm node) reviews whether the change genuinely resolves the issue or merely games
+  the tests, emitting `judge.approved` (an affirmative call) or `judge.rejected`
+  (its `Answer==Empty` fold, so prose *or* silence both reject). Only
+  `judge.approved` writes `state.updated.status{done}`; `judge.rejected` and
+  `llm.empty` go back to the brain. **Done is a *verified* value — a deterministic
+  check AND an llm reviewer**; green is necessary but not sufficient. The judge is
+  *just another llm node* (a config, not a new abstraction) — exactly closure ≠
   completion (`CONCEPT.md` §3/§9).
 - **`terminal` consumes the closure path** so no close stalls in the void (the
   stalled-closure validator check is satisfied).
@@ -185,12 +203,15 @@ declared kind+schema, in AND out**. The operator topology never writes a
 `body_kind: plugin` node; it just emits the kinds a hand consumes and consumes
 the kinds it produces. These plugin decls are folded into the next
 
-> **SUPERSEDED by the §6 Iteration-4 finding (`50b7d55`).** The auto-created
-> **global subscriber node** described in this paragraph was the wrong call:
-> launching a plugin now contributes **only the catalog** (the `EventKind`s), and
-> **USING** a hand is a subscription the **operator declares** — a `body_kind:
-> plugin` subscriber referencing the plugin by name, with an operator-chosen
-> scope. So the operator *does* write a plugin node (that is how scope is chosen),
+> **SUPERSEDED by the §6 Iteration-4 finding (`50b7d55`) and its follow-up.** The
+> auto-created **global subscriber node** described in this paragraph was the wrong
+> call. The model now has two distinct concerns: a top-level **`plugins:`** section
+> **registers the external process** (its spawn command + transport) — scope-agnostic
+> infra; and **USING** a hand is a subscription the **operator declares** — a
+> **normal subscriber named after the tool-call kind it serves** (e.g.
+> `tool.fs.read.call`), scoped `in: request`, with **no plugin reference**. The
+> daemon backs that subscriber with whichever registered plugin **handles its kind**
+> — the link is the kind, not a name. So the operator owns the wiring and the scope,
 > while the plugin still self-describes its kinds. Read the rest of this paragraph
 > with that correction in mind.
 
@@ -275,15 +296,17 @@ shipped:
 - **The control bodies** the §4b graph needed beyond `llm`: `entry` (the
   entry/resolver role — boundary kind → domain kind), `gate` (the terminal gate —
   drive `request.terminal` only when a state field is terminal), and `verifier`
-  (completion as a *verified* state: re-run the agreed check, green →
-  `state.updated.status{done}`, red → `verify.failed` back into the loop). Each is
-  a registered `nodes.Factory`, unit-tested. The brain only *claims* done; the
-  verifier writes it.
+  (the *deterministic* half of completion: on the brain's prose claim re-run the
+  agreed check, green → `check.passed`, red → `verify.failed` back into the loop).
+  Each is a registered `nodes.Factory`, unit-tested. The brain only *claims* done
+  (a no-function turn); the verifier confirms the tests, and the `judge` — *just
+  another `llm` node*, config not a new body — reviews the change and gates `done`.
 - **A deterministic integration test** (`pkg/daemon/coding_loop_test.go`) drives
   the whole loop on the real engine with the model + hands replaced by stand-ins:
-  the green path (claim → verified done → `request.terminal`) and the red path
-  (the check never passes → the loop re-claims until the `request` scope budget
-  caps it → `budget_exhausted` → a failed terminal). Proves the loop, the
+  the green path (prose claim → `check.passed` → `judge.approved` → verified done
+  → `request.terminal`) and the red path (the check never passes → the loop
+  re-claims until the `request` scope budget caps it → `budget_exhausted` → a
+  failed terminal). Proves the loop, the
   verification flow, and the terminal drive without spend.
 - **A real-hands apply test** (`coding_agent_topology_test.go`) launches the
   actual fs + pytest plugins, folds them with the document, and asserts the graph
@@ -298,21 +321,24 @@ outside the budgeted `request` scope. The first fix tightened the validator
 in the plugin model itself: `LaunchPlugin` **auto-created a global subscriber**,
 force-wiring a hand into the graph with no operator say over its scope. Corrected
 (operator): **launching a plugin exposes a capability; USING it is a subscription
-the operator declares**, like any other — a body-kind `plugin` subscriber
-referencing the plugin by name, with an operator-chosen `In`. The hands are now
-declared `In: request` (inside the budgeted loop), so the loop is bounded the
-ordinary way and the validator needed **no** change — the earlier edge-kind
-tightening was reverted (it was patching a symptom). This reverses the auto-global
-node of `faf9f64`: a plugin self-describes its kinds; the operator owns the wiring.
+the operator declares**, like any other — a **normal subscriber named after the
+tool-call kind it serves** (e.g. `tool.fs.read.call`), with an operator-chosen
+`In` and **no plugin reference**; the daemon backs it with whichever registered
+plugin handles its kind (the link is the kind). The hands are now declared
+`In: request` (inside the budgeted loop), so the loop is bounded the ordinary way
+and the validator needed **no** change — the earlier edge-kind tightening was
+reverted (it was patching a symptom). This reverses the auto-global node of
+`faf9f64`: a top-level `plugins:` section registers the process; the operator owns
+the wiring.
 
 **The live Gemini drive — done, green.** Against a `serve --root <checkout>`
 daemon (real `vertex:gemini-2.5-pro` on `iow-uagent`, real fs/pytest hands) a
 synthetic task (a buggy `add` whose test fails) drove to a *verified* terminal:
-`task.new → search → test(fail) → read → edit → test(pass) → claim.complete →`
-verifier re-ran the suite green `→ state.updated.status{done} → request.terminal`.
-The brain produced the correct one-line fix; an independent `pytest` re-run after
-the drive confirmed green. The flow, the verification gate, and the terminal
-drive all hold on the real stack. The drive is a credentialled, billable run
+`task.new → search → test(fail) → read → edit → test(pass) → llm.message(claim)
+→ check.passed → judge.approved → done → request.terminal`. The verifier re-ran
+the suite green and the judge affirmed the change. The brain produced the correct
+one-line fix; an independent `pytest` re-run after the drive confirmed green. The
+flow, the verification gate, and the terminal drive all hold on the real stack. The drive is a credentialled, billable run
 (documented in [`topologies/README.md`](../topologies/README.md)), not a committed
 test.
 
@@ -331,15 +357,15 @@ could not see, both about the model actually acting:*
    the single source of truth.
 2. **A non-tool turn was a dead end (`feat(llm)`).** After editing, the model
    replied in prose ("done") with no function call; nothing re-triggered it and
-   the loop stalled at quiescence short of `claim.complete`. The wrong fix is a
-   prompt forbidding prose — it will not hold. The right fix is structural: a
-   non-tool answer is an **event** (`llm.continue`) that re-drives the seat. A
-   seat that opts in (lists `llm.continue` in its `Emits`) re-drives on any turn
-   that called no function — prose-only *or* empty (also closing the G4
-   silent-dead-end when a thinking model spends its whole budget reasoning). It
-   re-triggers on `llm.continue`, not on its prose answer kind, so a turn with
-   both a tool call and prose advances once, never forking; and the scope budget
-   on `llm.continue` is the backstop for an endlessly chatty model.
+   the loop stalled at quiescence. The wrong fix is a prompt forbidding prose — it
+   will not hold. The right fix is structural and *makes the no-function turn the
+   completion claim itself*: a brain turn that calls no function emits an **event**
+   — prose → `llm.message`, empty/silence → `llm.empty` (closing the G4 silent
+   dead-end when a thinking model spends its whole budget reasoning). `llm.message`
+   feeds the verifier→judge gate; `llm.empty` is a bounded re-prompt back to the
+   brain. The `llm` body emits its answer kind, not a separate re-drive event, so a
+   turn with both a tool call and prose advances once, never forking; and the scope
+   budget on `llm.message`/`llm.empty` is the backstop for an endlessly chatty model.
 
 These reinforce a §7 line: **completion is a verified state, never quiescence.**
 A loop that "ends" because the model went quiet is a bug, not a terminal.

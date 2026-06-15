@@ -216,12 +216,17 @@ sequenceDiagram
 
 ---
 
-## 4. Launch a plugin — it self-registers (it is NOT an operator node)
+## 4. Register a plugin (the process) + declare a handler (the wiring)
 
-A plugin's whole job: announce "I handle these kinds (schemas), I emit these
-kinds (schemas)" and subscribe. The daemon turns that announcement into **one
-global `Subscriber` + catalog kinds**. Who emits/consumes those kinds is the
-separate operator-graph concern.
+Two distinct concerns. A top-level **`plugins:`** section **registers the external
+process** — its spawn command + transport — scope-agnostic infra; the plugin
+announces "I handle these kinds (schemas), I emit these kinds (schemas)", which the
+daemon turns into **catalog kinds**. *Using* a hand is a separate operator-graph
+concern: a **normal `Subscriber` named after the tool-call kind it serves** (e.g.
+`tool.fs.read.call`), scoped `in: request`, with **no plugin reference**. The
+daemon backs that subscriber with whichever registered plugin **handles its kind** —
+the link is the kind, not a name — and defaults its `Emits` to the plugin's
+produced `*.result/failed`.
 
 ```mermaid
 sequenceDiagram
@@ -233,21 +238,20 @@ sequenceDiagram
   M->>P: spawn over stdio
   P-->>M: hello (name, events in/out with schemas, protocol)
   M-->>P: welcome
-  M->>M: derive Subscriber (On=in, Emits=out, In=global, body=plugin descriptor)
-  M->>M: derive EventKind per declared kind and schema (in and out)
-  M-->>D: return name and decls
-  D->>D: record decls in pluginDecls (NOT applied yet)
-  Note over D,P: later, the operator applies a topology that emits the plugin in-kinds
-  Note over D,P: Apply folds pluginDecls and the doc, validates the whole graph
+  M->>M: derive EventKind per declared kind and schema (in and out) — catalog only
+  M-->>D: return name and catalog decls
+  Note over D,P: the operator declares a handler subscriber (On=the tool-call kind, In=request)
+  Note over D,P: Apply binds that subscriber to the plugin that handles its kind; validates the whole graph
 ```
 
-- **Scope is `global`** on purpose: a plugin handles its kind wherever it occurs;
-  the engine places its result in the trigger's cone by causality.
+- **The handler's scope is the operator's choice** (`in: request` puts a hand
+  inside the budgeted loop); the engine places its result in the trigger's cone by
+  causality.
 - `--root` is a **host concern** (`serve --root` → `reflexd plugin fs --root`),
   never an operator-topology config.
 - On restart, `engine.Load` rebuilds the `Subscriber` from
   `sys.subscriber.registered` and the resolver re-spawns the process from the
-  descriptor (G8).
+  registered plugin (G8).
 
 ---
 
@@ -275,10 +279,10 @@ sequenceDiagram
   E->>L: append (caused_by the external event), scope request opens, obligations +1
   E->>B: deliver request.received (in scope)
   B-->>E: Emit tool.fs.read.call (allowlisted, schema from catalog)
-  E->>FS: deliver tool.fs.read.call (global subscriber)
+  E->>FS: deliver tool.fs.read.call (handler subscriber, in request)
   FS->>FS: child reads file, returns emits
   FS-->>E: Emit tool.fs.read.result
-  E->>B: deliver result (loop until brain emits claim.complete, then verifier)
+  E->>B: deliver result (loop until a brain turn calls no function — its llm.message claim — then verifier + judge gate done)
   Note over E: depth-first, each emit is processed as a child before its parent leaves the cone
   E->>E: obligations of request reach 0
   E->>L: append scope.request.closed (once, in the parent cone)
@@ -288,7 +292,12 @@ sequenceDiagram
 
 - **The loop is event closure**, bounded by a `Budget` on the `request` scope —
   the termination backstop. The `brain` reads its history *view* (a Projection)
-  at each firing.
+  at each firing; it replays the model's own tool calls and results as
+  **structured function-call / function-response parts** (the function name is the
+  event kind), not text — required for reliable multi-turn function calling on
+  Gemini. A thinking model's per-call `thoughtSignature` rides on the call event
+  via an engine-blind `Meta` channel (`Emit`/`Event` carry an opaque `Meta` field)
+  and is echoed back on replay, or the API rejects the request.
 - **Out-of-process is not out-of-bounds:** the engine still binds the plugin's
   emits to the `Subscriber`'s `Emits` allowlist, and runs payload-conformance
   against the catalog schema.
@@ -328,8 +337,9 @@ cycles, stalled closures, co-rooted scopes, unknown kinds, dead subscriptions.
 
 - **Built & green:** the engine (append/drain, scopes/budgets/closure,
   projections, catalog), `llm`/`tool` bodies, the daemon + control plane + HTTP
-  API, the stdio plugin seam, `fs`/`pytest`/`echo` plugins, self-registering
-  plugins, the `Subscriber` substrate naming. **No `app.ingress` class** — an
+  API, the stdio plugin seam, `fs`/`pytest`/`echo` plugins, plugins that
+  self-describe their kinds (operator-declared handler wiring), the `Subscriber`
+  substrate naming. **No `app.ingress` class** — an
   external event is a plain registered domain event; a root is structural
   (`isRoot`). **Always-on catalog**, with the engine self-registering its own
   kinds (seed + per-scope `scope.*.closed`/`.budget_exhausted`), so the operator
