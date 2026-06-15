@@ -11,7 +11,7 @@ import (
 
 func react(t *testing.T, config string) []engine.Emit {
 	t.Helper()
-	r, err := verifier.Factory("v", json.RawMessage(config))
+	r, err := verifier.Factory("v", nil, json.RawMessage(config))
 	if err != nil {
 		t.Fatalf("Factory: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestVerifier_CustomStatusAndEmits(t *testing.T) {
 
 // TestVerifier_RequiresCommand proves a config with no command is a clean error.
 func TestVerifier_RequiresCommand(t *testing.T) {
-	if _, err := verifier.Factory("v", json.RawMessage(`{}`)); err == nil {
+	if _, err := verifier.Factory("v", nil, json.RawMessage(`{}`)); err == nil {
 		t.Fatal("Factory with no command returned nil, want an error")
 	}
 }

@@ -116,7 +116,7 @@ func (m *Manager) Ensure(name string, command []string) (client *plugin.Client, 
 // Factory is the resolver entry for the "plugin" kind: it reuses the client the
 // launch path adopted, or spawns on demand (the engine.Load path, where the
 // resolver rebuilds the body from its descriptor and no launch pre-adopted one).
-func (m *Manager) Factory(name string, config json.RawMessage) (engine.Reaction, error) {
+func (m *Manager) Factory(name string, _ []string, config json.RawMessage) (engine.Reaction, error) {
 	cfg, err := ParseConfig(name, config)
 	if err != nil {
 		return nil, err

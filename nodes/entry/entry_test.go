@@ -11,7 +11,7 @@ import (
 
 func react(t *testing.T, config string, trigger json.RawMessage) []engine.Emit {
 	t.Helper()
-	r, err := entry.Factory("e", json.RawMessage(config))
+	r, err := entry.Factory("e", nil, json.RawMessage(config))
 	if err != nil {
 		t.Fatalf("Factory: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestEntry_EmptyTriggerYieldsObjectPayload(t *testing.T) {
 // TestEntry_RequiresEmitKind proves a config with no emit kind is a clean error,
 // not a body that silently emits nothing.
 func TestEntry_RequiresEmitKind(t *testing.T) {
-	if _, err := entry.Factory("e", json.RawMessage(`{}`)); err == nil {
+	if _, err := entry.Factory("e", nil, json.RawMessage(`{}`)); err == nil {
 		t.Fatal("Factory with no emit kind returned nil, want an error")
 	}
 }

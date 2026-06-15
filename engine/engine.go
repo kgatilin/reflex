@@ -77,7 +77,7 @@ func Load(log []Event, opts ...Option) (*Engine, error) {
 		if json.Unmarshal(ev.Payload, &s) != nil || s.Name == "" || s.BodyKind == "" {
 			continue
 		}
-		r, err := e.resolveBody(s.Name, s.BodyKind, s.BodyConfig)
+		r, err := e.resolveBody(s.Name, s.BodyKind, s.Emits, s.BodyConfig)
 		if err != nil {
 			return nil, fmt.Errorf("engine: load: node %q: %w", s.Name, err)
 		}
@@ -90,11 +90,11 @@ func Load(log []Event, opts ...Option) (*Engine, error) {
 // resolveBody builds one descriptor body through the installed resolver (or
 // reports that none is installed — a descriptor node with no resolver is a
 // configuration error, surfaced as a rejected changeset / failed load).
-func (e *Engine) resolveBody(name, kind string, config json.RawMessage) (Reaction, error) {
+func (e *Engine) resolveBody(name, kind string, emits []string, config json.RawMessage) (Reaction, error) {
 	if e.resolver == nil {
 		return nil, fmt.Errorf("node %q declares body kind %q but no body resolver is installed (pass engine.WithBodyResolver)", name, kind)
 	}
-	return e.resolver(name, kind, config)
+	return e.resolver(name, kind, emits, config)
 }
 
 // Apply runs the changeset pipeline (doc 20 / CONCEPT §8): it is the in-process
@@ -141,7 +141,7 @@ func (e *Engine) Apply(ctx context.Context, decls ...Decl) error {
 			continue
 		}
 		if subscriberBodyDescriptor(n) {
-			r, rerr := e.resolveBody(n.Name, n.BodyKind, n.BodyConfig)
+			r, rerr := e.resolveBody(n.Name, n.BodyKind, n.Emits, n.BodyConfig)
 			if rerr != nil {
 				bodyErrs = append(bodyErrs, rerr.Error())
 				continue

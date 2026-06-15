@@ -86,11 +86,11 @@ func Load(log []engine.Event) (*Daemon, error) {
 // plugin Manager for the "plugin" kind, so plugin processes are owned per-daemon.
 func (d *Daemon) resolver() engine.BodyResolver {
 	base := nodes.Resolver()
-	return func(name, kind string, config json.RawMessage) (engine.Reaction, error) {
+	return func(name, kind string, emits []string, config json.RawMessage) (engine.Reaction, error) {
 		if kind == proxy.Kind {
-			return d.plugins.Factory(name, config)
+			return d.plugins.Factory(name, emits, config)
 		}
-		return base(name, kind, config)
+		return base(name, kind, emits, config)
 	}
 }
 
@@ -142,10 +142,6 @@ func (d *Daemon) Apply(ctx context.Context, doc topology.Document) error {
 	if err != nil {
 		return err
 	}
-	decls, err = mirrorLLMEmits(decls)
-	if err != nil {
-		return err
-	}
 	pending := d.pendingPluginDecls()
 	delta := make([]engine.Decl, 0, len(pending)+len(decls))
 	delta = append(delta, pending...)
@@ -190,48 +186,6 @@ func (d *Daemon) expandPluginRefs(decls []engine.Decl) ([]engine.Decl, error) {
 				return nil, err
 			}
 			sub.BodyConfig = raw
-		}
-		out = append(out, sub)
-	}
-	return out, nil
-}
-
-// mirrorLLMEmits threads a subscriber's emit allowlist into its "llm" body
-// descriptor. The llm body advertises its Emits as the model's function menu
-// (doc 26 §4 — "the advertised functions ARE the node's Emits"), but the body
-// resolver receives only the serialized body config, never the subscriber's
-// Emits. So the descriptor must carry the menu itself to be a self-contained,
-// rebuildable fact on the log (G8). The subscriber's Emits stays the single
-// source of truth; this just copies it into the body config when the operator
-// did not spell an "emits" out there. Non-llm bodies and an llm body that
-// already names its own emits are passed through untouched.
-func mirrorLLMEmits(decls []engine.Decl) ([]engine.Decl, error) {
-	out := make([]engine.Decl, 0, len(decls))
-	for _, dcl := range decls {
-		sub, ok := dcl.(engine.Subscriber)
-		if !ok || sub.BodyKind != "llm" || len(sub.Emits) == 0 {
-			out = append(out, dcl)
-			continue
-		}
-		cfg := map[string]json.RawMessage{}
-		if len(sub.BodyConfig) > 0 {
-			if err := json.Unmarshal(sub.BodyConfig, &cfg); err != nil {
-				return nil, fmt.Errorf("daemon: llm subscriber %q body config: %w", sub.Name, err)
-			}
-		}
-		_, lower := cfg["emits"]
-		_, upper := cfg["Emits"]
-		if !lower && !upper {
-			raw, err := json.Marshal(sub.Emits)
-			if err != nil {
-				return nil, err
-			}
-			cfg["emits"] = raw
-			merged, err := json.Marshal(cfg)
-			if err != nil {
-				return nil, err
-			}
-			sub.BodyConfig = merged
 		}
 		out = append(out, sub)
 	}
@@ -287,10 +241,6 @@ func (d *Daemon) Validate(doc topology.Document) (engine.Report, error) {
 	pending := d.pendingPluginDecls()
 	decls, err = d.expandPluginRefs(decls)
 	d.mu.Unlock()
-	if err != nil {
-		return engine.Report{}, err
-	}
-	decls, err = mirrorLLMEmits(decls)
 	if err != nil {
 		return engine.Report{}, err
 	}

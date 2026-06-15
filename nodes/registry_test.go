@@ -19,7 +19,7 @@ type emitConfig struct {
 	Kind string `json:"kind"`
 }
 
-func emitFactory(_ string, config json.RawMessage) (engine.Reaction, error) {
+func emitFactory(_ string, _ []string, config json.RawMessage) (engine.Reaction, error) {
 	var c emitConfig
 	if err := json.Unmarshal(config, &c); err != nil {
 		return nil, err

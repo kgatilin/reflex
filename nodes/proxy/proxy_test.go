@@ -25,7 +25,7 @@ func TestProxySpawnsAndReacts(t *testing.T) {
 		t.Fatalf("marshal config: %v", err)
 	}
 
-	r, err := proxy.Factory("echoer", cfg)
+	r, err := proxy.Factory("echoer", nil, cfg)
 	if err != nil {
 		t.Fatalf("Factory: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestFactoryRejectsBadConfig(t *testing.T) {
 		"bad json":      json.RawMessage(`{`),
 	}
 	for name, cfg := range cases {
-		if _, err := proxy.Factory("p", cfg); err == nil {
+		if _, err := proxy.Factory("p", nil, cfg); err == nil {
 			t.Errorf("%s: Factory returned nil error", name)
 		}
 	}

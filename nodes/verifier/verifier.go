@@ -52,7 +52,7 @@ const (
 
 // Factory is the nodes.Factory for body kind "verifier". Register it with
 // nodes.Register("verifier", verifier.Factory).
-func Factory(_ string, config json.RawMessage) (engine.Reaction, error) {
+func Factory(_ string, _ []string, config json.RawMessage) (engine.Reaction, error) {
 	var cfg Config
 	if len(config) > 0 {
 		if err := json.Unmarshal(config, &cfg); err != nil {

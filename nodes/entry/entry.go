@@ -36,7 +36,7 @@ type Config struct {
 
 // Factory is the nodes.Factory for body kind "entry": decode the config and
 // build the emit Reaction. Register it with nodes.Register("entry", entry.Factory).
-func Factory(_ string, config json.RawMessage) (engine.Reaction, error) {
+func Factory(_ string, _ []string, config json.RawMessage) (engine.Reaction, error) {
 	var cfg Config
 	if len(config) > 0 {
 		if err := json.Unmarshal(config, &cfg); err != nil {

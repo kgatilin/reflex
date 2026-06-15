@@ -16,7 +16,7 @@ import (
 
 // emitFactory is a stub body kind for the daemon tests: it emits one fixed kind,
 // enough to drive a reconciliation without a real model.
-func emitFactory(_ string, config json.RawMessage) (engine.Reaction, error) {
+func emitFactory(_ string, _ []string, config json.RawMessage) (engine.Reaction, error) {
 	var c struct {
 		Kind string `json:"kind"`
 	}

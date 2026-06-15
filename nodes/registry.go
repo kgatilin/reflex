@@ -20,9 +20,12 @@ import (
 	"github.com/kgatilin/reflex/engine"
 )
 
-// Factory builds a node's Reaction from its name and opaque config (the body
-// descriptor's BodyConfig). It is the per-kind half of an engine.BodyResolver.
-type Factory func(name string, config json.RawMessage) (engine.Reaction, error)
+// Factory builds a node's Reaction from its name, emit allowlist, and opaque
+// config (the body descriptor's BodyConfig). It is the per-kind half of an
+// engine.BodyResolver. Emits is passed because some bodies (llm) derive their
+// behaviour — the model's function menu — from the subscriber's Emits, which is
+// wiring, not config; a factory that does not need it ignores the parameter.
+type Factory func(name string, emits []string, config json.RawMessage) (engine.Reaction, error)
 
 // registry is the process-global kind → factory table. It is guarded by a mutex
 // so a daemon can register at startup while requests resolve; registration is
@@ -49,14 +52,14 @@ func Register(kind string, f Factory) {
 // changeset is rejected / the load fails), naming the kinds that ARE registered
 // so the operator sees the gap.
 func Resolver() engine.BodyResolver {
-	return func(name, kind string, config json.RawMessage) (engine.Reaction, error) {
+	return func(name, kind string, emits []string, config json.RawMessage) (engine.Reaction, error) {
 		mu.RLock()
 		f, ok := registry[kind]
 		mu.RUnlock()
 		if !ok {
 			return nil, fmt.Errorf("nodes: no factory for body kind %q (registered: %v)", kind, registered())
 		}
-		return f(name, config)
+		return f(name, emits, config)
 	}
 }
 

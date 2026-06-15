@@ -22,28 +22,29 @@ import (
 	"github.com/kgatilin/reflex/pkg/provider"
 )
 
-// DefaultAnswerKind is the fixed kind a text completion decodes into (doc 23 /
-// 26 §4): the model's prose answer is one llm.message fact. Everything else the
-// model produces is a function-call → an allowlisted Emit.
+// A turn has exactly one outcome, decided by what the model did (doc 29 Iteration
+// 4, the live-drive correction):
+//
+//   - it CALLED a function     → the tool-call emits (the loop advances on results);
+//   - it answered in PROSE      → the answer kind (DefaultAnswerKind): the model
+//     called nothing, so it is CLAIMING it is done. A claim is not a truth — an
+//     independent check/judge subscribes to the answer kind and evaluates it
+//     (completion is a verified state, never the model going quiet);
+//   - it returned NOTHING       → the empty kind (DefaultEmptyKind): a degenerate
+//     turn (e.g. a thinking model that spent its whole budget reasoning). Distinct
+//     from a claim so a seat can retry rather than silently dead-end (G4).
+//
+// The answer kind is emitted ONLY on a no-tool turn — a turn that also called a
+// function is an action, not a claim, so its incidental prose is dropped (the
+// tool calls carry the turn, and they are already the assistant voice in history).
 const DefaultAnswerKind = "llm.message"
+const DefaultEmptyKind = "llm.empty"
 
 // UsageKind is the token-accounting fact the body always records after a
 // completion. It rides in the seat's Emits so the engine allowlists it, but it
 // is bookkeeping the body writes itself — never a function the model may call —
-// so the tool-advertise loop excludes it (alongside the answer kind).
+// so the tool-advertise loop excludes it (alongside the answer and empty kinds).
 const UsageKind = "llm.usage"
-
-// ContinueKind is the loop-continuation fact a seat emits when a turn produced
-// NO actionable function call (a prose-only or empty completion). A non-tool
-// answer must not be a dead end (the user's correction): for an agent seat it is
-// just a turn that advanced nothing, so the seat re-drives itself by emitting
-// this event, which the same seat subscribes to (On) — never relying on a prompt
-// to forbid prose. It is OPT-IN: only a seat that lists ContinueKind in its Emits
-// re-drives; a seat without it treats prose as its terminal answer (a Q&A seat).
-// The seat re-triggers on ContinueKind, NOT on its prose answer kind, so a turn
-// that emits BOTH a tool call and prose advances once (via the tool result), not
-// twice. The loop stays bounded by the scope budget (ContinueKind is budgeted).
-const ContinueKind = "llm.continue"
 
 // History is the view type the llm body reads (doc 26 §4b): the cone shaped into
 // a frozen system preamble and an append-only message tail. The body is dumb —
@@ -183,8 +184,15 @@ type Config struct {
 	System    string // static system base (the seat's identity)
 	MaxTokens int
 
-	// Answer is the kind a text completion decodes into (default llm.message).
+	// Answer is the kind a no-tool prose turn decodes into (default llm.message) —
+	// the seat's claim, for an independent check/judge to evaluate.
 	Answer string
+	// Empty is the kind a no-tool EMPTY turn decodes into (default llm.empty). It
+	// is per-seat configurable so two seats in one scope do not collide on a shared
+	// "empty" signal; opt-in via Emits membership (a seat that does not list it
+	// emits nothing on an empty turn). A seat may set Empty == Answer to fold the
+	// degenerate case into its claim (e.g. a judge: silence ⇒ "not approved").
+	Empty string
 	// TaskKinds count as the user task in the history preamble (default
 	// {"request.received"}).
 	TaskKinds []string
@@ -200,6 +208,9 @@ type Config struct {
 func (c Config) defaults() Config {
 	if c.Answer == "" {
 		c.Answer = DefaultAnswerKind
+	}
+	if c.Empty == "" {
+		c.Empty = DefaultEmptyKind
 	}
 	if len(c.TaskKinds) == 0 {
 		c.TaskKinds = []string{"request.received"}
@@ -322,7 +333,7 @@ func Reaction(cfg Config) (engine.Reaction, error) {
 // nodes.Register("llm", llm.Factory). Kept as a plain func value so this package
 // does not import the registry (no import cycle; the registry imports engine
 // only).
-func Factory(name string, config json.RawMessage) (engine.Reaction, error) {
+func Factory(name string, emits []string, config json.RawMessage) (engine.Reaction, error) {
 	var cfg Config
 	if len(config) > 0 {
 		if err := json.Unmarshal(config, &cfg); err != nil {
@@ -330,6 +341,10 @@ func Factory(name string, config json.RawMessage) (engine.Reaction, error) {
 		}
 	}
 	cfg.Name = name
+	// The seat's function menu IS its emit allowlist (doc 26 §4), which is wiring
+	// on the Subscriber — the resolver passes it in rather than the operator
+	// duplicating it into the body config.
+	cfg.Emits = emits
 	return Reaction(cfg)
 }
 
@@ -351,8 +366,8 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 		// catalog grown earlier in the drain is in scope.
 		var tools []provider.ToolSchema
 		for _, k := range cfg.Emits {
-			if k == cfg.Answer || k == UsageKind || k == ContinueKind {
-				continue // the answer kind is synthesised from text; usage/continue are bookkeeping — none is a tool
+			if k == cfg.Answer || k == cfg.Empty || k == UsageKind {
+				continue // answer/empty are synthesised from the turn's shape; usage is bookkeeping — none is a tool
 			}
 			ts := provider.ToolSchema{Name: k}
 			if schema, ok := views.Schema(k); ok && len(schema) > 0 {
@@ -379,13 +394,8 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 			return nil, err // → {node}.failed
 		}
 
+		// First, the actions: every allowlisted function call advances the loop.
 		var emits []engine.Emit
-		if resp.Text != "" {
-			emits = append(emits, engine.Emit{
-				Kind:    cfg.Answer,
-				Payload: mustMarshal(map[string]string{"text": resp.Text}),
-			})
-		}
 		actionable := 0
 		for _, tc := range resp.ToolCalls {
 			kind := provider.DottedToolName(tc.Name)
@@ -399,15 +409,25 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 			emits = append(emits, engine.Emit{Kind: kind, Payload: payload})
 			actionable++
 		}
-		// A turn that called no function advanced nothing. If this seat opted into
-		// loop continuation (ContinueKind ∈ Emits), re-drive it rather than letting
-		// the prose answer dead-end at quiescence — completion is signalled by a
-		// function call (e.g. claim.complete), never by talking. Bounded by budget.
-		if _, wants := allow[ContinueKind]; wants && actionable == 0 {
-			emits = append(emits, engine.Emit{
-				Kind:    ContinueKind,
-				Payload: mustMarshal(map[string]string{"text": "Your previous turn produced no function call. Continue by calling a tool, and signal completion only with claim.complete."}),
-			})
+		// A no-tool turn is not an action — it is a claim (prose) or a degenerate
+		// blank (empty), each its own event for a downstream check/judge or a
+		// bounded retry to react to. A turn that DID call a function drops its
+		// incidental prose (the calls are the turn).
+		if actionable == 0 {
+			switch {
+			case resp.Text != "":
+				emits = append(emits, engine.Emit{
+					Kind:    cfg.Answer,
+					Payload: mustMarshal(map[string]string{"text": resp.Text}),
+				})
+			default:
+				if _, wants := allow[cfg.Empty]; wants {
+					emits = append(emits, engine.Emit{
+						Kind:    cfg.Empty,
+						Payload: mustMarshal(map[string]string{"reason": "the model returned no text and called no function"}),
+					})
+				}
+			}
 		}
 		emits = append(emits, engine.Emit{Kind: UsageKind, Payload: mustMarshal(resp.Usage)})
 		return emits, nil

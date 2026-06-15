@@ -11,7 +11,7 @@ import (
 
 func react(t *testing.T, config string, trigger json.RawMessage) []engine.Emit {
 	t.Helper()
-	r, err := gate.Factory("g", json.RawMessage(config))
+	r, err := gate.Factory("g", nil, json.RawMessage(config))
 	if err != nil {
 		t.Fatalf("Factory: %v", err)
 	}
@@ -65,10 +65,10 @@ func TestGate_DefaultsFieldToStatus(t *testing.T) {
 
 // TestGate_RequiresEmitAndWhen proves missing required config is a clean error.
 func TestGate_RequiresEmitAndWhen(t *testing.T) {
-	if _, err := gate.Factory("g", json.RawMessage(`{"when":["done"]}`)); err == nil {
+	if _, err := gate.Factory("g", nil, json.RawMessage(`{"when":["done"]}`)); err == nil {
 		t.Error("Factory with no emit returned nil, want error")
 	}
-	if _, err := gate.Factory("g", json.RawMessage(`{"emit":"x"}`)); err == nil {
+	if _, err := gate.Factory("g", nil, json.RawMessage(`{"emit":"x"}`)); err == nil {
 		t.Error("Factory with no when returned nil, want error")
 	}
 }

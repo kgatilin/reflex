@@ -60,7 +60,7 @@ func ParseConfig(name string, config json.RawMessage) (Config, error) {
 // spawns a fresh process per call. The daemon uses a Manager instead (spawn-once
 // at launch + reuse when the resolver rebuilds the body); Factory is for direct
 // and test use where no manager is needed.
-func Factory(name string, config json.RawMessage) (engine.Reaction, error) {
+func Factory(name string, _ []string, config json.RawMessage) (engine.Reaction, error) {
 	cfg, err := ParseConfig(name, config)
 	if err != nil {
 		return nil, err
