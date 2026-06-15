@@ -68,6 +68,10 @@ type ProjectionSpec struct {
 type EventSpec struct {
 	Kind   string `json:"kind" yaml:"kind"`
 	Schema any    `json:"schema,omitempty" yaml:"schema,omitempty"`
+	// Terminal marks the kind a declared leaf — a graph output (consumed by a
+	// client, e.g. request.terminal) or an observability fact — so the validator
+	// does not require an in-graph consumer for it (engine.EventKind.Terminal).
+	Terminal bool `json:"terminal,omitempty" yaml:"terminal,omitempty"`
 }
 
 // Parse decodes a YAML or JSON document (YAML is a superset of JSON, so one
@@ -114,7 +118,7 @@ func (d Document) Decls() ([]engine.Decl, error) {
 		if err != nil {
 			return nil, fmt.Errorf("topo: event %q schema: %w", e.Kind, err)
 		}
-		out = append(out, engine.EventKind{Kind: e.Kind, Schema: schema})
+		out = append(out, engine.EventKind{Kind: e.Kind, Schema: schema, Terminal: e.Terminal})
 	}
 	return out, nil
 }

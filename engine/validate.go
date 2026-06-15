@@ -154,14 +154,20 @@ func Validate(decls ...Decl) (Report, error) {
 	roots := rootNodes(nodes, produced)
 	rep := Report{}
 
-	rep.DeadEnds, err = deadEnds(nodes, consumers)
+	// The catalog is built up front because the dead-end and stalled-closure
+	// checks must skip kinds DECLARED terminal (graph outputs / observability) —
+	// a terminal kind legitimately has no in-graph consumer (its consumer is a
+	// client, or it is a pure trace fact). cat.terminal carries those.
+	cat := foldCatalog(decls, nil)
+
+	rep.DeadEnds, err = deadEnds(nodes, consumers, cat.terminal)
 	if err != nil {
 		return Report{}, err
 	}
 	rep.UnreachableNodes = unreachable(g, nodes, roots)
 	rep.Fragments = append([]string(nil), rep.UnreachableNodes...)
 	rep.UnboundedCycles = unboundedCycles(g)
-	rep.StalledClosures = stalledClosures(decls, nodes)
+	rep.StalledClosures = stalledClosures(decls, nodes, cat.terminal)
 	rep.CoRootedScopes = coRootedScopes(decls, nodes)
 
 	// Catalog checks (CONCEPT §6). The catalog is folded from the EventKind decls
@@ -179,7 +185,6 @@ func Validate(decls ...Decl) (Report, error) {
 	// scope.{name}.closed/.budget_exhausted — foldCatalog), so the operator
 	// declares only domain kinds; an external input event is registered like any
 	// other.
-	cat := foldCatalog(decls, nil)
 	rep.UnknownKinds = unknownKinds(nodes, cat)
 	rep.DeadSubscriptions = deadSubscriptions(consumers, cat)
 
@@ -393,10 +398,13 @@ func isRoot(n Subscriber, produced map[string]struct{}) bool {
 // surfaces the items (kinds) with no incoming edge — the dead-ends. A kind is
 // terminal-and-fine only if it truly has a consumer (e.g. notify consuming
 // task.answered); otherwise it is reported.
-func deadEnds(nodes []Subscriber, consumers []consumer) ([]string, error) {
+func deadEnds(nodes []Subscriber, consumers []consumer, terminal map[string]struct{}) ([]string, error) {
 	kindSet := map[string]struct{}{}
 	for _, n := range nodes {
 		for _, k := range n.Emits {
+			if _, ok := terminal[k]; ok {
+				continue // a declared leaf needs no consumer (graph output / observability)
+			}
 			kindSet[k] = struct{}{}
 		}
 	}
@@ -506,7 +514,7 @@ func unboundedCycles(g *graphval.Graph) [][]string {
 // closure as potentially stalling and demands a consumer. Tightening to exempt
 // provably terminal-only closes is left as future work, mirroring how
 // unboundedCycles documents its own coarser approximation.
-func stalledClosures(decls []Decl, nodes []Subscriber) []string {
+func stalledClosures(decls []Decl, nodes []Subscriber, terminal map[string]struct{}) []string {
 	names := map[string]struct{}{}
 	for _, d := range decls {
 		if s, ok := d.(Scope); ok && s.Name != "" {
@@ -522,6 +530,14 @@ func stalledClosures(decls []Decl, nodes []Subscriber) []string {
 	var out []string
 	for name := range names {
 		closed := "scope." + name + ".closed"
+		// A scope closure is an engine observability leaf (marked terminal in the
+		// catalog): a topology need not consume it, so it is never "stalled in the
+		// void". Termination is guaranteed by the operator wiring the scope's
+		// resolution to a real output (e.g. request.terminal), checked as an
+		// ordinary reachable kind — not by forcing a scope.closed consumer.
+		if _, ok := terminal[closed]; ok {
+			continue
+		}
 		consumed := false
 		for _, n := range nodes {
 			for _, pat := range n.On {

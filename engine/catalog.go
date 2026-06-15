@@ -45,6 +45,11 @@ var seedSchema = json.RawMessage(`{` +
 // checks themselves are ALWAYS on now, not gated on emptiness; see validate.go).
 type catalog struct {
 	schemas map[string]json.RawMessage
+	// terminal is the set of kinds declared as leaves (EventKind.Terminal) plus
+	// the engine's own observability kinds (scope.{name}.closed/.budget_exhausted).
+	// A terminal kind needs no consumer — the dead-end and stalled-closure checks
+	// skip it (validate.go).
+	terminal map[string]struct{}
 	// declared counts only operator-supplied entries (EventKind decls +
 	// event.registered facts), NOT the engine's own kinds (the primordial seed
 	// and the self-registered scope closures). It backs the empty() diagnostic;
@@ -64,7 +69,7 @@ type catalog struct {
 // never interprets a domain payload. The fold itself is the catalog's whole
 // definition (caches are strategies, the fold is the truth — G1/G8).
 func foldCatalog(decls []Decl, log []Event) catalog {
-	c := catalog{schemas: map[string]json.RawMessage{}}
+	c := catalog{schemas: map[string]json.RawMessage{}, terminal: map[string]struct{}{}}
 	c.schemas[seedKind] = seedSchema // the axiom, always known
 
 	// The engine self-registers the kinds IT owns, through the same catalog
@@ -77,8 +82,13 @@ func foldCatalog(decls []Decl, log []Event) catalog {
 	// are engine-owned, NOT operator-declared, so they do not count toward
 	// `declared`.
 	for _, name := range engineScopeNames(decls) {
-		c.schemas["scope."+name+".closed"] = nil
-		c.schemas["scope."+name+".budget_exhausted"] = nil
+		closed, exhausted := "scope."+name+".closed", "scope."+name+".budget_exhausted"
+		c.schemas[closed] = nil
+		c.schemas[exhausted] = nil
+		// Engine lifecycle facts are observability leaves: a topology need not
+		// consume its own scope closures (no no-op sink to satisfy the validator).
+		c.terminal[closed] = struct{}{}
+		c.terminal[exhausted] = struct{}{}
 	}
 
 	for _, d := range decls {
@@ -87,6 +97,9 @@ func foldCatalog(decls []Decl, log []Event) catalog {
 			continue
 		}
 		c.schemas[ek.Kind] = ek.Schema
+		if ek.Terminal {
+			c.terminal[ek.Kind] = struct{}{}
+		}
 		c.declared++
 	}
 

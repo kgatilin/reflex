@@ -119,10 +119,13 @@ func TestValidate_BudgetedScopeBoundsTheCycle(t *testing.T) {
 	}
 }
 
-func TestValidate_StalledClosureNeedsAConsumer(t *testing.T) {
-	// A declared scope whose scope.X.closed has no consumer is a stalled
-	// closure (doc 26 §3f / 27 §5): the cone can freeze in the void. The
-	// resolver roots the scope; nothing reads scope.work.closed.
+func TestValidate_ScopeClosureNeedsNoConsumer(t *testing.T) {
+	// A scope closure (scope.X.closed / .budget_exhausted) is an engine
+	// observability leaf — marked terminal in the catalog. A topology need NOT
+	// consume it: there is no no-op "lifecycle" sink to satisfy the validator.
+	// The loop is bounded by the scope budget; the closure is a trace fact, not a
+	// dead-end. (Termination as a guarantee is the operator's job — wire the
+	// scope's resolution to a real output — not a forced scope.closed consumer.)
 	decls := []Decl{
 		Scope{Name: "work", Root: "request.received", Budget: map[string]int{"tool.x.call": 4}},
 		Subscriber{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"request.received"}},
@@ -136,28 +139,56 @@ func TestValidate_StalledClosureNeedsAConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if !contains(rep.StalledClosures, "work") {
-		t.Fatalf("expected \"work\" in stalled closures; got %v", rep.StalledClosures)
+	if len(rep.StalledClosures) != 0 {
+		t.Fatalf("a scope closure is terminal — never a stalled closure; got %v", rep.StalledClosures)
 	}
-	if rep.Connected {
-		t.Fatal("expected Connected==false with a stalled closure")
-	}
-	if !anyContains(rep.Suggestions, "scope.work.closed") || !anyContains(rep.Suggestions, "bridge") {
-		t.Fatalf("expected a bridge suggestion for scope.work.closed; got %v", rep.Suggestions)
+	if !rep.Connected {
+		t.Fatalf("expected Connected==true without a scope.closed consumer; gaps: dead=%v unreach=%v cycles=%v stalled=%v",
+			rep.DeadEnds, rep.UnreachableNodes, rep.UnboundedCycles, rep.StalledClosures)
 	}
 
-	// Add a consumer of scope.work.closed (a terminator): the gap closes.
-	bridged := append(decls, Subscriber{Name: "terminator", On: []string{"scope.work.closed"}})
-	rep2, err := Validate(bridged...)
+	// It is still SUBSCRIBABLE — consuming it (e.g. an audit terminator) is fine too.
+	withConsumer := append(decls, Subscriber{Name: "audit", On: []string{"scope.work.closed"}, In: "global"})
+	rep2, err := Validate(withConsumer...)
 	if err != nil {
-		t.Fatalf("Validate (bridged): %v", err)
-	}
-	if len(rep2.StalledClosures) != 0 {
-		t.Fatalf("expected no stalled closures once scope.work.closed has a consumer; got %v", rep2.StalledClosures)
+		t.Fatalf("Validate (with consumer): %v", err)
 	}
 	if !rep2.Connected {
-		t.Fatalf("expected Connected==true once bridged; gaps: dead=%v unreach=%v cycles=%v stalled=%v",
+		t.Fatalf("expected Connected==true with a scope.closed consumer too; gaps: dead=%v unreach=%v cycles=%v stalled=%v",
 			rep2.DeadEnds, rep2.UnreachableNodes, rep2.UnboundedCycles, rep2.StalledClosures)
+	}
+}
+
+// TestValidate_TerminalKindNeedsNoConsumer proves an operator-declared terminal
+// kind (a graph OUTPUT, e.g. request.terminal waited on by a client) is not a
+// dead-end even though no node consumes it.
+func TestValidate_TerminalKindNeedsNoConsumer(t *testing.T) {
+	decls := []Decl{
+		Subscriber{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"request.terminal"}},
+		EventKind{Kind: "cli.task"},
+		EventKind{Kind: "request.terminal", Terminal: true},
+	}
+	rep, err := Validate(decls...)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if contains(rep.DeadEnds, "request.terminal") {
+		t.Fatalf("a terminal output must not be a dead-end; got %v", rep.DeadEnds)
+	}
+	if !rep.Connected {
+		t.Fatalf("expected Connected==true with a terminal output and no consumer; got dead=%v", rep.DeadEnds)
+	}
+
+	// Without the terminal marker, the same kind IS a dead-end (the default).
+	rep2, err := Validate(
+		Subscriber{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"goes.nowhere"}},
+		EventKind{Kind: "cli.task"}, EventKind{Kind: "goes.nowhere"},
+	)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !contains(rep2.DeadEnds, "goes.nowhere") {
+		t.Fatalf("an unmarked unconsumed kind should be a dead-end; got %v", rep2.DeadEnds)
 	}
 }
 

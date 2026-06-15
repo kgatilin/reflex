@@ -28,6 +28,15 @@ type Decl interface{ isDecl() }
 type EventKind struct {
 	Kind   string
 	Schema json.RawMessage
+	// Terminal marks a kind as a declared leaf: a graph output (consumed outside
+	// the topology, e.g. request.terminal waited on by a client) or an
+	// observability fact (llm.usage, an engine scope closure). It is still
+	// subscribable, but the validator does NOT lint it as a dead-end / stalled
+	// closure when no node consumes it. This is leaf-ness as a TOPOLOGY fact (a
+	// catalog declaration), not the per-event sender claim removed on 2026-06-12 —
+	// it is the principled alternative to wiring a no-op sink just to satisfy the
+	// "every emitted kind needs a consumer" check.
+	Terminal bool
 }
 
 func (EventKind) isDecl() {}
