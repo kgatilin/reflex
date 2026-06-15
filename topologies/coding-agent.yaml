@@ -34,6 +34,10 @@ scopes:
       tool.fs.write.call: 40
       tool.fs.search.call: 80
       tool.py.test.call: 20
+      # llm.continue bounds prose-only "stall" turns: a turn that called no
+      # function re-drives the brain (it is an event, not a dead end), so this cap
+      # is what stops an endlessly chatty model — the backstop for non-acting turns.
+      llm.continue: 12
 
 events:
   # Domain kinds only — the engine self-registers its own (scope.request.closed /
@@ -45,6 +49,7 @@ events:
   - kind: state.updated.status
   - kind: request.terminal    # the drive-to-terminal fact (`emit --wait`)
   - kind: llm.message         # the brain's own prose voice (folded into its history)
+  - kind: llm.continue        # a prose-only turn re-drives the brain (never a dead end)
   - kind: llm.usage           # token accounting
 
 subscribers:
@@ -76,6 +81,9 @@ subscribers:
       - tool.py.test.result
       - tool.py.test.failed
       - verify.failed
+      # the brain hears its OWN continuation: a turn that produced no function call
+      # re-drives this seat (the non-tool answer is an event, not a stall).
+      - llm.continue
     in: request
     reads: [brain.history]
     emits:
@@ -86,6 +94,7 @@ subscribers:
       - tool.py.test.call
       - claim.complete
       - llm.message
+      - llm.continue
       - llm.usage
     body:
       kind: llm
@@ -100,10 +109,10 @@ subscribers:
             - tool.fs.search / tool.fs.read to find and read the relevant code,
             - tool.fs.edit / tool.fs.write to change it,
             - tool.py.test to run the tests.
-          When and ONLY when the tests you can run pass and you believe the issue is
-          resolved, call claim.complete. An independent verifier re-runs the tests; if
-          they fail you will receive verify.failed and must continue. Do not claim
-          completion on a hunch — completion is verified, not asserted.
+          After every edit, run tool.py.test. Signal completion ONLY by calling
+          claim.complete — never by describing it in prose — and only once the tests
+          pass. An independent verifier then re-runs the tests; if they fail you
+          receive verify.failed and continue. Completion is verified, not asserted.
 
   # fs / pytest — the hands, wired as operator subscriptions IN the request scope
   # (so they sit inside the budgeted agent loop). Each references a launched plugin
@@ -182,13 +191,19 @@ projections:
       - llm.message
       - tool.>
       - verify.failed
+      # the continuation nudge enters the transcript as a user turn (it is NOT in
+      # params.emits below, so the builder roles it user) — the model sees "you did
+      # not act, continue" after a prose-only turn.
+      - llm.continue
     in: request
     type: llm.history
     params:
       system: |
         You are a coding agent resolving a software issue in a checked-out repository.
-        Work in a read → edit → test loop using the provided functions, and call
-        claim.complete only when the tests pass. Completion is verified, not asserted.
+        Work in a read → edit → test loop using the provided functions. After every
+        edit, run tool.py.test. Signal completion ONLY by calling claim.complete —
+        never by describing it in prose — and only once the tests pass. Completion is
+        verified, not asserted; a turn that calls no function is simply re-prompted.
       answer: llm.message
       task_kinds: [request.received]
       emits:
