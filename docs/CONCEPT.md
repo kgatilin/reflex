@@ -344,5 +344,8 @@ All on branch `feat/connectivity-validation`, verified with `go test -race`
 - [26 — bare substrate](./26-bare-substrate.md) — the "why" for §3–§7.
 - [27 — state-defined agent](./27-state-defined-agent.md) — the "why" for §9.
 - [28 — rebuild roadmap](./28-substrate-rebuild-roadmap.md) — the LIVE build plan.
+- [30 — scopes, per-scope state, fan-out/fan-in](./30-scopes-state-and-fan-out.md)
+  — the parallel-exploration model, subscriber roles, and open problems (P1 state
+  leak, P2 rooting-knob collapse, P3 built-in promoter, P4 causal-vs-identity scopes).
 - [`outdated/`](./outdated/) — the historical design journey (00–25), superseded
   in vocabulary and several mechanisms by this document.
