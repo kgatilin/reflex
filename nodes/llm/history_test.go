@@ -61,6 +61,55 @@ func TestBuildHistory_PositionalSplit(t *testing.T) {
 	}
 }
 
+// TestBuildHistory_StructuredToolParts proves the builder reconstructs structured
+// function call / response messages from the event log — the function name is the
+// kind — and that the result→call pairing is SEAT-AWARE: a result for a call the
+// seat itself emits pairs as a ToolResult; a result the seat only observes (a call
+// it never made) stays plain text, since an unpaired function response is malformed.
+func TestBuildHistory_StructuredToolParts(t *testing.T) {
+	params := historyParams{
+		System:    "agent",
+		Emits:     []string{"llm.message", "tool.fs.read.call"}, // makes fs.read calls; NOT py.test
+		Answer:    "llm.message",
+		TaskKinds: []string{"request.received"},
+	}
+	p := engine.Projection{Type: "llm.history", Params: mustMarshal(params)}
+
+	events := []engine.Event{
+		ev("request.received", `{"text":"do X"}`),
+		ev("tool.fs.read.call", `{"path":"f"}`),         // boundary; the seat's call → ToolCall
+		ev("tool.fs.read.result", `{"content":"data"}`), // paired (call ∈ Emits) → ToolResult
+		ev("tool.py.test.result", `{"exit":1}`),         // call ∉ Emits → plain text, no ToolResult
+		ev("llm.message", `{"text":"done"}`),            // prose → plain assistant text
+	}
+
+	h := buildHistory(p, events).(History)
+	msgs := h.Messages()
+	if len(msgs) != 5 {
+		t.Fatalf("Messages() len = %d, want 5 (%+v)", len(msgs), msgs)
+	}
+
+	// the call → structured ToolCall, name = the kind.
+	if c := msgs[1].ToolCall; c == nil || c.Name != "tool.fs.read.call" || string(c.Input) != `{"path":"f"}` {
+		t.Errorf("msgs[1].ToolCall = %+v, want {tool.fs.read.call, {\"path\":\"f\"}}", c)
+	}
+	// the paired result → structured ToolResult, name = the CALL kind it answers.
+	if r := msgs[2].ToolResult; r == nil || r.Name != "tool.fs.read.call" || string(r.Content) != `{"content":"data"}` {
+		t.Errorf("msgs[2].ToolResult = %+v, want {tool.fs.read.call, {\"content\":\"data\"}}", r)
+	}
+	// the observed-only result → NOT paired (seat never emits tool.py.test.call).
+	if msgs[3].ToolResult != nil {
+		t.Errorf("msgs[3].ToolResult = %+v, want nil (seat does not make py.test calls)", msgs[3].ToolResult)
+	}
+	if msgs[3].Role != "user" {
+		t.Errorf("msgs[3].Role = %q, want user", msgs[3].Role)
+	}
+	// prose stays plain.
+	if msgs[4].ToolCall != nil || msgs[4].Role != "assistant" {
+		t.Errorf("msgs[4] = %+v, want plain assistant prose", msgs[4])
+	}
+}
+
 // TestBuildHistory_NoBoundaryAllPreamble proves that with no own-emit yet, the
 // whole cone is preamble: the task is the only message, everything else is
 // system (the model has not acted, so nothing is in the tail).

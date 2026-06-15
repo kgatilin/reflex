@@ -509,6 +509,7 @@ func (e *Engine) appendEmit(trigger Event, cls string, em Emit) int {
 	ev := Event{
 		Subject: placeSubject(cls, em.Kind),
 		Payload: em.Payload,
+		Meta:    em.Meta, // opaque, engine-blind; rides with the event for replay (G8)
 		Trace: Trace{
 			SpanID:    e.mintSpan(),
 			SessionID: trigger.Trace.SessionID,

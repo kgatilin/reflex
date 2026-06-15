@@ -101,7 +101,35 @@ func geminiParams(req Request) ([]*genai.Content, *genai.GenerateContentConfig, 
 		if m.Role == "assistant" {
 			role = genai.Role(genai.RoleModel)
 		}
-		contents = append(contents, genai.NewContentFromText(m.Text, role))
+		switch {
+		case m.ToolCall != nil:
+			// The model's past action as a native FunctionCall part (role model),
+			// not a text blob — so the model sees a coherent function-calling history.
+			// The thought signature MUST ride back on the part for a thinking model,
+			// or the API rejects the whole request.
+			args := map[string]any{}
+			_ = json.Unmarshal(m.ToolCall.Input, &args) // empty/odd args ⇒ no args
+			part := genai.NewPartFromFunctionCall(m.ToolCall.Name, args)
+			part.ThoughtSignature = m.ToolCall.Signature
+			contents = append(contents, &genai.Content{
+				Role:  string(genai.RoleModel),
+				Parts: []*genai.Part{part},
+			})
+		case m.ToolResult != nil:
+			// The call's result as a native FunctionResponse part (role user),
+			// paired to the call by name. Gemini wants an object response; wrap a
+			// non-object payload so it always encodes.
+			resp := map[string]any{}
+			if json.Unmarshal(m.ToolResult.Content, &resp) != nil {
+				resp = map[string]any{"result": string(m.ToolResult.Content)}
+			}
+			contents = append(contents, &genai.Content{
+				Role:  string(genai.RoleUser),
+				Parts: []*genai.Part{genai.NewPartFromFunctionResponse(m.ToolResult.Name, resp)},
+			})
+		default:
+			contents = append(contents, genai.NewContentFromText(m.Text, role))
+		}
 	}
 
 	return contents, cfg, nil
@@ -174,6 +202,9 @@ func decodeGeminiResponse(resp *genai.GenerateContentResponse) Response {
 						ID:    id,
 						Name:  fc.Name, // already dotted; no decoding needed
 						Input: json.RawMessage(argBytes),
+						// The thought signature rides on the function-call part; it must
+						// be echoed back when this call is replayed in history.
+						Signature: part.ThoughtSignature,
 					})
 				}
 			}

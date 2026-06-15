@@ -30,6 +30,16 @@ type Event struct {
 	// Payload is domain data plus origin ({...data, source}); the engine
 	// never branches on it (§4).
 	Payload json.RawMessage
+
+	// Meta is opaque, engine-blind side-data attached to an event by its
+	// producer — NOT domain payload (a consumer's args) and NOT trace. The
+	// engine never reads or branches on it; it only carries it on the log so it
+	// round-trips through replay (G8). The motivating use is a reasoning model's
+	// per-call thought signature: it must travel WITH the tool-call event (the
+	// depth-first walk processes a call's whole subtree before any sibling, so a
+	// separate event would land too late) yet stay out of the args the tool
+	// consumes. A reaction sets it via Emit.Meta.
+	Meta json.RawMessage
 }
 
 // There is deliberately no terminal flag (amended 2026-06-12, superseding
@@ -65,4 +75,9 @@ type Emit struct {
 	// scope per the subject grammar (§2 handler desugar).
 	Kind    string
 	Payload json.RawMessage
+	// Meta is opaque side-data the dispatcher carries onto the event verbatim
+	// (Event.Meta) — engine-blind, never interpreted. It is not scope, ancestry,
+	// or accounting (those stay the dispatcher's); it is producer-attached data
+	// that must ride with this event (e.g. a model's per-call thought signature).
+	Meta json.RawMessage
 }

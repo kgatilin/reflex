@@ -47,6 +47,19 @@ const DefaultEmptyKind = "llm.empty"
 // so the tool-advertise loop excludes it (alongside the answer and empty kinds).
 const UsageKind = "llm.usage"
 
+// callMeta is the engine-blind Event.Meta the body attaches to a tool-call event:
+// the model's opaque thought signature for that call. It rides ON the call event
+// (not a sibling event and not the args payload), because the depth-first walk
+// processes a call's whole subtree — including the next turn that must replay the
+// signature — before any sibling emit, so a separate event would land too late;
+// and the args payload is what the tool consumes, which the signature is not. The
+// llm.history builder reads it back from the call event's Meta and the adapter
+// echoes it on the function-call part — Gemini thinking models reject a replayed
+// call whose signature is missing.
+type callMeta struct {
+	ThoughtSignature []byte `json:"thought_signature,omitempty"`
+}
+
 // History is the view type the llm body reads (doc 26 §4b): the cone shaped into
 // a frozen system preamble and an append-only message tail. The body is dumb —
 // it calls System()/Messages() and hands them to the provider; the split lives
@@ -117,15 +130,81 @@ func buildHistory(p engine.Projection, events []engine.Event) any {
 		}
 		h.system += strings.Join(preambleBlocks, "\n\n")
 	}
-	// Post-boundary: append-only tail, role by Emits-membership.
+	// Post-boundary: append-only tail. A tool CALL the seat made and a tool RESULT
+	// it gets back become STRUCTURED messages (a native function call / response,
+	// reconstructed from the event — the function name is the kind), so a function-
+	// calling model sees its own history as calls, not text. Everything else is
+	// text, roled by Emits-membership. Text stays populated as the fallback for
+	// adapters that don't read the structured parts.
 	for _, ev := range events[boundary:] {
-		role := "user"
-		if isAssistant(engine.KindOf(ev)) {
-			role = "assistant"
+		kind := engine.KindOf(ev)
+		switch {
+		case isToolCall(kind, params.Emits):
+			// The call's thought signature rides on the event's Meta (engine-blind);
+			// reattach it so the adapter can echo it on the function-call part.
+			h.messages = append(h.messages, provider.Message{
+				Role: "assistant", Text: messageText(ev),
+				ToolCall: &provider.ToolCall{Name: kind, Input: ev.Payload, Signature: thoughtSignature(ev)},
+			})
+		case toolResultCallName(kind, params.Emits) != "":
+			// A result whose CALL kind the seat emits — pair it as a function
+			// response. A seat that only OBSERVES a result it never called (e.g. a
+			// judge reading test output) keeps it as text: an unpaired response is
+			// malformed.
+			h.messages = append(h.messages, provider.Message{
+				Role: "user", Text: messageText(ev),
+				ToolResult: &provider.ToolResult{Name: toolResultCallName(kind, params.Emits), Content: ev.Payload},
+			})
+		default:
+			role := "user"
+			if isAssistant(kind) {
+				role = "assistant"
+			}
+			h.messages = append(h.messages, provider.Message{Role: role, Text: messageText(ev)})
 		}
-		h.messages = append(h.messages, provider.Message{Role: role, Text: messageText(ev)})
 	}
 	return h
+}
+
+// isToolCall reports whether kind is a tool call the seat itself makes — in its
+// emit menu and shaped tool.<…>.call. Those become assistant FunctionCall parts.
+func isToolCall(kind string, emits []string) bool {
+	return strings.HasPrefix(kind, "tool.") && strings.HasSuffix(kind, ".call") && matchesAny(emits, kind)
+}
+
+// toolResultCallName maps a tool result kind (tool.X.result / tool.X.failed) to
+// the call kind it answers (tool.X.call), but ONLY when the seat emits that call
+// — i.e. the result pairs with a call THIS seat made. Returns "" otherwise (a
+// non-result kind, or a result for a call the seat never made), so the caller
+// leaves it as text. The pairing is the tool.* naming convention.
+func toolResultCallName(kind string, emits []string) string {
+	if !strings.HasPrefix(kind, "tool.") {
+		return ""
+	}
+	for _, suf := range []string{".result", ".failed"} {
+		if call, ok := strings.CutSuffix(kind, suf); ok {
+			call += ".call"
+			if matchesAny(emits, call) {
+				return call
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
+// thoughtSignature reads a tool-call event's thought signature back from its
+// engine-blind Meta (set by the body when the call was emitted). Empty when the
+// model produced no signature (a non-thinking turn) or the event carries none.
+func thoughtSignature(ev engine.Event) []byte {
+	if len(ev.Meta) == 0 {
+		return nil
+	}
+	var m callMeta
+	if json.Unmarshal(ev.Meta, &m) != nil {
+		return nil
+	}
+	return m.ThoughtSignature
 }
 
 // matchesAny reports whether any pattern matches the kind (NATS grammar via the
@@ -410,7 +489,15 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 			if len(payload) == 0 {
 				payload = json.RawMessage("{}")
 			}
-			emits = append(emits, engine.Emit{Kind: kind, Payload: payload})
+			// The call's thought signature rides on the event's Meta (engine-blind,
+			// kept off the args the tool consumes), so the next turn's history can
+			// replay it on the function-call part. Without it a thinking model rejects
+			// the next request ("Function call is missing a thought_signature").
+			var meta json.RawMessage
+			if len(tc.Signature) > 0 {
+				meta = mustMarshal(callMeta{ThoughtSignature: tc.Signature})
+			}
+			emits = append(emits, engine.Emit{Kind: kind, Payload: payload, Meta: meta})
 			actionable++
 		}
 		// A no-tool turn is not an action — it is a claim (prose) or a degenerate

@@ -23,6 +23,25 @@ import (
 type Message struct {
 	Role string // "user" | "assistant"
 	Text string
+
+	// Structured tool-calling parts, reconstructed by the llm.history builder from
+	// the event log (the function name is the event KIND). Additive and optional:
+	// an adapter that understands them (Gemini) encodes native function-call /
+	// function-response parts so a multi-turn function-calling model sees its own
+	// past actions as structured calls, not text blobs (the fix for Gemini's
+	// malformed_function_call cascade). An adapter that does not falls back to Text,
+	// which the builder keeps populated. At most one of ToolCall / ToolResult is set.
+	ToolCall   *ToolCall   // assistant turn: a function call it made (Name + Input args)
+	ToolResult *ToolResult // user turn: a function result feeding back
+}
+
+// ToolResult is a tool call's result feeding back into the transcript — the
+// request-side counterpart of the model's ToolCall. Name is the function the
+// result belongs to (the call kind), so the adapter can pair the response to the
+// prior call.
+type ToolResult struct {
+	Name    string          // the function whose result this is (the call kind)
+	Content json.RawMessage // the result payload (a JSON object)
 }
 
 // ToolSchema advertises one callable tool to the model. InputSchema is a full
@@ -46,6 +65,12 @@ type ToolCall struct {
 	ID    string
 	Name  string // dotted form, matching ToolSchema.Name
 	Input json.RawMessage
+	// Signature is the model's opaque thought signature for this call (Gemini
+	// thinking models). It MUST be echoed back on the function-call part when the
+	// call is replayed in history, or the API rejects the request ("Function call
+	// is missing a thought_signature"). Captured on decode, carried back into the
+	// request by the adapter. Empty on non-thinking backends.
+	Signature []byte
 }
 
 // Usage is the per-call token accounting every adapter must report — the
