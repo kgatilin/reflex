@@ -32,6 +32,15 @@ Credentials are available (`gcloud auth application-default login`). The
 `verifier`'s `command` (`python -m pytest -q`) runs in the daemon's working
 directory — start the daemon from the checkout, or set the verifier's `dir`.
 
+The daemon's environment must have a `python` with `pytest` installed (the
+`pytest` plugin and the `verifier` both shell out to it). Two gotchas the live
+drive hit: put the interpreter's `bin` on `PATH` as an **absolute** path — Go
+refuses to exec a program resolved through a relative `PATH` entry
+(`exec: "pytest": cannot run executable found relative to current directory`);
+and `gemini-2.5-pro` is a *thinking* model, so a too-small token budget is spent
+entirely on reasoning and returns no visible output — keep the default (8192) or
+raise `body.config.MaxTokens` for larger tasks.
+
 ```sh
 # 1. build + install the daemon
 make -C .. install                       # or: go install ./cmd/reflexd
