@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/kgatilin/reflex/engine"
@@ -38,10 +39,11 @@ import (
 // plugins' schemas are on the log (the llm body advertises them). Only the kinds
 // not yet on the log are passed as the changeset delta (pendingPluginDecls).
 type Daemon struct {
-	mu          sync.Mutex
-	e           *engine.Engine
-	plugins     *proxy.Manager
-	pluginDecls []engine.Decl
+	mu           sync.Mutex
+	e            *engine.Engine
+	plugins      *proxy.Manager
+	pluginDecls  []engine.Decl
+	launchedCmds map[string]bool // command signature → launched, so a plugins: entry spawns once
 }
 
 // registerFactories wires the in-process body kinds into the process registry.
@@ -62,7 +64,7 @@ func registerFactories() {
 // New builds a daemon with a fresh engine and the body resolver installed.
 func New() *Daemon {
 	registerFactories()
-	d := &Daemon{plugins: proxy.NewManager()}
+	d := &Daemon{plugins: proxy.NewManager(), launchedCmds: map[string]bool{}}
 	d.e = engine.New(engine.WithBodyResolver(d.resolver()))
 	return d
 }
@@ -73,7 +75,7 @@ func New() *Daemon {
 // their schemas are already on the log as sys.event.registered facts).
 func Load(log []engine.Event) (*Daemon, error) {
 	registerFactories()
-	d := &Daemon{plugins: proxy.NewManager()}
+	d := &Daemon{plugins: proxy.NewManager(), launchedCmds: map[string]bool{}}
 	e, err := engine.Load(log, engine.WithBodyResolver(d.resolver()))
 	if err != nil {
 		return nil, err
@@ -138,6 +140,9 @@ func (d *Daemon) Apply(ctx context.Context, doc topology.Document) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	if err := d.launchSectionPlugins(doc.Plugins); err != nil {
+		return err
+	}
 	decls, err = d.expandPluginRefs(decls)
 	if err != nil {
 		return err
@@ -149,47 +154,135 @@ func (d *Daemon) Apply(ctx context.Context, doc topology.Document) error {
 	return d.e.Apply(ctx, delta...)
 }
 
-// expandPluginRefs resolves operator subscribers that reference a launched plugin
-// by name — body kind "plugin", config {plugin: <name>} — into the resolved form:
-// it fills the spawn command from the launched plugin (so the registered fact is
-// rebuildable from the log, G8) and defaults On/Emits from the plugin's
-// self-described kinds when the operator omitted them. The scope (In) stays the
-// operator's choice — launching exposes capability, the topology owns the wiring.
-// A reference to a plugin that has not been launched is a clean error.
+// launchSectionPlugins spawns the document's plugins: entries — the registration
+// of out-of-process infrastructure, separate from any subscription. Each entry is
+// just HOW to launch (command + transport); the process announces in its hello
+// which kinds it handles/emits, and Launch turns that into catalog kinds. A
+// command is spawned at most once across Apply/Validate (launchedCmds), so
+// re-applying a document does not replace a live process. Only stdio transport is
+// supported today; an empty transport defaults to it.
+func (d *Daemon) launchSectionPlugins(plugins []topology.PluginSpec) error {
+	for _, p := range plugins {
+		if len(p.Command) == 0 {
+			return fmt.Errorf("daemon: plugin %q: command is required", p.Name)
+		}
+		if p.Transport != "" && p.Transport != "stdio" {
+			return fmt.Errorf("daemon: plugin %q: unsupported transport %q (only stdio)", p.Name, p.Transport)
+		}
+		sig := strings.Join(p.Command, "\x00")
+		if d.launchedCmds[sig] {
+			continue
+		}
+		name, decls, err := d.plugins.Launch(p.Command)
+		if err != nil {
+			return err
+		}
+		if p.Name != "" && p.Name != name {
+			return fmt.Errorf("daemon: plugin command %v announced name %q, but the document names it %q", p.Command, name, p.Name)
+		}
+		d.pluginDecls = append(d.pluginDecls, decls...)
+		d.launchedCmds[sig] = true
+	}
+	return nil
+}
+
+// expandPluginRefs backs the document's subscribers with their plugin process,
+// when one handles their subscribed kind. A handler is a NORMAL subscriber — its
+// own On/In/Emits, no plugin reference — and the link to the process is the kind:
+// a subscriber whose On (defaulting to [Name]) is handled by a launched plugin is
+// backed by it. The resolved body carries the spawn command (so the registered
+// fact is rebuildable from the log, G8) and Emits defaults to the plugin's
+// produced kinds. A subscriber whose kind no plugin handles is left untouched (an
+// ordinary in-graph consumer). The legacy explicit form — body kind "plugin",
+// config {plugin: <name>} — is still resolved for callers that name the plugin.
 func (d *Daemon) expandPluginRefs(decls []engine.Decl) ([]engine.Decl, error) {
 	out := make([]engine.Decl, 0, len(decls))
 	for _, dcl := range decls {
 		sub, ok := dcl.(engine.Subscriber)
-		if !ok || sub.BodyKind != proxy.Kind {
+		if !ok {
 			out = append(out, dcl)
 			continue
 		}
-		var cfg proxy.Config
-		if len(sub.BodyConfig) > 0 {
-			if err := json.Unmarshal(sub.BodyConfig, &cfg); err != nil {
-				return nil, fmt.Errorf("daemon: plugin subscriber %q body config: %w", sub.Name, err)
-			}
-		}
-		if cfg.Plugin != "" {
-			command, in, outKinds, found := d.plugins.Resolve(cfg.Plugin)
-			if !found {
-				return nil, fmt.Errorf("daemon: subscriber %q references plugin %q, which is not launched", sub.Name, cfg.Plugin)
-			}
-			if len(sub.On) == 0 {
-				sub.On = in
-			}
-			if len(sub.Emits) == 0 {
-				sub.Emits = outKinds
-			}
-			raw, err := json.Marshal(proxy.Config{Command: command})
+		switch sub.BodyKind {
+		case proxy.Kind:
+			resolved, err := d.resolvePluginRef(sub)
 			if err != nil {
 				return nil, err
 			}
-			sub.BodyConfig = raw
+			sub = resolved
+		case "":
+			resolved, err := d.backByKind(sub)
+			if err != nil {
+				return nil, err
+			}
+			sub = resolved
 		}
 		out = append(out, sub)
 	}
 	return out, nil
+}
+
+// backByKind backs a vanilla subscriber with the launched plugin that HANDLES its
+// subscribed kind, if any. The subscription is the link — On (or [Name] when On
+// is empty) is matched against each plugin's handled kinds. On a match the body
+// becomes the resolved plugin command, On is pinned to the matched kind, and Emits
+// defaults to the plugin's produced kinds. No match leaves the subscriber as is.
+func (d *Daemon) backByKind(sub engine.Subscriber) (engine.Subscriber, error) {
+	kinds := sub.On
+	if len(kinds) == 0 {
+		kinds = []string{sub.Name}
+	}
+	for _, k := range kinds {
+		_, command, outKinds, ok := d.plugins.HandlerFor(k)
+		if !ok {
+			continue
+		}
+		if len(sub.On) == 0 {
+			sub.On = []string{k}
+		}
+		if len(sub.Emits) == 0 {
+			sub.Emits = outKinds
+		}
+		raw, err := json.Marshal(proxy.Config{Command: command})
+		if err != nil {
+			return sub, err
+		}
+		sub.BodyKind = proxy.Kind
+		sub.BodyConfig = raw
+		return sub, nil
+	}
+	return sub, nil
+}
+
+// resolvePluginRef resolves the legacy explicit form: body kind "plugin" with a
+// {plugin: <name>} reference. It fills the spawn command and defaults On/Emits
+// from the named plugin's self-description; the scope (In) stays the operator's.
+func (d *Daemon) resolvePluginRef(sub engine.Subscriber) (engine.Subscriber, error) {
+	var cfg proxy.Config
+	if len(sub.BodyConfig) > 0 {
+		if err := json.Unmarshal(sub.BodyConfig, &cfg); err != nil {
+			return sub, fmt.Errorf("daemon: plugin subscriber %q body config: %w", sub.Name, err)
+		}
+	}
+	if cfg.Plugin == "" {
+		return sub, nil
+	}
+	command, in, outKinds, found := d.plugins.Resolve(cfg.Plugin)
+	if !found {
+		return sub, fmt.Errorf("daemon: subscriber %q references plugin %q, which is not launched", sub.Name, cfg.Plugin)
+	}
+	if len(sub.On) == 0 {
+		sub.On = in
+	}
+	if len(sub.Emits) == 0 {
+		sub.Emits = outKinds
+	}
+	raw, err := json.Marshal(proxy.Config{Command: command})
+	if err != nil {
+		return sub, err
+	}
+	sub.BodyConfig = raw
+	return sub, nil
 }
 
 // pendingPluginDecls returns the launched plugins' decls that are NOT yet on the
@@ -237,6 +330,10 @@ func (d *Daemon) Validate(doc topology.Document) (engine.Report, error) {
 		return engine.Report{}, err
 	}
 	d.mu.Lock()
+	if err := d.launchSectionPlugins(doc.Plugins); err != nil {
+		d.mu.Unlock()
+		return engine.Report{}, err
+	}
 	live := d.e.Topology()
 	pending := d.pendingPluginDecls()
 	decls, err = d.expandPluginRefs(decls)

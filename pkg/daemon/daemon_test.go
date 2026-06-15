@@ -88,15 +88,16 @@ func TestDaemon_ApplyEmitReconciles(t *testing.T) {
 	}
 }
 
-// TestDaemon_LaunchPluginSelfRegisters drives the plugin seam end-to-end:
-// the daemon launches `reflexd plugin echo`, which announces "I handle
-// echo.request, I emit echo.reply" (both with schemas). Launching contributes
-// only the CAPABILITY — two catalog kinds — and NO subscriber. The operator
-// document then USES the plugin like any other subscription: an "echo" node with
-// body kind "plugin" referencing the plugin by name, scoped In: request (its
-// On/Emits defaulted from the plugin's self-description). Folded together it is a
-// connected graph; one external event drives a reconciliation that reaches the
-// plugin's emit and closes the scope.
+// TestDaemon_LaunchPluginSelfRegisters drives the plugin seam end-to-end through
+// the plugins: section: the document registers `reflexd plugin echo` (HOW to
+// launch — command + transport — nothing about scopes). The process announces "I
+// handle echo.request, I emit echo.reply" (both with schemas); registering it
+// contributes only the CAPABILITY (two catalog kinds), no subscriber. The HANDLER
+// is a NORMAL subscriber named after the kind it handles (echo.request), scoped In:
+// request, with no plugin reference — the daemon backs it by kind (On defaults to
+// [name], Emits to the plugin's produced kinds). Folded together it is a connected
+// graph; one external event drives a reconciliation that reaches the plugin's emit
+// and closes the scope.
 func TestDaemon_LaunchPluginSelfRegisters(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the reflexd binary; skipped under -short")
@@ -108,32 +109,24 @@ func TestDaemon_LaunchPluginSelfRegisters(t *testing.T) {
 	d := daemon.New()
 	defer d.Close()
 
-	// The plugin self-registers its handler (echo.request) + result (echo.reply)
-	// and their schemas — no operator plugin node, no host-side catalog wiring.
-	name, err := d.LaunchPlugin(ctx, []string{reflexd, "plugin", "echo"})
-	if err != nil {
-		t.Fatalf("LaunchPlugin: %v", err)
-	}
-	if name != "echo" {
-		t.Fatalf("plugin announced name %q, want echo", name)
-	}
-
-	// The operator graph: who EMITS echo.request (resolver), the echo HANDLER
-	// (a plugin-backed subscription the operator declares, scoped In: request),
-	// and who CONSUMES echo.reply (notify). scope.request.closed is registered
-	// because a non-empty catalog (grown by the plugin) gates full catalog
-	// enforcement and lifecycle subscribes to it.
+	// The plugins: section registers the process. The operator graph: who EMITS
+	// echo.request (resolver), the echo HANDLER (a vanilla subscriber whose
+	// subscription IS the kind the plugin handles, scoped In: request, backed by
+	// kind), and who CONSUMES echo.reply (notify). scope.request.closed is
+	// registered because a non-empty catalog (grown by the plugin) gates full
+	// catalog enforcement and lifecycle subscribes to it.
 	doc := topology.Document{
-		Scopes: []topology.ScopeSpec{{Name: "request", Root: "echo.request"}},
-		Events: []topology.EventSpec{{Kind: "cli.task"}, {Kind: "scope.request.closed"}},
+		Scopes:  []topology.ScopeSpec{{Name: "request", Root: "echo.request"}},
+		Events:  []topology.EventSpec{{Kind: "cli.task"}, {Kind: "scope.request.closed"}},
+		Plugins: []topology.PluginSpec{{Command: []string{reflexd, "plugin", "echo"}}},
 		Subscribers: []topology.SubscriberSpec{
 			// cli.task is the external entry kind (registered in Events above): it
 			// makes the resolver a reachability root and delivers the event at dispatch.
 			{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"echo.request"},
 				Body: topology.BodySpec{Kind: "emit", Config: map[string]any{"kind": "echo.request"}}},
-			// the echo handler: a plugin-backed subscription referencing the launched
-			// plugin by name; On/Emits default from its self-description.
-			{Name: "echo", In: "request", Body: topology.BodySpec{Kind: "plugin", Config: map[string]any{"plugin": "echo"}}},
+			// the echo handler: a vanilla subscriber, no plugin reference; On defaults
+			// to [name] (echo.request), Emits to the plugin's produced kinds.
+			{Name: "echo.request", In: "request"},
 			{Name: "notify", On: []string{"echo.reply"}, In: "request"},
 			{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
 		},

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/kgatilin/reflex/engine"
@@ -81,6 +82,33 @@ func (m *Manager) Resolve(name string) (command []string, in, out []string, ok b
 		return nil, nil, nil, false
 	}
 	return append([]string(nil), l.command...), l.spec.In(), l.spec.Out(), true
+}
+
+// HandlerFor finds the launched plugin that HANDLES kind (declares it In its
+// self-description) and returns its spawn command, announced name, and produced
+// kinds (Out) — so the daemon can back a vanilla operator subscriber whose
+// subscription is that kind. A subscriber carries no plugin reference; the link
+// is the kind. ok is false when no launched plugin handles kind (the subscriber
+// is then an ordinary in-graph consumer, not plugin-backed).
+func (m *Manager) HandlerFor(kind string) (name string, command []string, out []string, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for n, l := range m.launched {
+		if slices.Contains(l.spec.In(), kind) {
+			return n, append([]string(nil), l.command...), l.spec.Out(), true
+		}
+	}
+	return "", nil, nil, false
+}
+
+// Launched reports whether a plugin of name has already been adopted, so the
+// daemon launches each plugins-section entry at most once across Apply/Validate
+// calls (relaunching would replace a live process).
+func (m *Manager) Launched(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.launched[name]
+	return ok
 }
 
 // adopt stores an already-spawned client under name (the launch path), closing

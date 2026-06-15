@@ -20,9 +20,25 @@ import (
 // validated as a resulting graph (the engine rejects a disconnected outcome).
 type Document struct {
 	Scopes      []ScopeSpec      `json:"scopes,omitempty" yaml:"scopes,omitempty"`
+	Plugins     []PluginSpec     `json:"plugins,omitempty" yaml:"plugins,omitempty"`
 	Subscribers []SubscriberSpec `json:"subscribers,omitempty" yaml:"subscribers,omitempty"`
 	Projections []ProjectionSpec `json:"projections,omitempty" yaml:"projections,omitempty"`
 	Events      []EventSpec      `json:"events,omitempty" yaml:"events,omitempty"`
+}
+
+// PluginSpec registers an out-of-process plugin: HOW to launch it (the spawn
+// command + transport) and nothing about scopes. A plugin is scope-agnostic
+// infrastructure — it just connects a subscription to an external process. The
+// process announces, in its hello, which kinds it handles and emits (with
+// schemas); registering it contributes that capability to the catalog. The
+// HANDLER is a normal Subscriber in the document, with its own scope, backed by
+// the plugin that handles its subscribed kind (the daemon matches by kind) — the
+// plugin does not declare the subscription, and the subscriber carries no plugin
+// reference. Name is optional: when empty the plugin's announced name is used.
+type PluginSpec struct {
+	Name      string   `json:"name,omitempty" yaml:"name,omitempty"`
+	Command   []string `json:"command" yaml:"command"`
+	Transport string   `json:"transport,omitempty" yaml:"transport,omitempty"`
 }
 
 // SubscriberSpec is a subscriber: its subscription/scope/emit wiring plus a body
