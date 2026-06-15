@@ -15,8 +15,11 @@ import (
 
 	"github.com/kgatilin/reflex/engine"
 	"github.com/kgatilin/reflex/nodes"
+	"github.com/kgatilin/reflex/nodes/entry"
+	"github.com/kgatilin/reflex/nodes/gate"
 	"github.com/kgatilin/reflex/nodes/llm"
 	"github.com/kgatilin/reflex/nodes/proxy"
+	"github.com/kgatilin/reflex/nodes/verifier"
 	"github.com/kgatilin/reflex/pkg/topology"
 )
 
@@ -43,11 +46,17 @@ type Daemon struct {
 
 // registerFactories wires the in-process body kinds into the process registry.
 // Idempotent (Register replaces), so constructing several daemons in one process
-// (tests) is safe. "llm" is the only true in-process body (the reasoning core);
-// every hand (fs, pytest, …) is an out-of-process plugin handled per-daemon by
-// the plugin Manager via resolver() — not registered here (doc 29 Iteration 3).
+// (tests) is safe. "llm" is the reasoning core; entry/gate/verifier are the
+// generic control bodies the agent topology wires (doc 29 §4b): entry maps a
+// boundary kind to a domain kind, gate drives the terminal fact off a state
+// field, verifier turns an agreed check into a verified status. Every hand (fs,
+// pytest, …) is an out-of-process plugin handled per-daemon by the plugin Manager
+// via resolver() — not registered here (doc 29 Iteration 3).
 func registerFactories() {
 	nodes.Register("llm", llm.Factory)
+	nodes.Register("entry", entry.Factory)
+	nodes.Register("gate", gate.Factory)
+	nodes.Register("verifier", verifier.Factory)
 }
 
 // New builds a daemon with a fresh engine and the body resolver installed.
