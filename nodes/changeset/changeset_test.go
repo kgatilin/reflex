@@ -118,6 +118,34 @@ func TestBridge_ParseFailureEmitsFail(t *testing.T) {
 	}
 }
 
+// TestBridge_ZeroDeclsRejected proves a well-formed YAML that matches NO reflex
+// field (a foreign agent format) is rejected — not applied as a silent no-op. The
+// fail message names the keys actually sent, so the brain can correct the format.
+func TestBridge_ZeroDeclsRejected(t *testing.T) {
+	foreign := "nodes:\n- agent:\n    tools: [bash, python]\n  name: worker\n"
+	payload, _ := json.Marshal(map[string]string{"document": foreign})
+	emits := react(t, Config{}, string(payload))
+	if len(emits) != 1 || emits[0].Kind != defaultFail {
+		t.Fatalf("emits = %+v, want one fail emit (0-decl document)", emits)
+	}
+	var body map[string]string
+	_ = json.Unmarshal(emits[0].Payload, &body)
+	if body["error"] == "" || !contains(body["error"], "nodes") {
+		t.Errorf("fail error = %q, want it to name the foreign top-level key 'nodes'", body["error"])
+	}
+}
+
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (func() bool {
+		for i := 0; i+len(sub) <= len(s); i++ {
+			if s[i:i+len(sub)] == sub {
+				return true
+			}
+		}
+		return false
+	})()
+}
+
 // TestBridge_MissingField proves a payload with no document field fails cleanly.
 func TestBridge_MissingField(t *testing.T) {
 	emits := react(t, Config{}, `{"something": "else"}`)

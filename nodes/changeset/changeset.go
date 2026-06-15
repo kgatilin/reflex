@@ -31,9 +31,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/kgatilin/reflex/engine"
 	"github.com/kgatilin/reflex/pkg/topology"
+	"gopkg.in/yaml.v3"
 )
 
 // Config is the changeset bridge descriptor (all fields optional; see package doc).
@@ -121,6 +123,16 @@ func Factory(s engine.Subscriber) (engine.Reaction, error) {
 		if err != nil {
 			return []engine.Emit{failEmit(fail, err)}, nil
 		}
+		// A document that yields NO decls is a silent no-op that would otherwise
+		// "apply" vacuously and mislead the caller into thinking it built something.
+		// Reject it with the actual top-level keys vs the reflex ones — the usual
+		// cause is a foreign agent format (nodes:/agent:/tools:) instead of reflex's
+		// scopes:/subscribers:/events:/projections:.
+		if len(decls) == 0 {
+			return []engine.Emit{failEmit(fail, fmt.Errorf(
+				"the document declared no topology (0 nodes/scopes/events). A reflex document uses top-level keys: scopes, subscribers, events, projections. Got top-level keys: %v — this looks like a different framework's format. Re-emit a reflex topology document",
+				topLevelKeys(data)))}, nil
+		}
 		return []engine.Emit{{
 			Kind:    emit,
 			Payload: engine.ChangesetRequestPayload(decls, principal),
@@ -151,6 +163,21 @@ func documentBytes(payload json.RawMessage, field string) ([]byte, error) {
 		return []byte(s), nil
 	}
 	return raw, nil
+}
+
+// topLevelKeys lists the top-level mapping keys of a YAML/JSON document — used to
+// tell the caller which keys they actually sent when none matched a reflex field.
+func topLevelKeys(data []byte) []string {
+	var m map[string]json.RawMessage
+	if yaml.Unmarshal(data, &m) != nil {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // failEmit builds the parse-failure feedback event carrying the error text.
