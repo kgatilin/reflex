@@ -17,32 +17,37 @@ import (
 // process-global nodes registry, so several daemons can coexist in one process
 // without clobbering each other's plugins.
 type Manager struct {
-	mu      sync.Mutex
-	clients map[string]*plugin.Client
+	mu       sync.Mutex
+	clients  map[string]*plugin.Client
+	launched map[string]launchInfo
+}
+
+// launchInfo is what a launched plugin contributes to operator wiring: its spawn
+// command (so a subscriber referencing it by name is rebuildable from the log,
+// G8) and its self-described kinds (so an operator subscriber can default its
+// On/Emits from the plugin's capability).
+type launchInfo struct {
+	command []string
+	spec    plugin.Spec
 }
 
 // NewManager builds an empty manager.
-func NewManager() *Manager { return &Manager{clients: map[string]*plugin.Client{}} }
+func NewManager() *Manager {
+	return &Manager{clients: map[string]*plugin.Client{}, launched: map[string]launchInfo{}}
+}
 
 // Launch spawns a plugin process, adopts its client, and returns the decls its
 // self-description (hello) contributes to the topology — WITHOUT applying them.
-// A plugin's whole job is to expose "I handle these kinds (with schemas), I emit
-// these kinds (with schemas)" and to subscribe to handle them; Launch turns that
-// announcement into:
+// A plugin's job is to expose a CAPABILITY: "I handle these kinds (with schemas),
+// I emit these kinds (with schemas)." Launching contributes exactly that — one
+// EventKind per declared kind+schema, in AND out — and nothing else.
 //
-//   - one GLOBAL subscriber Node (On = the kinds it handles, Emits = the kinds it
-//     produces, body = a plugin descriptor carrying the spawn command so the body
-//     is rebuildable from the log, G8); and
-//   - one EventKind per declared kind+schema, in AND out — the plugin announces
-//     schemas for both what it consumes and what it produces.
-//
-// The subscriber's scope is "global" on purpose: a plugin is scope-agnostic — it
-// handles its kinds wherever they occur, and the engine places its emits in the
-// trigger's cone by causality (a reaction never chooses its emit's scope). WHO
-// emits the handled kinds and WHO consumes the results is the separate topology
-// wiring (the operator's graph), not the plugin's concern. The caller folds these
-// decls into its next changeset alongside the operator document, where the graph
-// is validated as a whole (a launched-but-unwired plugin is correctly a gap).
+// It does NOT create a subscriber. Whether this agent USES the plugin, and in
+// which scope, is the operator's decision, declared in the topology like any
+// other subscription: a Subscriber with body kind "plugin" referencing the
+// launched plugin by name (config {plugin: <name>}), with an operator-chosen In.
+// The daemon resolves that reference back to this command and the plugin's kinds
+// (Resolve). Launching exposes capability; the topology decides the wiring.
 func (m *Manager) Launch(command []string) (name string, decls []engine.Decl, err error) {
 	c, err := plugin.Spawn(command...)
 	if err != nil {
@@ -55,19 +60,28 @@ func (m *Manager) Launch(command []string) (name string, decls []engine.Decl, er
 		return "", nil, fmt.Errorf("proxy: plugin %v announced no name in its hello", command)
 	}
 	m.adopt(name, c)
+	m.mu.Lock()
+	m.launched[name] = launchInfo{command: append([]string(nil), command...), spec: spec}
+	m.mu.Unlock()
 
-	cfg, err := json.Marshal(Config{Command: command})
-	if err != nil {
-		return "", nil, err
-	}
-	decls = append(decls, engine.Subscriber{
-		Name: name, On: spec.In(), Emits: spec.Out(), In: "global",
-		BodyKind: Kind, BodyConfig: cfg,
-	})
 	for _, ev := range spec.Events {
 		decls = append(decls, engine.EventKind{Kind: ev.Kind, Schema: ev.Schema})
 	}
 	return name, decls, nil
+}
+
+// Resolve returns a launched plugin's spawn command and its self-described kinds
+// (In = handled, Out = produced) so the daemon can expand an operator subscriber
+// that references the plugin by name. ok is false if no plugin of that name has
+// been launched.
+func (m *Manager) Resolve(name string) (command []string, in, out []string, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l, ok := m.launched[name]
+	if !ok {
+		return nil, nil, nil, false
+	}
+	return append([]string(nil), l.command...), l.spec.In(), l.spec.Out(), true
 }
 
 // adopt stores an already-spawned client under name (the launch path), closing

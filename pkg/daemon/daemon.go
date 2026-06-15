@@ -11,6 +11,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 
 	"github.com/kgatilin/reflex/engine"
@@ -27,16 +28,15 @@ import (
 // plugin Manager so plugin processes are scoped to this daemon, not the
 // process-global nodes registry.
 //
-// pluginDecls accumulates the topology contributions of the plugins this daemon
+// pluginDecls accumulates the CATALOG contributions of the plugins this daemon
 // has launched: each connected plugin announces "I handle these kinds (schemas),
-// I emit these kinds (schemas)" and Launch turns that into a global subscriber
-// node + the catalog kinds (proxy.Manager.Launch). These are NOT operator-
-// declared — the operator never writes a body_kind: plugin node; a plugin self-
-// registers its handler. They are folded into the next Apply/Validate alongside
-// the operator document so the resulting graph (who emits the handled kinds, who
-// consumes the results) is validated as a whole. Only the decls not yet on the
-// log are passed as the changeset delta (pendingPluginDecls) — the engine
-// prepends the live table itself, and re-sending a live node would duplicate it.
+// I emit these kinds (schemas)" and Launch turns that into one EventKind per kind
+// (proxy.Manager.Launch) — capability, not wiring. The handler SUBSCRIPTION is
+// the operator's, declared in the document as a body-kind "plugin" subscriber
+// referencing the plugin by name (expandPluginRefs), with an operator-chosen
+// scope. These catalog kinds are folded into the next Apply/Validate so the
+// plugins' schemas are on the log (the llm body advertises them). Only the kinds
+// not yet on the log are passed as the changeset delta (pendingPluginDecls).
 type Daemon struct {
 	mu          sync.Mutex
 	e           *engine.Engine
@@ -101,16 +101,17 @@ func (d *Daemon) Close() error {
 	return d.plugins.Close()
 }
 
-// LaunchPlugin spawns a plugin process and records the topology it self-registers
-// — a global subscriber node + the catalog kinds it announces (proxy.Launch) —
-// WITHOUT applying anything. A plugin in isolation is never a connected graph (no
-// one emits its handled kinds, no one consumes its results yet), so its decls
-// gate connectivity only when folded with the operator graph that wires them: the
-// next Apply/Validate does exactly that. It returns the plugin's announced name.
+// LaunchPlugin spawns a plugin process and records the CATALOG it announces (the
+// kinds it can handle + emit, with schemas) WITHOUT applying anything and WITHOUT
+// wiring it into the graph. Launching exposes a capability; whether this agent
+// uses the plugin — and in which scope — is the operator's decision, declared in
+// the topology as a body-kind "plugin" subscriber referencing the plugin by name
+// (config {plugin: <name>}). It returns the plugin's announced name.
 //
 // This is the seam for an agent extending itself at runtime: launch a new plugin,
-// then apply a topology that emits the kinds it handles — the wiring (the "node"
-// concern) stays separate from the plugin's self-description (the handler).
+// then apply a topology that subscribes a plugin-backed node to its kinds — the
+// wiring (the operator's subscription) stays separate from the plugin's
+// self-description (its capability).
 func (d *Daemon) LaunchPlugin(_ context.Context, command []string) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -137,11 +138,58 @@ func (d *Daemon) Apply(ctx context.Context, doc topology.Document) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	decls, err = d.expandPluginRefs(decls)
+	if err != nil {
+		return err
+	}
 	pending := d.pendingPluginDecls()
 	delta := make([]engine.Decl, 0, len(pending)+len(decls))
 	delta = append(delta, pending...)
 	delta = append(delta, decls...)
 	return d.e.Apply(ctx, delta...)
+}
+
+// expandPluginRefs resolves operator subscribers that reference a launched plugin
+// by name — body kind "plugin", config {plugin: <name>} — into the resolved form:
+// it fills the spawn command from the launched plugin (so the registered fact is
+// rebuildable from the log, G8) and defaults On/Emits from the plugin's
+// self-described kinds when the operator omitted them. The scope (In) stays the
+// operator's choice — launching exposes capability, the topology owns the wiring.
+// A reference to a plugin that has not been launched is a clean error.
+func (d *Daemon) expandPluginRefs(decls []engine.Decl) ([]engine.Decl, error) {
+	out := make([]engine.Decl, 0, len(decls))
+	for _, dcl := range decls {
+		sub, ok := dcl.(engine.Subscriber)
+		if !ok || sub.BodyKind != proxy.Kind {
+			out = append(out, dcl)
+			continue
+		}
+		var cfg proxy.Config
+		if len(sub.BodyConfig) > 0 {
+			if err := json.Unmarshal(sub.BodyConfig, &cfg); err != nil {
+				return nil, fmt.Errorf("daemon: plugin subscriber %q body config: %w", sub.Name, err)
+			}
+		}
+		if cfg.Plugin != "" {
+			command, in, outKinds, found := d.plugins.Resolve(cfg.Plugin)
+			if !found {
+				return nil, fmt.Errorf("daemon: subscriber %q references plugin %q, which is not launched", sub.Name, cfg.Plugin)
+			}
+			if len(sub.On) == 0 {
+				sub.On = in
+			}
+			if len(sub.Emits) == 0 {
+				sub.Emits = outKinds
+			}
+			raw, err := json.Marshal(proxy.Config{Command: command})
+			if err != nil {
+				return nil, err
+			}
+			sub.BodyConfig = raw
+		}
+		out = append(out, sub)
+	}
+	return out, nil
 }
 
 // pendingPluginDecls returns the launched plugins' decls that are NOT yet on the
@@ -191,7 +239,11 @@ func (d *Daemon) Validate(doc topology.Document) (engine.Report, error) {
 	d.mu.Lock()
 	live := d.e.Topology()
 	pending := d.pendingPluginDecls()
+	decls, err = d.expandPluginRefs(decls)
 	d.mu.Unlock()
+	if err != nil {
+		return engine.Report{}, err
+	}
 	resulting := make([]engine.Decl, 0, len(live)+len(pending)+len(decls))
 	resulting = append(resulting, live...)
 	resulting = append(resulting, pending...)

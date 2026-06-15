@@ -27,10 +27,19 @@ import (
 // Kind is the registered body kind for a plugin-backed node.
 const Kind = "plugin"
 
-// Config is a plugin node's body_config: the command the daemon execs to launch
-// the plugin process, e.g. ["reflexd", "plugin", "fs"] or ["python", "pytest_plugin.py"].
+// Config is a plugin node's body_config. Two forms:
+//
+//   - Command: the argv the daemon execs to launch the plugin process, e.g.
+//     ["reflexd", "plugin", "fs"]. This is the resolved form the body Factory
+//     consumes and the form persisted on the log (rebuildable, G8).
+//   - Plugin: an operator-facing REFERENCE to an already-launched plugin by its
+//     announced name. The daemon expands {plugin: "fs"} into the launched
+//     plugin's Command (and defaults the subscriber's On/Emits from its kinds)
+//     before the changeset, so the operator never writes the spawn command or the
+//     plugin's root (a host concern). After expansion only Command remains.
 type Config struct {
-	Command []string `json:"command"`
+	Command []string `json:"command,omitempty"`
+	Plugin  string   `json:"plugin,omitempty"`
 }
 
 // ParseConfig decodes and validates a plugin node's body_config.

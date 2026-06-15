@@ -1,11 +1,13 @@
 # coding-agent — the doc-29 §4b state-defined coding agent, as a topology document.
 #
-# This is the OPERATOR document. It declares only domain kinds and the wiring;
-# the hands (fs, pytest) self-register when the daemon launches them, so this doc
-# must be applied to a daemon started with `reflexd serve --root <repo>` (which
-# brings up the fs + pytest plugins confined to <repo>). Applied standalone via
-# `reflexd validate`, it reports gaps for the tool kinds — that is correct, the
-# hands are not present in a dry run. See topologies/README.md for the run recipe.
+# This is the OPERATOR document. Launching a plugin only exposes its CAPABILITY
+# (the kinds it can handle + their schemas); USING a hand is a subscription this
+# document declares, like any other — a body-kind "plugin" subscriber referencing
+# the plugin by name, with an operator-chosen scope (here `request`, so the hand
+# sits inside the budgeted agent loop). So this doc must be applied to a daemon
+# started with `reflexd serve --root <repo>` (which launches the fs + pytest
+# plugins confined to <repo>); a reference to an unlaunched plugin is rejected.
+# See topologies/README.md for the run recipe.
 #
 # The shape (CONCEPT §9, doc 29 §4b):
 #   task.new ──resolver──▶ request.received  (roots the `request` scope)
@@ -102,6 +104,23 @@ subscribers:
           resolved, call claim.complete. An independent verifier re-runs the tests; if
           they fail you will receive verify.failed and must continue. Do not claim
           completion on a hunch — completion is verified, not asserted.
+
+  # fs / pytest — the hands, wired as operator subscriptions IN the request scope
+  # (so they sit inside the budgeted agent loop). Each references a launched plugin
+  # by name; the daemon fills its On (the kinds it handles) and Emits (the kinds it
+  # produces) from the plugin's self-description, and the spawn command from the
+  # launch. `reflexd serve --root <repo>` must have launched fs + pytest first.
+  - name: fs
+    in: request
+    body:
+      kind: plugin
+      config: { plugin: fs }
+
+  - name: pytest
+    in: request
+    body:
+      kind: plugin
+      config: { plugin: pytest }
 
   # verifier — the independent judge of done (CONCEPT §3/§9). On a claim it re-runs
   # the agreed check; green → the VERIFIED done status, red → verify.failed back

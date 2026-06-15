@@ -87,14 +87,15 @@ func TestDaemon_ApplyEmitReconciles(t *testing.T) {
 	}
 }
 
-// TestDaemon_LaunchPluginSelfRegisters drives the self-registering-plugin path
-// end-to-end: the daemon launches `reflexd plugin echo`, which announces "I
-// handle echo.request, I emit echo.reply" (both with schemas). The daemon turns
-// that announcement into a GLOBAL subscriber node + two catalog kinds — the
-// operator document never mentions the plugin. The operator topology wires who
-// emits echo.request (resolver) and who consumes echo.reply (notify); folded with
-// the plugin's self-registration it is a connected graph. One external event then drives
-// a reconciliation that reaches the plugin's emit and closes the scope.
+// TestDaemon_LaunchPluginSelfRegisters drives the plugin seam end-to-end:
+// the daemon launches `reflexd plugin echo`, which announces "I handle
+// echo.request, I emit echo.reply" (both with schemas). Launching contributes
+// only the CAPABILITY — two catalog kinds — and NO subscriber. The operator
+// document then USES the plugin like any other subscription: an "echo" node with
+// body kind "plugin" referencing the plugin by name, scoped In: request (its
+// On/Emits defaulted from the plugin's self-description). Folded together it is a
+// connected graph; one external event drives a reconciliation that reaches the
+// plugin's emit and closes the scope.
 func TestDaemon_LaunchPluginSelfRegisters(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the reflexd binary; skipped under -short")
@@ -116,10 +117,11 @@ func TestDaemon_LaunchPluginSelfRegisters(t *testing.T) {
 		t.Fatalf("plugin announced name %q, want echo", name)
 	}
 
-	// The operator graph: who EMITS echo.request and who CONSUMES echo.reply —
-	// the separate wiring concern. scope.request.closed is registered because a
-	// non-empty catalog (grown by the plugin) gates full catalog enforcement and
-	// lifecycle subscribes to it.
+	// The operator graph: who EMITS echo.request (resolver), the echo HANDLER
+	// (a plugin-backed subscription the operator declares, scoped In: request),
+	// and who CONSUMES echo.reply (notify). scope.request.closed is registered
+	// because a non-empty catalog (grown by the plugin) gates full catalog
+	// enforcement and lifecycle subscribes to it.
 	doc := topology.Document{
 		Scopes: []topology.ScopeSpec{{Name: "request", Root: "echo.request"}},
 		Events: []topology.EventSpec{{Kind: "cli.task"}, {Kind: "scope.request.closed"}},
@@ -128,6 +130,9 @@ func TestDaemon_LaunchPluginSelfRegisters(t *testing.T) {
 			// makes the resolver a reachability root and delivers the event at dispatch.
 			{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"echo.request"},
 				Body: topology.BodySpec{Kind: "emit", Config: map[string]any{"kind": "echo.request"}}},
+			// the echo handler: a plugin-backed subscription referencing the launched
+			// plugin by name; On/Emits default from its self-description.
+			{Name: "echo", In: "request", Body: topology.BodySpec{Kind: "plugin", Config: map[string]any{"plugin": "echo"}}},
 			{Name: "notify", On: []string{"echo.reply"}, In: "request"},
 			{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
 		},
