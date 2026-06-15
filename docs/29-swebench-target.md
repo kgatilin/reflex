@@ -184,6 +184,17 @@ node** (`On` = the kinds it handles, `Emits` = the kinds it produces, body = a
 declared kind+schema, in AND out**. The operator topology never writes a
 `body_kind: plugin` node; it just emits the kinds a hand consumes and consumes
 the kinds it produces. These plugin decls are folded into the next
+
+> **SUPERSEDED by the §6 Iteration-4 finding (`50b7d55`).** The auto-created
+> **global subscriber node** described in this paragraph was the wrong call:
+> launching a plugin now contributes **only the catalog** (the `EventKind`s), and
+> **USING** a hand is a subscription the **operator declares** — a `body_kind:
+> plugin` subscriber referencing the plugin by name, with an operator-chosen
+> scope. So the operator *does* write a plugin node (that is how scope is chosen),
+> while the plugin still self-describes its kinds. Read the rest of this paragraph
+> with that correction in mind.
+
+The OLD (superseded) behaviour: these plugin decls are folded into the next
 `apply`/`validate` alongside the operator document, so the **resulting graph is
 validated as a whole** — a launched-but-unwired plugin is correctly a gap
 (unreachable / dead-end), and connectivity is a property of the assembled graph,
@@ -280,16 +291,20 @@ shipped:
   is connected and the `llm` body resolves its Gemini provider (lazily — no model
   call). The structural proof up to the live-model boundary.
 
-*Finding (Iteration 4) — RESOLVED in this iteration (`aba7af0`):* the agent loop
-is `brain ↔ fs/pytest`, but a launched plugin is a **global** subscriber (doc 29
-Iteration 3: a plugin is scope-agnostic). The connectivity validator's
-unbounded-cycle check marked boundedness **per node** (is its `In` a budgeted
-scope?), so the global hands made the budgeted agent loop read as an unbounded
-cycle — the first topology to close a loop *through* a plugin tripped it. The
-check is now **edge-kind based** (doc 24 §5's intended rule, previously deferred):
-an SCC is bounded iff some budgeted scope bounds a kind on an edge *within* the
-SCC while anchoring the cone. This admits the global-plugin loop and tightens the
-unrelated-kind case.
+*Finding (Iteration 4) — a plugin-model correction (`50b7d55`):* the first attempt
+hit a connectivity-validator rejection — the agent loop `brain ↔ fs/pytest` read
+as an unbounded cycle because the launched hands were **global** subscribers
+outside the budgeted `request` scope. The first fix tightened the validator
+(edge-kind boundedness) to tolerate that, but the **real** defect was upstream and
+in the plugin model itself: `LaunchPlugin` **auto-created a global subscriber**,
+force-wiring a hand into the graph with no operator say over its scope. Corrected
+(operator): **launching a plugin exposes a capability; USING it is a subscription
+the operator declares**, like any other — a body-kind `plugin` subscriber
+referencing the plugin by name, with an operator-chosen `In`. The hands are now
+declared `In: request` (inside the budgeted loop), so the loop is bounded the
+ordinary way and the validator needed **no** change — the earlier edge-kind
+tightening was reverted (it was patching a symptom). This reverses the auto-global
+node of `faf9f64`: a plugin self-describes its kinds; the operator owns the wiring.
 
 **Remaining (the one manual step):** the actual **live Gemini drive** — `emit
 task.new --wait request.terminal` against a `serve --root <checkout>` daemon — is

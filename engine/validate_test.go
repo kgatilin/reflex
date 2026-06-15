@@ -119,61 +119,6 @@ func TestValidate_BudgetedScopeBoundsTheCycle(t *testing.T) {
 	}
 }
 
-func TestValidate_BudgetedLoopThroughGlobalPluginIsBounded(t *testing.T) {
-	// The agent loop (doc 29 §4b): a budgeted brain (In a budgeted scope) calls a
-	// tool that is a GLOBAL subscriber — a launched plugin is scope-agnostic (doc
-	// 29 Iteration 3) — whose result loops back to the brain. The SCC {brain,tool}
-	// contains a node with no budgeted In (the global tool), yet the loop's
-	// tool-call kind IS budgeted in the brain's scope, and the plugin's emits land
-	// in that cone by causality (doc 24 §5). So the cycle is bounded by the cone,
-	// not by the plugin node's In. This is the case the per-node marker rejected.
-	decls := []Decl{
-		Scope{Name: "request", Root: "request.received", Budget: map[string]int{"tool.x.call": 8}},
-		Subscriber{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"request.received"}},
-		Subscriber{Name: "brain", On: []string{"request.received", "tool.x.result"}, In: "request", Emits: []string{"tool.x.call"}},
-		// the hand: a GLOBAL subscriber (a launched plugin), part of the loop.
-		Subscriber{Name: "tool", On: []string{"tool.x.call"}, In: "global", Emits: []string{"tool.x.result"}},
-		Subscriber{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
-		EventKind{Kind: "cli.task"}, EventKind{Kind: "request.received"},
-		EventKind{Kind: "tool.x.call"}, EventKind{Kind: "tool.x.result"},
-	}
-	rep, err := Validate(decls...)
-	if err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if len(rep.UnboundedCycles) != 0 {
-		t.Fatalf("budgeted loop through a global plugin reported unbounded: %v", rep.UnboundedCycles)
-	}
-}
-
-func TestValidate_BudgetBoundingUnrelatedKindIsStillUnbounded(t *testing.T) {
-	// Tightening (doc 24 §5): a budgeted scope counts only if its budget bounds a
-	// kind ON the cycle's edges. Here the loop spins on kind.a/kind.b, but the
-	// scope's budget bounds an unrelated kind never emitted in the loop — so there
-	// is no exit pressure on the cycle and it must still be reported unbounded.
-	// (The coarse per-node marker wrongly passed this — every node was In a
-	// budgeted scope.)
-	decls := []Decl{
-		Scope{Name: "loop", Root: "kind.a", Budget: map[string]int{"unrelated.kind": 8}},
-		Subscriber{Name: "in", On: []string{"cli.task"}, In: "global", Emits: []string{"kind.a"}},
-		Subscriber{Name: "a", On: []string{"kind.a", "kind.b"}, In: "loop", Emits: []string{"kind.b"}},
-		Subscriber{Name: "b", On: []string{"kind.b"}, In: "loop", Emits: []string{"kind.a"}},
-	}
-	rep, err := Validate(decls...)
-	if err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	found := false
-	for _, scc := range rep.UnboundedCycles {
-		if contains(scc, "a") && contains(scc, "b") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("expected SCC {a,b} unbounded (budget bounds an unrelated kind); got %v", rep.UnboundedCycles)
-	}
-}
-
 func TestValidate_StalledClosureNeedsAConsumer(t *testing.T) {
 	// A declared scope whose scope.X.closed has no consumer is a stalled
 	// closure (doc 26 §3f / 27 §5): the cone can freeze in the void. The
