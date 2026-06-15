@@ -76,8 +76,13 @@ subscribers:
       - topology.changeset.applied
       - topology.changeset.rejected
       - topology.apply.failed
-      - request.terminal
       - llm.empty
+    # NOTE: the brain deliberately does NOT subscribe to request.terminal. Doing so
+    # would form an unbounded cross-scope cycle (brain → task.new → worker → … →
+    # request.terminal → brain) through global nodes in no budgeted scope, which the
+    # connectivity validator rejects. The brain iterates on the BUILD feedback
+    # (applied/rejected/failed); the worker's completion is bridged to the meta
+    # terminal deterministically (architect-finish), not looped back into the brain.
     in: architect
     reads: [brain.history]
     emits:
@@ -203,8 +208,8 @@ subscribers:
                the error/reasons and re-emit the corrected FULL document.
             4. On topology.changeset.applied, call task.new with `task` set to the
                original issue text — this dispatches it into the worker you built.
-            5. When you observe request.terminal (the worker finished), STOP CALLING
-               FUNCTIONS and reply with a one-line prose summary. That ends the run.
+               This is your FINAL action: the worker then runs to completion and the
+               run ends automatically. You do not need to wait or summarize.
 
           The template above is a COMPLETE, VALID worker. Reproduce it faithfully —
           do not try to be clever or minimal; correctness of the schema matters more
@@ -223,8 +228,21 @@ subscribers:
         fail: topology.apply.failed
         principal: architect
 
-  # architect-done — the brain's prose claim ends the meta-run: llm.message →
-  # architect.terminal{done}. This is the drive-to-terminal fact (`emit --wait`).
+  # architect-finish — the worker's completion bridged to the meta terminal: a
+  # DETERMINISTIC global node (not the brain) maps the worker's request.terminal to
+  # architect.terminal. This is what lets the meta-run end when the built worker
+  # finishes WITHOUT the brain subscribing to request.terminal (which would form an
+  # unbounded cross-scope cycle). It is the drive-to-terminal fact (`emit --wait`).
+  - name: architect-finish
+    on: [request.terminal]
+    in: global
+    emits: [architect.terminal]
+    body:
+      kind: entry
+      config: { emit: architect.terminal, payload: { status: done } }
+
+  # architect-done — the brain's prose claim also ends the meta-run (e.g. if it
+  # gives up or finishes a build-only task): llm.message → architect.terminal.
   - name: architect-done
     on: [llm.message]
     in: architect
@@ -257,7 +275,6 @@ projections:
       - topology.changeset.rejected
       - topology.apply.failed
       - task.new
-      - request.terminal
       - llm.message
       - llm.empty
     in: architect
