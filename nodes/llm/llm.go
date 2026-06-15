@@ -27,6 +27,24 @@ import (
 // model produces is a function-call → an allowlisted Emit.
 const DefaultAnswerKind = "llm.message"
 
+// UsageKind is the token-accounting fact the body always records after a
+// completion. It rides in the seat's Emits so the engine allowlists it, but it
+// is bookkeeping the body writes itself — never a function the model may call —
+// so the tool-advertise loop excludes it (alongside the answer kind).
+const UsageKind = "llm.usage"
+
+// ContinueKind is the loop-continuation fact a seat emits when a turn produced
+// NO actionable function call (a prose-only or empty completion). A non-tool
+// answer must not be a dead end (the user's correction): for an agent seat it is
+// just a turn that advanced nothing, so the seat re-drives itself by emitting
+// this event, which the same seat subscribes to (On) — never relying on a prompt
+// to forbid prose. It is OPT-IN: only a seat that lists ContinueKind in its Emits
+// re-drives; a seat without it treats prose as its terminal answer (a Q&A seat).
+// The seat re-triggers on ContinueKind, NOT on its prose answer kind, so a turn
+// that emits BOTH a tool call and prose advances once (via the tool result), not
+// twice. The loop stays bounded by the scope budget (ContinueKind is budgeted).
+const ContinueKind = "llm.continue"
+
 // History is the view type the llm body reads (doc 26 §4b): the cone shaped into
 // a frozen system preamble and an append-only message tail. The body is dumb —
 // it calls System()/Messages() and hands them to the provider; the split lives
@@ -333,8 +351,8 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 		// catalog grown earlier in the drain is in scope.
 		var tools []provider.ToolSchema
 		for _, k := range cfg.Emits {
-			if k == cfg.Answer {
-				continue // the answer kind is synthesised from text, not a tool
+			if k == cfg.Answer || k == UsageKind || k == ContinueKind {
+				continue // the answer kind is synthesised from text; usage/continue are bookkeeping — none is a tool
 			}
 			ts := provider.ToolSchema{Name: k}
 			if schema, ok := views.Schema(k); ok && len(schema) > 0 {
@@ -368,6 +386,7 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 				Payload: mustMarshal(map[string]string{"text": resp.Text}),
 			})
 		}
+		actionable := 0
 		for _, tc := range resp.ToolCalls {
 			kind := provider.DottedToolName(tc.Name)
 			if _, ok := allow[kind]; !ok {
@@ -378,8 +397,19 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 				payload = json.RawMessage("{}")
 			}
 			emits = append(emits, engine.Emit{Kind: kind, Payload: payload})
+			actionable++
 		}
-		emits = append(emits, engine.Emit{Kind: "llm.usage", Payload: mustMarshal(resp.Usage)})
+		// A turn that called no function advanced nothing. If this seat opted into
+		// loop continuation (ContinueKind ∈ Emits), re-drive it rather than letting
+		// the prose answer dead-end at quiescence — completion is signalled by a
+		// function call (e.g. claim.complete), never by talking. Bounded by budget.
+		if _, wants := allow[ContinueKind]; wants && actionable == 0 {
+			emits = append(emits, engine.Emit{
+				Kind:    ContinueKind,
+				Payload: mustMarshal(map[string]string{"text": "Your previous turn produced no function call. Continue by calling a tool, and signal completion only with claim.complete."}),
+			})
+		}
+		emits = append(emits, engine.Emit{Kind: UsageKind, Payload: mustMarshal(resp.Usage)})
 		return emits, nil
 	})
 }
