@@ -129,6 +129,8 @@ func TestValidate_StalledClosureNeedsAConsumer(t *testing.T) {
 		Subscriber{Name: "doer", On: []string{"request.received"}, In: "work", Emits: []string{"tool.x.call"}},
 		Subscriber{Name: "tool", On: []string{"tool.x.call"}, In: "work", Emits: []string{"tool.x.result"}},
 		Subscriber{Name: "loop", On: []string{"tool.x.result"}, In: "work", Emits: []string{"tool.x.call"}},
+		EventKind{Kind: "cli.task"}, EventKind{Kind: "request.received"},
+		EventKind{Kind: "tool.x.call"}, EventKind{Kind: "tool.x.result"},
 	}
 	rep, err := Validate(decls...)
 	if err != nil {
@@ -170,6 +172,7 @@ func TestValidate_CoRootedScopesRejected(t *testing.T) {
 		Subscriber{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"request.received"}},
 		Subscriber{Name: "work", On: []string{"request.received"}, In: "request", Emits: []string{"task.answered"}},
 		Subscriber{Name: "notify", On: []string{"task.answered", "scope.request.closed", "scope.cost.closed"}, In: "global"},
+		EventKind{Kind: "cli.task"}, EventKind{Kind: "request.received"}, EventKind{Kind: "task.answered"},
 	}
 	rep, err := Validate(decls...)
 	if err != nil {
@@ -197,6 +200,7 @@ func TestValidate_CoRootedScopesRejected(t *testing.T) {
 		Subscriber{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"request.received"}},
 		Subscriber{Name: "work", On: []string{"request.received"}, In: "request", Emits: []string{"task.answered"}},
 		Subscriber{Name: "notify", On: []string{"task.answered", "scope.request.closed"}, In: "global"},
+		EventKind{Kind: "cli.task"}, EventKind{Kind: "request.received"}, EventKind{Kind: "task.answered"},
 	}
 	rep2, err := Validate(merged...)
 	if err != nil {

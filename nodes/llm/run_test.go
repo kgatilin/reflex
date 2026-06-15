@@ -96,6 +96,24 @@ func TestRun_Doc27Reconciles(t *testing.T) {
 
 	decls := []engine.Decl{
 		engine.Scope{Name: "request", Root: "request.received", Budget: map[string]int{"tool.fs.read.call": 16}},
+		// Domain kinds: every kind a subscriber emits, plus the external entry
+		// kind cli.task. scope.request.closed is engine-owned (auto-registered).
+		engine.EventKind{Kind: "cli.task"},
+		engine.EventKind{Kind: "request.received"},
+		engine.EventKind{Kind: "state.updated.goal"},
+		engine.EventKind{Kind: "tool.fs.read.call"},
+		engine.EventKind{Kind: "tool.fs.read.result"},
+		engine.EventKind{Kind: "tool.fs.read.failed"},
+		engine.EventKind{Kind: "plan.requested"},
+		engine.EventKind{Kind: "state.updated.plan"},
+		engine.EventKind{Kind: "task.answered"},
+		engine.EventKind{Kind: "llm.usage"},
+		// Transcript-source kinds the llm.history projections subscribe to (their
+		// default HistoryOn) but no subscriber in this topology emits — register
+		// them so those projection subscriptions are not dead.
+		engine.EventKind{Kind: "user.message"},
+		engine.EventKind{Kind: "llm.message"},
+		engine.EventKind{Kind: "context.found"},
 		resolver,
 		understand, uProj,
 		fs,

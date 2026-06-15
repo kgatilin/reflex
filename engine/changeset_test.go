@@ -25,6 +25,9 @@ func connectedTopology() []Decl {
 		},
 		Subscriber{Name: "notify", On: []string{"task.answered"}, In: "request"},
 		Subscriber{Name: "lifecycle", On: []string{"scope.request.closed"}, In: "global"},
+		// Register every domain kind (validation is always on, CONCEPT §6);
+		// scope.request.closed is engine-owned, registered automatically.
+		EventKind{Kind: "cli.task"}, EventKind{Kind: "request.received"}, EventKind{Kind: "task.answered"},
 	}
 }
 

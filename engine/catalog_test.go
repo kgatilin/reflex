@@ -128,15 +128,65 @@ func TestCatalog_DeadSubscriptionIsReported(t *testing.T) {
 	}
 }
 
-func TestCatalog_OptInDormancyLeavesCatalogLessTopologyUnaffected(t *testing.T) {
-	// The critical non-breaking rule (doc 26 §4a): a catalog-less topology — no
-	// EventKind decls, no event.registered facts — must validate exactly as
-	// before. The example topology declares no catalog, so the two new checks are
-	// dormant and report nothing.
-	decls := exampleTopology()
-	for _, d := range decls {
-		if _, ok := d.(EventKind); ok {
-			t.Fatal("precondition: example topology must declare no EventKind")
+func TestCatalog_ValidationIsAlwaysOn(t *testing.T) {
+	// Catalog validation is ALWAYS on (CONCEPT §6, no opt-in dormancy): a
+	// topology that emits/subscribes to UNregistered kinds is rejected — a
+	// subscription to an unregistered event is a wiring bug, caught always.
+	// Registering an event is a distinct, required operation.
+	unregistered := []Decl{
+		Subscriber{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"request.received"}},
+		Subscriber{Name: "worker", On: []string{"request.received"}, In: "global", Emits: []string{"work.done"}},
+		Subscriber{Name: "sink", On: []string{"work.done"}, In: "global"},
+	}
+	rep, err := Validate(unregistered...)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if rep.Connected {
+		t.Fatal("expected Connected==false for a topology with unregistered kinds (validation is always on)")
+	}
+	// request.received and work.done are emitted but never registered → unknown.
+	if !contains(rep.UnknownKinds, "request.received") || !contains(rep.UnknownKinds, "work.done") {
+		t.Fatalf("expected the unregistered emitted kinds reported; got unknown=%v", rep.UnknownKinds)
+	}
+	// cli.task is subscribed but matches no catalog kind → dead subscription.
+	if !contains(rep.DeadSubscriptions, "cli.task") {
+		t.Fatalf("expected cli.task (unregistered external kind) flagged as a dead subscription; got %v", rep.DeadSubscriptions)
+	}
+
+	// Registering every kind closes the gaps — and the engine self-registers what
+	// it owns, so the operator declares only domain kinds.
+	registered := append(unregistered,
+		EventKind{Kind: "cli.task"}, EventKind{Kind: "request.received"}, EventKind{Kind: "work.done"})
+	rep2, err := Validate(registered...)
+	if err != nil {
+		t.Fatalf("Validate (registered): %v", err)
+	}
+	if !rep2.Connected {
+		t.Fatalf("expected Connected==true once every kind is registered; gaps: unknown=%v dead-subs=%v",
+			rep2.UnknownKinds, rep2.DeadSubscriptions)
+	}
+}
+
+func TestCatalog_EngineSelfRegistersScopeClosureKinds(t *testing.T) {
+	// The engine registers the kinds IT owns through the same catalog (CONCEPT
+	// §6): for every declared scope, scope.{name}.closed/.budget_exhausted are in
+	// the catalog without any operator EventKind — so a topology may subscribe to
+	// its scope closure and emit budgeted kinds with no boilerplate registration.
+	decls := []Decl{
+		Scope{Name: "request", Root: "request.received", Budget: map[string]int{"tool.x.call": 4}},
+		Subscriber{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"request.received"}, Scope: "request"},
+		Subscriber{Name: "doer", On: []string{"request.received"}, In: "request", Emits: []string{"tool.x.call"}},
+		Subscriber{Name: "tool", On: []string{"tool.x.call"}, In: "request", Emits: []string{"tool.x.result"}},
+		Subscriber{Name: "loop", On: []string{"tool.x.result"}, In: "request", Emits: []string{"tool.x.call"}},
+		Subscriber{Name: "terminator", On: []string{"scope.request.closed"}}, // consumes the engine-owned kind
+		EventKind{Kind: "cli.task"}, EventKind{Kind: "request.received"},
+		EventKind{Kind: "tool.x.call"}, EventKind{Kind: "tool.x.result"},
+	}
+	cat := foldCatalog(decls, nil)
+	for _, k := range []string{"scope.request.closed", "scope.request.budget_exhausted"} {
+		if !cat.has(k) {
+			t.Fatalf("expected the engine to self-register %q; kinds=%v", k, cat.kinds())
 		}
 	}
 	rep, err := Validate(decls...)
@@ -144,17 +194,8 @@ func TestCatalog_OptInDormancyLeavesCatalogLessTopologyUnaffected(t *testing.T) 
 		t.Fatalf("Validate: %v", err)
 	}
 	if !rep.Connected {
-		t.Fatalf("expected the catalog-less example topology to stay Connected; gaps: unknown=%v dead-subs=%v",
-			rep.UnknownKinds, rep.DeadSubscriptions)
-	}
-	if len(rep.UnknownKinds) != 0 || len(rep.DeadSubscriptions) != 0 {
-		t.Fatalf("expected dormant catalog checks (no catalog declared); got unknown=%v dead-subs=%v",
-			rep.UnknownKinds, rep.DeadSubscriptions)
-	}
-
-	cat := foldCatalog(decls, nil)
-	if !cat.empty() {
-		t.Fatal("expected an empty catalog (only the seed) for the catalog-less topology")
+		t.Fatalf("expected Connected==true (engine-owned scope kinds need no operator decl); gaps: unknown=%v dead-subs=%v stalled=%v",
+			rep.UnknownKinds, rep.DeadSubscriptions, rep.StalledClosures)
 	}
 }
 

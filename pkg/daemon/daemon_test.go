@@ -34,6 +34,13 @@ func emitFactory(_ string, config json.RawMessage) (engine.Reaction, error) {
 func declarativeDoc() topology.Document {
 	return topology.Document{
 		Scopes: []topology.ScopeSpec{{Name: "request", Root: "request.received"}},
+		// Domain kinds: the external entry kind cli.task plus the kinds the
+		// subscribers emit. scope.request.closed is engine-owned (auto-registered).
+		Events: []topology.EventSpec{
+			{Kind: "cli.task"},
+			{Kind: "request.received"},
+			{Kind: "task.answered"},
+		},
 		Subscribers: []topology.SubscriberSpec{
 			{Name: "resolver", On: []string{"cli.task"}, In: "global", Emits: []string{"request.received"},
 				Body: topology.BodySpec{Kind: "emit", Config: map[string]any{"kind": "request.received"}}},

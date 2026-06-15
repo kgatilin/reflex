@@ -62,13 +62,13 @@ type Report struct {
 	// UnknownKinds are kinds in some node's Emits that are absent from the event
 	// catalog (doc 26 §4a / 27 §5): a node declares it produces a kind the type
 	// layer has never registered, so the kind has no schema and is not
-	// advertisable. DORMANT when the catalog is empty (opt-in-until-adopted).
+	// advertisable. Always checked (registration is required, CONCEPT §6).
 	// Sorted ascending.
 	UnknownKinds []string
 
 	// DeadSubscriptions are On patterns that match NO catalog kind (doc 26 §4a /
 	// 27 §5): a subscription that can never fire because the type layer carries
-	// no kind it could match. DORMANT when the catalog is empty. Sorted
+	// no kind it could match. Always checked (CONCEPT §6). Sorted
 	// ascending by pattern.
 	DeadSubscriptions []string
 
@@ -164,23 +164,24 @@ func Validate(decls ...Decl) (Report, error) {
 	rep.StalledClosures = stalledClosures(decls, nodes)
 	rep.CoRootedScopes = coRootedScopes(decls, nodes)
 
-	// Catalog checks (doc 26 §4a). The catalog is folded from the EventKind decls
+	// Catalog checks (CONCEPT §6). The catalog is folded from the EventKind decls
 	// alone here — Validate is pure over decls, with no log (dynamic
 	// event.registered facts are folded at runtime, and a changeset that adds
 	// them re-runs Validate against the grown catalog). These two checks are the
 	// STATIC type-layer gates; payload-conformance is runtime (engine.go).
 	//
-	// OPT-IN-UNTIL-ADOPTED (doc 26 §4a, the critical non-breaking rule): the
-	// catalog is a type layer a topology grows into. When NO catalog is declared
-	// (no EventKind decls, no event.registered facts), it is empty and the two
-	// checks are DORMANT — an unadopted catalog must not fail every existing
-	// topology. Only a NON-empty catalog gates Connected. The operator may
-	// tighten this to "always required" later.
+	// ALWAYS ON (no opt-in dormancy): registering an event is a first-class
+	// operation, distinct from subscribing to one or emitting one (CONCEPT §6).
+	// Every kind a subscriber emits or subscribes to MUST be in the catalog — a
+	// subscription to an unregistered event is a wiring bug, caught here always,
+	// not gated on whether the operator "adopted" a catalog. The engine
+	// self-registers the kinds it owns (the seed event.registered and each
+	// scope.{name}.closed/.budget_exhausted — foldCatalog), so the operator
+	// declares only domain kinds; an external input event is registered like any
+	// other.
 	cat := foldCatalog(decls, nil)
-	if !cat.empty() {
-		rep.UnknownKinds = unknownKinds(nodes, cat)
-		rep.DeadSubscriptions = deadSubscriptions(consumers, cat)
-	}
+	rep.UnknownKinds = unknownKinds(nodes, cat)
+	rep.DeadSubscriptions = deadSubscriptions(consumers, cat)
 
 	// View-type checks (doc 26 §4b): a projection's Type must be registered, and
 	// a node's Reads must name a declared projection. Unlike the catalog these
@@ -645,8 +646,8 @@ func patternsOverlap(a, b string) bool {
 // schema and is not advertisable — the node claims to produce a type the
 // vocabulary has never registered. The engine-emitted scope.{name}.closed
 // kinds are NOT in Emits (they are produced by the engine, not declared), so
-// this check is exactly "declared Emits vs catalog". Called only over a
-// non-empty catalog (opt-in dormancy is the caller's gate). Sorted ascending,
+// this check is exactly "declared Emits vs catalog". Always run (CONCEPT §6:
+// registration is required, no opt-in). Sorted ascending,
 // de-duplicated across nodes.
 func unknownKinds(nodes []Subscriber, cat catalog) []string {
 	seen := map[string]struct{}{}
@@ -673,9 +674,9 @@ func unknownKinds(nodes []Subscriber, cat catalog) []string {
 // catalog kind matches, the subscription is dead. Engine-emitted lifecycle
 // kinds (scope.{name}.closed) are not catalog entries unless registered, so a
 // scope.X.closed subscription is dead under a catalog that omits it — which is
-// correct: a topology that adopts the catalog should register the closure kinds
-// it consumes. Called only over a non-empty catalog. Sorted ascending,
-// de-duplicated across consumers.
+// correct, but the engine self-registers every declared scope's closure kinds
+// (foldCatalog), so a scope.X.closed subscription matches. Always run (CONCEPT
+// §6). Sorted ascending, de-duplicated across consumers.
 func deadSubscriptions(consumers []consumer, cat catalog) []string {
 	kinds := cat.kinds()
 	seen := map[string]struct{}{}

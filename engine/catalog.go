@@ -41,16 +41,14 @@ var seedSchema = json.RawMessage(`{` +
 // catalog is the materialised kind→schema fold. A nil/absent Schema entry means
 // "kind is known, no payload constraint" (doc 26 §4a: a registered kind without
 // a declared schema is still valid/advertisable). empty reports whether any
-// catalog entry was declared at all — the opt-in-dormancy switch (the static
-// checks gate Connected only over a NON-empty catalog; see validate.go).
+// operator kind was declared at all — a diagnostic used by tests (the catalog
+// checks themselves are ALWAYS on now, not gated on emptiness; see validate.go).
 type catalog struct {
 	schemas map[string]json.RawMessage
 	// declared counts only operator-supplied entries (EventKind decls +
-	// event.registered facts), NOT the engine's primordial seed kind. The seed
-	// is always present so a topology can subscribe to / register kinds, but it
-	// must not by itself flip the catalog from "absent" to "present" — otherwise
-	// the opt-in-until-adopted rule (doc 26 §4a / stage 2d) would never hold and
-	// every existing catalog-less topology would suddenly be gated.
+	// event.registered facts), NOT the engine's own kinds (the primordial seed
+	// and the self-registered scope closures). It backs the empty() diagnostic;
+	// the catalog checks no longer gate on it (they are always on, CONCEPT §6).
 	declared int
 }
 
@@ -68,6 +66,20 @@ type catalog struct {
 func foldCatalog(decls []Decl, log []Event) catalog {
 	c := catalog{schemas: map[string]json.RawMessage{}}
 	c.schemas[seedKind] = seedSchema // the axiom, always known
+
+	// The engine self-registers the kinds IT owns, through the same catalog
+	// (CONCEPT §6): a subscriber and the engine machinery register events by the
+	// one primitive operation, so the operator never hand-declares engine
+	// internals. For every scope the topology declares (a Scope decl or a
+	// node-rooted Subscriber.Scope) the engine will emit scope.{name}.closed and
+	// scope.{name}.budget_exhausted, so it registers those kinds here (nil schema:
+	// known, payload-blind — the closedPayload is the engine's own shape). These
+	// are engine-owned, NOT operator-declared, so they do not count toward
+	// `declared`.
+	for _, name := range engineScopeNames(decls) {
+		c.schemas["scope."+name+".closed"] = nil
+		c.schemas["scope."+name+".budget_exhausted"] = nil
+	}
 
 	for _, d := range decls {
 		ek, ok := d.(EventKind)
@@ -93,10 +105,38 @@ func foldCatalog(decls []Decl, log []Event) catalog {
 	return c
 }
 
+// engineScopeNames collects every scope name the topology declares, from both
+// rooting sources (doc 24 §5): a Scope decl and a node-rooted Subscriber.Scope.
+// The engine emits scope.{name}.closed/.budget_exhausted for each, so the
+// catalog registers those kinds on the engine's behalf (foldCatalog).
+func engineScopeNames(decls []Decl) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	for _, d := range decls {
+		switch v := d.(type) {
+		case Scope:
+			add(v.Name)
+		case Subscriber:
+			add(v.Scope)
+		}
+	}
+	return out
+}
+
 // empty reports whether the catalog carries no operator-declared kinds — only
-// the primordial seed. When empty, the static catalog checks are DORMANT (doc
-// 26 §4a opt-in-until-adopted): an unadopted catalog must not fail every
-// existing topology. The checks gate Connected only once the catalog is grown.
+// the engine's own (seed + scope closures). A diagnostic for tests; the catalog
+// checks are always on now (CONCEPT §6) and do not gate on it. (Historically an
+// empty catalog made the checks dormant — opt-in-until-adopted; that is gone.)
 func (c catalog) empty() bool { return c.declared == 0 }
 
 // has reports whether a concrete kind is in the catalog.

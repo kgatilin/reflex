@@ -18,7 +18,7 @@ package engine
 //     by node subscriptions — folding a fact into a view IS consuming it, so
 //     they are not dead-ends.
 func exampleTopology() []Decl {
-	return []Decl{
+	decls := []Decl{
 		// request scope: rooted by request.received (resolver), Budget bounds the
 		// loop kinds within the cone so the work SCC terminates (doc 24 §5).
 		Scope{
@@ -195,4 +195,23 @@ func exampleTopology() []Decl {
 			Type: TypeKV,
 		},
 	}
+	// Register every domain kind the topology emits or subscribes to (CONCEPT
+	// §6: registering an event is its own operation, always validated). The
+	// engine self-registers what it owns — the seed event.registered and each
+	// scope.request.closed/.budget_exhausted — so only domain kinds are listed
+	// here; cli.task is the external entry kind, registered like any other.
+	for _, k := range []string{
+		"cli.task", "request.received",
+		"state.updated.goal", "state.updated.status", "state.updated.context.found",
+		"sys.state.updated.project.context.found", "state.updated.sufficiency",
+		"state.updated.plan", "state.updated.plan.0.status",
+		"plan.requested", "task.needs_clarification", "task.answered",
+		"tool.fs.read.call", "tool.fs.search.call",
+		"tool.fs.read.result", "tool.fs.search.result",
+		"tool.fs.read.failed", "tool.fs.search.failed",
+		"tool.gotool.build.call", "tool.gotool.build.result", "tool.gotool.build.failed",
+	} {
+		decls = append(decls, EventKind{Kind: k})
+	}
+	return decls
 }

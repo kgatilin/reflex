@@ -47,6 +47,12 @@ func mustJSON(v any) json.RawMessage {
 func descriptorTopology() []engine.Decl {
 	return []engine.Decl{
 		engine.Scope{Name: "request", Root: "request.received"},
+		// Domain kinds the subscribers emit, plus the external entry kind
+		// (cli.task, fed externally, no subscriber emits it). scope.request.closed
+		// is engine-owned and registered automatically.
+		engine.EventKind{Kind: "cli.task"},
+		engine.EventKind{Kind: "request.received"},
+		engine.EventKind{Kind: "task.answered"},
 		engine.Subscriber{
 			Name: "resolver", On: []string{"cli.task"}, In: "global",
 			Emits: []string{"request.received"}, BodyKind: "emit", BodyConfig: mustJSON(emitConfig{Kind: "request.received"}),
