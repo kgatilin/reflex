@@ -174,3 +174,72 @@ func TestInGraphChangeset_RejectsDisconnected(t *testing.T) {
 		t.Errorf("live subscribers = %d, want 1 (island not grafted)", got)
 	}
 }
+
+// TestInGraphChangeset_RejectsSelfScope proves the foreign-scope rule (doc 31 §4)
+// on the in-graph path: a node running inside scope "ctrl" emits a changeset that
+// tries to add a subscriber in:ctrl — its OWN cone. The engine rejects it before
+// commit (a rejected fact carrying the reason, no node grafted, live table
+// unchanged), even though the node would otherwise wire up fine. A changeset
+// composes DOWNSTREAM scopes; it does not self-modify the cone it runs in.
+func TestInGraphChangeset_RejectsSelfScope(t *testing.T) {
+	ctx := context.Background()
+	res := func(s Subscriber) (Reaction, error) { return emitKind("noop"), nil }
+	e := New(WithBodyResolver(res))
+
+	// intruder lives in "ctrl" — the SAME scope the architect runs in, so the
+	// architect's changeset would be mutating its own cone.
+	intruder := Subscriber{Name: "intruder", On: []string{"go"}, In: "ctrl", Emits: []string{"noop"}, BodyKind: "x"}
+
+	architect := []Decl{
+		// ctrl is rooted by the external "go", so the architect node runs inside the
+		// ctrl cone and the changeset it emits is a member of that cone.
+		Scope{Name: "ctrl", Root: "go"},
+		EventKind{Kind: "go"},
+		Subscriber{
+			Name:  "architect",
+			On:    []string{"go"},
+			In:    "ctrl",
+			Emits: []string{KindChangesetRequested},
+			Body: ReactionFunc(func(_ context.Context, _ Event, _ Views) ([]Emit, error) {
+				return []Emit{{Kind: KindChangesetRequested, Payload: ChangesetRequestPayload([]Decl{intruder}, "architect")}}, nil
+			}),
+		},
+	}
+	if err := e.Apply(ctx, architect...); err != nil {
+		t.Fatalf("Apply architect: %v", err)
+	}
+	if _, err := e.Append(ctx, "go", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := e.Drain(ctx); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	var applied, rejected int
+	var reason string
+	for ev := range e.Events() {
+		switch KindOf(ev) {
+		case KindChangesetApplied:
+			applied++
+		case KindChangesetRejected:
+			rejected++
+			var rp rejectedPayload
+			_ = json.Unmarshal(ev.Payload, &rp)
+			if len(rp.Reasons) > 0 {
+				reason = rp.Reasons[0]
+			}
+		}
+	}
+	if rejected != 1 {
+		t.Errorf("changeset.rejected = %d, want 1 (self-scope mutation)", rejected)
+	}
+	if applied != 1 {
+		t.Errorf("changeset.applied = %d, want 1 (bootstrap Apply only)", applied)
+	}
+	if got := len(e.liveSubscribers()); got != 1 {
+		t.Errorf("live subscribers = %d, want 1 (intruder not grafted)", got)
+	}
+	if !anyContains([]string{reason}, "foreign-scope") || !anyContains([]string{reason}, "ctrl") {
+		t.Errorf("reject reason = %q, want it to name the foreign-scope violation on scope ctrl", reason)
+	}
+}

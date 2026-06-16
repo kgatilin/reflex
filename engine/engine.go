@@ -494,6 +494,14 @@ func (e *Engine) process(ctx context.Context, idx int, sr *scopeRuntime) {
 			e.appendSys(ev.Trace.SpanID, SubjChangesetRejected, mustMarshal(rejectedPayload{
 				Changeset: ev.Trace.SpanID, Reasons: []string{derr.Error()},
 			}))
+		} else if reasons := selfMutationReasons(sr.scopesOf(ev.Trace.SpanID), decls); len(reasons) > 0 {
+			// Foreign-scope rule (doc 31 §4): an in-graph changeset may build OTHER
+			// scopes but not the cone it is running in. Reject before commit so the
+			// live table is untouched; the requesting node hears the reasons on
+			// changeset.rejected, like any validation gap.
+			e.appendSys(ev.Trace.SpanID, SubjChangesetRejected, mustMarshal(rejectedPayload{
+				Changeset: ev.Trace.SpanID, Reasons: reasons,
+			}))
 		} else if applied, _ := e.commitChangeset(ev.Trace.SpanID, decls); applied {
 			sr.nodes = e.liveSubscribers()
 			sr.declared = declaredScopes(e.liveDecls())

@@ -202,3 +202,51 @@ func TestApply_ChangesetPipelineDrivesARun(t *testing.T) {
 		t.Errorf("scope.request.closed = %d, want 1 (G6)", closed)
 	}
 }
+
+// TestSelfMutationReasons covers the foreign-scope rule (doc 31 §4): a changeset
+// issued from inside a scope may compose OTHER scopes but not mutate the cone it
+// runs in. The pure check is exercised across every decl kind.
+func TestSelfMutationReasons(t *testing.T) {
+	issuing := map[string]struct{}{"architect": {}}
+
+	cases := []struct {
+		name    string
+		decls   []Decl
+		flagged bool
+	}{
+		{"empty issuing never flags", nil /*set below*/, false},
+		{"subscriber in own scope is flagged",
+			[]Decl{Subscriber{Name: "intruder", In: "architect"}}, true},
+		{"subscriber in foreign scope is fine",
+			[]Decl{Subscriber{Name: "worker", In: "request"}}, false},
+		{"subscriber in global is fine",
+			[]Decl{Subscriber{Name: "g", In: "global"}}, false},
+		{"subscriber with empty scope (global) is fine",
+			[]Decl{Subscriber{Name: "g", In: ""}}, false},
+		{"redeclaring own scope is flagged",
+			[]Decl{Scope{Name: "architect", Root: "task.architect"}}, true},
+		{"declaring a foreign scope is fine",
+			[]Decl{Scope{Name: "request", Root: "request.received"}}, false},
+		{"projection in own scope is flagged",
+			[]Decl{Projection{Name: "spy", In: "architect"}}, true},
+		{"event decl is catalog-global, never flagged",
+			[]Decl{EventKind{Kind: "x.k"}}, false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			iss := issuing
+			if c.name == "empty issuing never flags" {
+				iss = nil
+				c.decls = []Decl{Subscriber{Name: "intruder", In: "architect"}}
+			}
+			got := selfMutationReasons(iss, c.decls)
+			if c.flagged && len(got) == 0 {
+				t.Fatalf("expected a foreign-scope violation, got none")
+			}
+			if !c.flagged && len(got) != 0 {
+				t.Fatalf("expected no violation, got %v", got)
+			}
+		})
+	}
+}

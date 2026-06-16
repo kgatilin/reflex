@@ -303,6 +303,20 @@ func (sr *scopeRuntime) deliver(n Subscriber, span, scope, kind string) bool {
 	return false
 }
 
+// scopesOf returns the set of scope NAMES whose open cones the span is a member
+// of (doc 31 §4): the issuing scopes of an in-graph changeset, read off the same
+// membership fold delivery uses. Used to enforce the foreign-scope rule — a
+// changeset may not mutate a scope it is itself running in.
+func (sr *scopeRuntime) scopesOf(span string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, key := range sr.membership[span] {
+		if inst := sr.instances[key]; inst != nil {
+			out[inst.name] = struct{}{}
+		}
+	}
+	return out
+}
+
 // enter increments the obligation count of every cone the event belongs to
 // (doc 24 §5: dispatch of E → +1 up E's ancestor scope chain). Closed cones do
 // not appear in membership, so they are never incremented.

@@ -148,6 +148,54 @@ type projectionSpec struct {
 	Params json.RawMessage `json:"params,omitempty"`
 }
 
+// selfMutationReasons enforces the FOREIGN-SCOPE rule (doc 31 §4): a changeset
+// issued from inside scope X may compose OTHER scopes' topology but may not
+// add/modify a subscriber/scope/projection that lives in X itself — a running
+// cone is never rewritten out from under itself, and the authority boundary is
+// "you compose downstream, you do not self-modify." issuing is the set of scope
+// names the requesting changeset.requested event is a member of (its cones). It
+// returns one human-readable reason per offending decl; an empty result means the
+// changeset only touches foreign scopes (allowed). Event decls are catalog-global
+// (no scope) and a subscriber/projection in `global` targets no single cone, so
+// both are exempt. This is checked only for in-graph changesets — an operator
+// Apply has no issuing cone, so issuing is empty and nothing is flagged.
+func selfMutationReasons(issuing map[string]struct{}, decls []Decl) []string {
+	if len(issuing) == 0 {
+		return nil
+	}
+	flagged := func(scope, kind, name string) string {
+		return fmt.Sprintf(
+			"changeset may not modify its OWN scope %q (doc 31 §4 foreign-scope rule): %s %q targets the issuing cone — build a DIFFERENT scope, or have an operator apply this",
+			scope, kind, name)
+	}
+	var out []string
+	for _, d := range decls {
+		switch v := d.(type) {
+		case Subscriber:
+			in := v.In
+			if in == "" || in == "global" {
+				continue
+			}
+			if _, ok := issuing[in]; ok {
+				out = append(out, flagged(in, "subscriber", v.Name))
+			}
+		case Scope:
+			if _, ok := issuing[v.Name]; ok {
+				out = append(out, flagged(v.Name, "scope", v.Name))
+			}
+		case Projection:
+			in := string(v.In)
+			if in == "" || in == "global" {
+				continue
+			}
+			if _, ok := issuing[in]; ok {
+				out = append(out, flagged(in, "projection", v.Name))
+			}
+		}
+	}
+	return out
+}
+
 // opsOf serializes a batch of Decls into add-ops (doc 20). An EventKind becomes
 // an "event" op; the three wiring kinds become their respective ops. A Decl the
 // changeset model does not manage is skipped (there is no fourth wiring kind).
