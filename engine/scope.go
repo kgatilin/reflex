@@ -147,14 +147,25 @@ func instanceKey(name, rootSpan string) string { return name + "@" + rootSpan }
 // the caused_by chain; with single-cause descent that is the last request
 // instance the event is a member of, in membership (descent) order.
 func (sr *scopeRuntime) narrowestRequest(spanID string) string {
-	var req string
+	return sr.narrowestScope("request", spanID)
+}
+
+// narrowestScope generalises narrowestRequest to any scope NAME (doc 24 §6): the
+// root span of the deepest instance of that scope the event is a member of, or ""
+// if none. It is the resolver for a projection's named-scope HORIZON — so a
+// projection `in: <scope>` folds that scope's whole CONE (membersOf), not merely
+// the reader's ancestor chain, which would miss sibling events written by other
+// nodes in the same cone (e.g. a draft assembled from many sibling add events in
+// one turn).
+func (sr *scopeRuntime) narrowestScope(name, spanID string) string {
+	var root string
 	for _, key := range sr.membership[spanID] {
 		inst := sr.instances[key]
-		if inst != nil && inst.name == "request" {
-			req = inst.rootSpan
+		if inst != nil && inst.name == name {
+			root = inst.rootSpan
 		}
 	}
-	return req
+	return root
 }
 
 // closedPayload is the body of a scope.{name}.closed / .budget_exhausted fact:

@@ -102,9 +102,26 @@ func (pe *projectionEval) horizonCone(h Horizon, triggerSpan string) []int {
 		return idxs
 	case HorizonSession:
 		return pe.sessionCone(triggerSpan)
-	default: // HorizonRequest and the empty default
+	case HorizonRequest, "":
 		return pe.requestCone(triggerSpan)
+	default: // any other named scope: fold THAT scope's cone (doc 24 §6)
+		return pe.scopeCone(string(h), triggerSpan)
 	}
+}
+
+// scopeCone returns the cone of the trigger's covering instance of the NAMED scope
+// (doc 24 §6): every event that is a member of that instance — siblings included,
+// not merely the trigger's ancestor chain. This is what makes a projection
+// `in: <scope>` see the whole cone, e.g. a draft folded from many sibling pieces
+// emitted in one turn. Fallback (no covering instance) is the trigger's backward
+// walk to its roots, mirroring requestCone.
+func (pe *projectionEval) scopeCone(name, triggerSpan string) []int {
+	if pe.sr != nil {
+		if root := pe.sr.narrowestScope(name, triggerSpan); root != "" {
+			return pe.membersOf(instanceKey(name, root))
+		}
+	}
+	return pe.walk(triggerSpan, func(string) bool { return false })
 }
 
 // requestCone returns the trigger's covering request CONE — every event that is

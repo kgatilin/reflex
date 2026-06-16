@@ -426,3 +426,59 @@ func lastSpanOfKind(e *Engine, kind string) string {
 	}
 	return span
 }
+
+// TestProjection_NamedScopeHorizonFoldsSiblings proves a projection `in: <named
+// scope>` folds that scope's whole CONE — including SIBLING events written by
+// other firings in the same turn — not merely the reader's ancestor chain. This
+// is the fix the composable-draft control plane needs: a builder emits many
+// pieces as siblings in one turn, and a reader (the "build" step) must see ALL of
+// them. Before the fix, `in: ctrl` fell back to the ancestor-only walk (the
+// horizon switch hardcoded "request"), so a sibling piece was invisible.
+func TestProjection_NamedScopeHorizonFoldsSiblings(t *testing.T) {
+	ctx := context.Background()
+	obs := newObserved()
+
+	// fanout: on the cone root, emits THREE sibling "piece" events (same cause) in
+	// one turn, then a "probe" the reader fires on (also a sibling).
+	fanout := Subscriber{
+		Name: "fanout", On: []string{"ctrl.start"}, In: "ctrl",
+		Emits: []string{"piece", "probe"},
+		Body: ReactionFunc(func(_ context.Context, _ Event, _ Views) ([]Emit, error) {
+			return []Emit{
+				{Kind: "piece", Payload: json.RawMessage(`{"n":1}`)},
+				{Kind: "piece", Payload: json.RawMessage(`{"n":2}`)},
+				{Kind: "piece", Payload: json.RawMessage(`{"n":3}`)},
+				{Kind: "probe", Payload: json.RawMessage(`{}`)},
+			}, nil
+		}),
+	}
+	// reader: on probe (a SIBLING of the pieces), reads the draft log over the ctrl
+	// cone. It must see all three pieces even though none caused the probe.
+	reader := readerNode("reader", []string{"probe"}, "ctrl", []string{"draft"}, "", "draft", "", obs)
+
+	decls := []Decl{
+		Scope{Name: "ctrl", Root: "ctrl.start"},
+		Subscriber{Name: "resolver", On: []string{"test.msg"}, Emits: []string{"ctrl.start"}, Body: emitKind("ctrl.start")},
+		fanout,
+		reader,
+		Projection{Name: "draft", On: []string{"piece"}, In: Horizon("ctrl"), Type: TypeLog},
+	}
+
+	e := New()
+	e.install(decls...)
+	if _, err := e.Append(ctx, "test.msg", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := e.Drain(ctx); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	if len(obs.log) != 1 {
+		t.Fatalf("expected one reader firing, got %d", len(obs.log))
+	}
+	for _, kinds := range obs.log {
+		if len(kinds) != 3 {
+			t.Fatalf("draft folded %d pieces, want 3 (all siblings in the ctrl cone) — %v", len(kinds), kinds)
+		}
+	}
+}
