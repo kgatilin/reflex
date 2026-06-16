@@ -58,6 +58,20 @@ const (
 	KindChangesetApplied   = "topology.changeset.applied"
 	KindChangesetRejected  = "topology.changeset.rejected"
 
+	// KindEventsList is the in-graph CATALOG QUERY: a node emits it (no payload)
+	// to ask the engine for the whole live event vocabulary — every registered
+	// kind, including the host-backed tool hands (tool.fs.write.* etc.) the static
+	// prompt never enumerated — with each kind's schema and terminal flag. The
+	// engine answers with KindEventsCatalog caused by the request, so a composing
+	// agent is never BLIND to a kind it must wire or mark terminal. Like the
+	// changeset trio these are engine-owned (the engine consumes the request and
+	// writes the answer), so foldCatalog self-registers both, terminal.
+	KindEventsList    = "topology.events.list"
+	KindEventsCatalog = "topology.events.catalog"
+	// SubjEventsCatalog is the full sys subject the engine appends the catalog
+	// answer under; its kind tail is KindEventsCatalog (splitSubject strips "sys.").
+	SubjEventsCatalog = "sys.topology.events.catalog"
+
 	subjSubscriberRegistered   = "sys.subscriber.registered"
 	subjSubscriberDeregistered = "sys.subscriber.deregistered"
 	subjScopeDeclared          = "sys.scope.declared"
@@ -111,6 +125,23 @@ type appliedPayload struct {
 type rejectedPayload struct {
 	Changeset string   `json:"changeset"`
 	Reasons   []string `json:"reasons,omitempty"`
+}
+
+// EventsCatalogEntry is one registered kind in the engine's answer to
+// KindEventsList: its name, whether it is a graph leaf (terminal — no consumer
+// required), and its payload schema (advertised as function parameters to any
+// llm that emits it). A composing agent reads these to learn the full vocabulary
+// — notably the host tool hands the static prompt never listed.
+type EventsCatalogEntry struct {
+	Kind     string          `json:"kind"`
+	Terminal bool            `json:"terminal,omitempty"`
+	Schema   json.RawMessage `json:"schema,omitempty"`
+}
+
+// eventsCatalogPayload is the KindEventsCatalog fact: the whole live catalog,
+// sorted by kind for a stable read-model.
+type eventsCatalogPayload struct {
+	Events []EventsCatalogEntry `json:"events"`
 }
 
 // subscriberSpec is the serializable wiring of a Node — everything but Body (doc 20 /

@@ -45,8 +45,8 @@ func TestValidate_RemovingNotifyMakesTaskAnsweredADeadEnd(t *testing.T) {
 		t.Fatalf("expected task.needs_clarification in dead-ends; got %v", rep.DeadEnds)
 	}
 	if !anyContains(rep.Suggestions, "task.answered") ||
-		!anyContains(rep.Suggestions, "add an llm node") {
-		t.Fatalf("expected an llm-bridge suggestion for task.answered; got %v", rep.Suggestions)
+		!anyContains(rep.Suggestions, "is a dead-end") {
+		t.Fatalf("expected a dead-end suggestion for task.answered; got %v", rep.Suggestions)
 	}
 }
 
@@ -390,6 +390,53 @@ func TestValidate_DidYouMeanForUnknownKinds(t *testing.T) {
 		if !anyContains(rep.Suggestions, "available tool kinds are") ||
 			!anyContains(rep.Suggestions, "tool.fs.read.call") {
 			t.Fatalf("expected the available tool kinds listed for tool.bash.call; got %v", rep.Suggestions)
+		}
+	})
+}
+
+// TestValidate_DeadEndGuidanceNamesCycleFreeConsumer proves a dead-end suggestion
+// names the existing node(s) that could consume the kind WITHOUT forming an
+// unbounded cycle (doc 31 §5) — concrete wiring, not a generic "add an llm node".
+// And when no such node exists, it falls back to "register it terminal".
+func TestValidate_DeadEndGuidanceNamesCycleFreeConsumer(t *testing.T) {
+	t.Run("names an acyclic consumer in the draft", func(t *testing.T) {
+		decls := []Decl{
+			Scope{Name: "worker", Root: "request.received", Budget: map[string]int{"llm.message": 5}},
+			// agent emits orphan.kind (a dead-end) plus llm.message.
+			Subscriber{Name: "agent", In: "worker", On: []string{"request.received"},
+				Emits: []string{"llm.message", "orphan.kind"}, BodyKind: "llm"},
+			// collector consumes llm.message and only emits a terminal — it cannot
+			// reach agent, so wiring orphan.kind into it is acyclic.
+			Subscriber{Name: "collector", In: "worker", On: []string{"llm.message"},
+				Emits: []string{"request.terminal"}, BodyKind: "entry"},
+			EventKind{Kind: "request.received"},
+			EventKind{Kind: "llm.message"},
+			EventKind{Kind: "orphan.kind"},
+			EventKind{Kind: "request.terminal", Terminal: true},
+		}
+		rep, _ := Validate(decls...)
+		if !anyContains(rep.Suggestions, `"orphan.kind"`) ||
+			!anyContains(rep.Suggestions, "collector") ||
+			!anyContains(rep.Suggestions, "without forming an unbounded cycle") {
+			t.Fatalf("expected orphan.kind guidance to name collector as a cycle-free consumer; got %v", rep.Suggestions)
+		}
+	})
+
+	t.Run("falls back to terminal when no acyclic consumer exists", func(t *testing.T) {
+		// A lone unbudgeted node emitting a leaf: the only possible consumer is
+		// itself (a self-loop), which is unbounded — so no candidate, and the
+		// guidance must steer to registering the kind terminal.
+		decls := []Decl{
+			Subscriber{Name: "agent", In: "global", On: []string{"request.received"},
+				Emits: []string{"llm.message"}, BodyKind: "llm"},
+			EventKind{Kind: "request.received"},
+			EventKind{Kind: "llm.message"},
+		}
+		rep, _ := Validate(decls...)
+		if !anyContains(rep.Suggestions, `"llm.message"`) ||
+			!anyContains(rep.Suggestions, "register it terminal") ||
+			!anyContains(rep.Suggestions, "no existing node") {
+			t.Fatalf("expected llm.message guidance to steer to terminal; got %v", rep.Suggestions)
 		}
 	})
 }

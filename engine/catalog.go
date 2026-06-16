@@ -85,6 +85,16 @@ func foldCatalog(decls []Decl, log []Event) catalog {
 		c.terminal[k] = struct{}{}
 	}
 
+	// The catalog QUERY affordance is engine-owned the same way: a node emits
+	// KindEventsList and the engine answers with KindEventsCatalog. Both are
+	// consumed/produced by the engine, not a subscriber, so self-register them
+	// terminal — otherwise a node emitting topology.events.list reads as a
+	// dead-end and a topology.events.catalog a node subscribes to reads as unknown.
+	for _, k := range []string{KindEventsList, KindEventsCatalog} {
+		c.schemas[k] = nil
+		c.terminal[k] = struct{}{}
+	}
+
 	// The engine self-registers the kinds IT owns, through the same catalog
 	// (CONCEPT §6): a subscriber and the engine machinery register events by the
 	// one primitive operation, so the operator never hand-declares engine

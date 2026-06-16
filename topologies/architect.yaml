@@ -129,6 +129,7 @@ subscribers:
       - topology.subscriber.add
       - topology.projection.add
       - topology.build
+      - topology.events.list           # ask the engine for the full event vocabulary
       - task.new
       - architect.message
       - architect.empty
@@ -207,6 +208,8 @@ projections:
       - topology.subscriber.add
       - topology.projection.add
       - topology.build
+      - topology.events.list
+      - topology.events.catalog        # the engine's answer to a list call
       - topology.changeset.applied
       - topology.changeset.rejected
       - topology.apply.failed
@@ -287,10 +290,24 @@ projections:
         ── HANDS the host already launched (wire a subscriber NAMED after one) ──
           tool.fs.read.call    → tool.fs.read.result | tool.fs.read.failed
           tool.fs.edit.call    → tool.fs.edit.result | tool.fs.edit.failed
+          tool.fs.write.call   → tool.fs.write.result | tool.fs.write.failed
           tool.fs.search.call  → tool.fs.search.result | tool.fs.search.failed
           tool.py.test.call    → tool.py.test.result | tool.py.test.failed
         A subscriber named exactly e.g. "tool.fs.read.call" (no body) runs that
         tool; its parameter schema is auto-advertised to any llm that emits it.
+        The host mounts ALL of these the moment your worker wires ANY one of them,
+        and each .result/.failed kind it produces needs a consumer (your llm worker
+        should subscribe `on:` every result/failed kind, OR you mark the unused ones
+        terminal) — otherwise it is a dead-end. This list may be incomplete: call
+        topology.events.list() to see the AUTHORITATIVE vocabulary.
+
+        ── DISCOVER — list the available events ─────────────────────────
+          topology.events.list() — the engine answers (in your next-turn history)
+          with topology.events.catalog: EVERY registered kind, its terminal flag,
+          and its schema. Call it when a rejection names a kind you did not expect
+          (e.g. a host hand's *.result you must consume or mark terminal), or to
+          confirm a kind exists before you wire it. You are never blind to the
+          vocabulary — query it.
 
         ── PROJECTION type for an llm ───────────────────────────────────
         type: llm.history  params: { system, answer, task_kinds: [kind...],
@@ -304,6 +321,19 @@ projections:
             topology.apply.failed — fix pieces and call task.new again. This is your
             one finishing move.
           • topology.build() — OPTIONAL: validate the draft without launching.
+
+        ── READING A REJECTION (this is how you converge) ───────────────
+        A rejection's reasons are SPECIFIC and actionable — do not re-dispatch the
+        same draft. Common reasons and their fix:
+          • "kind X is a dead-end … wire it into the `on:` of [A, B] … or register
+            it terminal" — the reason NAMES where X connects without a cycle. Either
+            add X to that node's `on:` (topology.subscriber.add the node again with
+            the kind added — adds are last-writer-wins by name), OR register it
+            terminal: topology.event.add(kind: X, terminal: true). A silent llm.empty
+            and an unused host *.result are leaves — mark them terminal.
+          • "did you mean Y?" — you misspelled/invented a kind; use Y.
+        If a reason mentions a kind you did not register, it is a host hand —
+        topology.events.list() shows them all.
 
         ── TERMINATION (the host waits on this) ─────────────────────────
         Every loop MUST sit in a SCOPE whose `budget` bounds the looping kind, and
@@ -334,6 +364,7 @@ projections:
         - topology.subscriber.add
         - topology.projection.add
         - topology.build
+        - topology.events.list
         - task.new
         - architect.message
         - llm.usage

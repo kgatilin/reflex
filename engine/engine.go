@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"sort"
 )
 
 // Engine is the kernel: one append-only log, one dispatcher. Its whole
@@ -508,6 +509,15 @@ func (e *Engine) process(ctx context.Context, idx int, sr *scopeRuntime) {
 		}
 	}
 
+	// Catalog query (changeset.go KindEventsList): a node asks for the live event
+	// vocabulary; the engine answers with the whole catalog caused by the request,
+	// so the answer lands in the requesting node's cone — a projection/history in
+	// that cone folds it on the next turn. Engine-authoritative: foldCatalog
+	// includes the host-backed tool hands the static prompt never enumerated.
+	if kind == KindEventsList {
+		e.appendSys(ev.Trace.SpanID, SubjEventsCatalog, mustMarshal(e.eventsCatalog()))
+	}
+
 	e.fanOut(ctx, idx, cls, scope, kind, sr)
 
 	// Leave the cones; any that reach zero quiesce and close exactly once.
@@ -667,6 +677,29 @@ func (e *Engine) emitScopeFact(ctx context.Context, inst *scopeInstance, reason,
 func (e *Engine) catalogSchema(kind string) (json.RawMessage, bool) {
 	cat := foldCatalog(e.liveDecls(), e.log)
 	return cat.schemaOf(kind)
+}
+
+// eventsCatalog folds the live catalog into the KindEventsList answer: every
+// registered kind (operator-declared, dynamically registered, AND host-backed
+// hands the expander mounted) with its terminal flag and schema, sorted by kind
+// for a stable read-model. This is the engine-authoritative vocabulary a
+// composing agent reads so it is never blind to a kind it must wire or terminate.
+func (e *Engine) eventsCatalog() eventsCatalogPayload {
+	cat := foldCatalog(e.liveDecls(), e.log)
+	kinds := cat.kinds()
+	sort.Strings(kinds)
+	var out eventsCatalogPayload
+	for _, k := range kinds {
+		entry := EventsCatalogEntry{Kind: k}
+		if _, ok := cat.terminal[k]; ok {
+			entry.Terminal = true
+		}
+		if s, ok := cat.schemaOf(k); ok && len(s) > 0 {
+			entry.Schema = s
+		}
+		out.Events = append(out.Events, entry)
+	}
+	return out
 }
 
 // catalogLookup folds the catalog once and returns a per-dispatch schema lookup

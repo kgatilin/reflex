@@ -118,6 +118,87 @@ func TestInGraphChangeset_AppliesAndLiveRefreshes(t *testing.T) {
 	}
 }
 
+// TestEventsList_AppendsLiveCatalog proves the catalog-query affordance
+// (changeset.go KindEventsList): a node emits topology.events.list and the engine
+// answers with topology.events.catalog, caused by the request, carrying every
+// registered kind with its terminal flag + schema. This is the "list all available
+// events" ability a composing agent uses so it is never blind to a kind it must
+// wire or mark terminal.
+func TestEventsList_AppendsLiveCatalog(t *testing.T) {
+	ctx := context.Background()
+	e := New()
+
+	topo := []Decl{
+		EventKind{Kind: "go"},
+		EventKind{Kind: "domain.thing", Schema: json.RawMessage(`{"type":"object"}`)},
+		EventKind{Kind: "domain.leaf", Terminal: true},
+		Subscriber{
+			Name:  "asker",
+			On:    []string{"go"},
+			Emits: []string{KindEventsList},
+			Body: ReactionFunc(func(_ context.Context, _ Event, _ Views) ([]Emit, error) {
+				return []Emit{{Kind: KindEventsList, Payload: json.RawMessage(`{}`)}}, nil
+			}),
+		},
+	}
+	if err := e.Apply(ctx, topo...); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if _, err := e.Append(ctx, "go", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := e.Drain(ctx); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	var listSpan string
+	var cat *eventsCatalogPayload
+	var catCause string
+	for ev := range e.Events() {
+		switch KindOf(ev) {
+		case KindEventsList:
+			listSpan = ev.Trace.SpanID
+		case KindEventsCatalog:
+			var p eventsCatalogPayload
+			if err := json.Unmarshal(ev.Payload, &p); err != nil {
+				t.Fatalf("unmarshal catalog: %v", err)
+			}
+			cat = &p
+			if len(ev.Trace.CausedBy) > 0 {
+				catCause = ev.Trace.CausedBy[0]
+			}
+		}
+	}
+	if cat == nil {
+		t.Fatal("no topology.events.catalog fact was appended in answer to the list")
+	}
+	if catCause != listSpan {
+		t.Errorf("catalog caused_by = %q, want the list request span %q (so it lands in the asker's cone)", catCause, listSpan)
+	}
+
+	byKind := map[string]EventsCatalogEntry{}
+	for _, en := range cat.Events {
+		byKind[en.Kind] = en
+	}
+	// Operator-declared kinds are present, with schema + terminal flags carried.
+	if en, ok := byKind["domain.thing"]; !ok || len(en.Schema) == 0 {
+		t.Errorf("catalog missing domain.thing with its schema; got %+v", byKind["domain.thing"])
+	}
+	if en, ok := byKind["domain.leaf"]; !ok || !en.Terminal {
+		t.Errorf("catalog missing domain.leaf as terminal; got %+v", byKind["domain.leaf"])
+	}
+	// The query affordance self-registers terminal, so it lists itself.
+	if en, ok := byKind[KindEventsList]; !ok || !en.Terminal {
+		t.Errorf("catalog should list %q as terminal; got %+v", KindEventsList, en)
+	}
+	// Sorted, stable read-model.
+	for i := 1; i < len(cat.Events); i++ {
+		if cat.Events[i-1].Kind > cat.Events[i].Kind {
+			t.Fatalf("catalog not sorted at %d: %q > %q", i, cat.Events[i-1].Kind, cat.Events[i].Kind)
+		}
+	}
+}
+
 // TestInGraphChangeset_RejectsDisconnected proves a node-emitted changeset that
 // would disconnect the graph is rejected in-graph (a rejected fact on the log,
 // no worker added) rather than applied — the same connectivity gate an operator

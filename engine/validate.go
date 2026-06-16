@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 
 	graphval "github.com/kgatilin/archmotif/pkg/graphval"
@@ -210,7 +211,13 @@ func Validate(decls ...Decl) (Report, error) {
 	rep.UnknownViewTypes = unknownViewTypes(decls)
 	rep.DanglingReads = danglingReads(decls, nodes)
 
-	rep.Suggestions = suggestions(rep, cat.kinds())
+	// For each dead-end, find where it can connect in the CURRENT draft without
+	// forming an unbounded cycle (doc 31 §5) — the rejection then names concrete
+	// wiring targets, not a generic "add an llm node". Needs the graph (reachability
+	// for the cycle test), the per-node emits (producers), and the scope facts.
+	deadEndCands := deadEndCandidates(rep.DeadEnds, nodes, emitsByNode, g, budgeted, topLevel, scopeRoot)
+
+	rep.Suggestions = suggestions(rep, cat.kinds(), deadEndCands)
 	rep.Connected = len(rep.DeadEnds) == 0 &&
 		len(rep.UnreachableNodes) == 0 &&
 		len(rep.Fragments) == 0 &&
@@ -512,6 +519,115 @@ func deadEnds(nodes []Subscriber, consumers []consumer, terminal map[string]stru
 		return nil, fmt.Errorf("engine: dead-end check: %w", err)
 	}
 	return dead, nil
+}
+
+// deadEndCandidates maps each dead-end kind to the existing node names that could
+// consume it WITHOUT introducing an unbounded cycle (doc 31 §5) — the concrete
+// answer to "where can this connect, given the draft, with no cycle?". A node C is
+// a candidate iff (a) C does not already consume the kind, (b) the producer→C
+// delivery is not severed by a top-level scope boundary (deliverableStatic), and
+// (c) adding the edge forms NO cycle, OR the cycle it would form lives wholly
+// inside budgeted scopes (a bounded loop the kernel already permits). Candidates
+// are ranked acyclic-first, llm-bodied-first (an llm can consume anything), and
+// the top few are returned. Empty ⇒ the kind is a genuine leaf: the only fix is to
+// register it terminal.
+func deadEndCandidates(deadEnds []string, nodes []Subscriber, emitsByNode map[string][]string, g *graphval.Graph, budgeted, topLevel map[string]struct{}, scopeRoot map[string]string) map[string][]string {
+	out := map[string][]string{}
+	for _, k := range deadEnds {
+		// Producers of k: the nodes whose effective emits carry it.
+		var producers []Subscriber
+		for _, n := range nodes {
+			if slices.Contains(emitsByNode[n.Name], k) {
+				producers = append(producers, n)
+			}
+		}
+		type cand struct {
+			name string
+			rank int
+		}
+		var cands []cand
+		for _, c := range nodes {
+			if consumes(c, k) {
+				continue // already a consumer — not a gap to fill (and not a dead-end then)
+			}
+			deliverable := false
+			for _, p := range producers {
+				if deliverableStatic(k, p.In, c.In, topLevel, scopeRoot) {
+					deliverable = true
+					break
+				}
+			}
+			if !deliverable {
+				continue // a sibling top-level scope never receives it — not a real target
+			}
+			// Cycle test: the new edge is producer→C, so it closes a cycle iff C can
+			// already reach some producer. ReachableFromNames([C]) includes C itself,
+			// so a producer that is C (self-loop) counts as cyclic too.
+			reach := map[string]struct{}{}
+			for _, nm := range g.ReachableFromNames([]string{c.Name}) {
+				reach[nm] = struct{}{}
+			}
+			cyclic := false
+			for _, p := range producers {
+				if _, ok := reach[p.Name]; ok {
+					cyclic = true
+					break
+				}
+			}
+			rank := 0
+			if cyclic {
+				// A cycle is acceptable only if every node it would run through is
+				// inside a budgeted scope (doc 24 §5 "loops are budgets"). Conservative
+				// proxy: C and every producer budgeted; otherwise skip C entirely so we
+				// never propose a wiring that re-introduces an unbounded loop.
+				if _, ok := budgeted[c.In]; !ok {
+					continue
+				}
+				bounded := true
+				for _, p := range producers {
+					if _, ok := budgeted[p.In]; !ok {
+						bounded = false
+						break
+					}
+				}
+				if !bounded {
+					continue
+				}
+				rank = 2
+			}
+			if c.BodyKind == "llm" {
+				rank-- // an llm node can consume anything — prefer it within its tier
+			}
+			cands = append(cands, cand{c.Name, rank})
+		}
+		sort.SliceStable(cands, func(i, j int) bool {
+			if cands[i].rank != cands[j].rank {
+				return cands[i].rank < cands[j].rank
+			}
+			return cands[i].name < cands[j].name
+		})
+		var names []string
+		for _, c := range cands {
+			names = append(names, c.name)
+			if len(names) >= 3 {
+				break
+			}
+		}
+		if len(names) > 0 {
+			out[k] = names
+		}
+	}
+	return out
+}
+
+// consumes reports whether a node's On matches the kind (it already consumes it).
+func consumes(n Subscriber, kind string) bool {
+	for _, pat := range n.On {
+		if subjectMatch(pat, kind) {
+			return true
+		}
+	}
+	return false
 }
 
 // unreachable returns the nodes that are neither a root nor reachable
@@ -821,12 +937,24 @@ func budgetedScopes(decls []Decl) map[string]struct{} {
 // kinds, used to add a "did you mean X?" hint to an unknown kind / dead
 // subscription — a meta-agent that misspells a kind (separator confusion, a typo,
 // or an invented tool) gets steered to the real one (doc 27 §5).
-func suggestions(rep Report, catKinds []string) []string {
+func suggestions(rep Report, catKinds []string, deadEndCands map[string][]string) []string {
 	var out []string
 	for _, k := range rep.DeadEnds {
-		out = append(out, fmt.Sprintf(
-			"kind %q is a dead-end — add an llm node that consumes %q and emits the entry kinds of the disconnected fragment",
-			k, k))
+		// Cycle-aware wiring guidance (doc 31 §5): name the existing nodes that can
+		// consume k without forming an unbounded cycle, so a composing agent knows
+		// exactly where it connects in the current draft. Always offer the leaf
+		// escape hatch — registering k terminal — since some emitted kinds (a
+		// silent llm.empty, a host hand's *.result the worker doesn't use) are
+		// genuinely outputs, not loop edges.
+		if cands := deadEndCands[k]; len(cands) > 0 {
+			out = append(out, fmt.Sprintf(
+				"kind %q is a dead-end (emitted but consumed by nothing) — wire it into the `on:` of one of %v (they consume it without forming an unbounded cycle), or register it terminal (a topology.event.add with kind %q, terminal:true) if it is a leaf",
+				k, cands, k))
+		} else {
+			out = append(out, fmt.Sprintf(
+				"kind %q is a dead-end (emitted but consumed by nothing) — no existing node can consume it without an unbounded cycle, so register it terminal (a topology.event.add with kind %q, terminal:true) if it is a leaf, or add a budgeted node that consumes it",
+				k, k))
+		}
 	}
 	for _, n := range rep.UnreachableNodes {
 		out = append(out, fmt.Sprintf(
