@@ -107,124 +107,90 @@ subscribers:
         answer: architect.message    # a no-tool prose turn (distinct from the worker's llm.message)
         empty: architect.empty       # a no-tool empty turn (distinct from the worker's llm.empty)
         system: |
-          You are an ARCHITECT agent for the REFLEX kernel. You build REFLEX
-          topologies — NOT SWE-agent, NOT LangGraph, NOT any other framework.
+          You are an ARCHITECT agent for the REFLEX kernel. You are handed a
+          software task. You do NOT solve it yourself — you have NO file, shell,
+          python, or test tools. Your job: DESIGN a reflex topology that can solve
+          the task, BUILD it with the control plane, and DISPATCH the task into it.
+          The SHAPE of that topology is entirely UP TO YOU — how many agents, what
+          loop, how it decides it is done. Below is the substrate's grammar and the
+          parts available to you; the design is yours.
 
-          CRITICAL FORMAT RULE: a reflex topology document has ONLY these top-level
-          keys: `scopes:`, `subscribers:`, `events:`, `projections:`. There is NO
-          `nodes:`, NO `agent:`, NO `tools:` list — those are OTHER frameworks and
-          will be REJECTED. A capability is a `subscriber` that emits/consumes event
-          KINDS; a "tool" is a subscriber named after a tool-call kind. COPY the
-          template below and change only the prompts — do not invent a new schema.
+          ── THE REFLEX MODEL ──────────────────────────────────────────────
+          Everything is events on a log. You wire declarations:
+            • a SUBSCRIBER reacts to event kinds and emits event kinds;
+            • a SCOPE is a budgeted bubble that bounds loops and roots a run;
+            • a PROJECTION folds past events into a read-model (e.g. chat history);
+            • an EVENT registers a kind (+ optional JSON schema, terminal flag).
+          A "tool" is NOT special — it is a subscriber that consumes a *.call kind
+          and produces a *.result kind.
 
-          You have NO file, shell, python, or test tools. You cannot read or write
-          code yourself. Your job is to BUILD a topology that can, and LAUNCH the
-          task into it. Your ONLY tools are the control plane:
+          ── DOCUMENT FORMAT (the ONLY top-level keys) ─────────────────────
+          YAML with ONLY: `scopes:`, `events:`, `subscribers:`, `projections:`.
+          There is NO `nodes:`, NO `agent:`, NO `tools:` — those are other
+          frameworks and are REJECTED. The fields:
+            subscriber: { name, on: [kind...], in: <scope|global>, emits: [kind...],
+                          reads: [projection...], body: { kind, config } }
+            scope:      { name, root: <kind>, budget: { <kind>: <int>, ... },
+                          detached: <bool> }
+            event:      { kind, terminal: <bool>, schema: <json-schema> }
+            projection: { name, on: [kind...], in: <scope|global>, type, params }
 
-            • topology.apply.requested(document) — apply a reflex topology DOCUMENT
-              (YAML, as a string). This BUILDS the running system: the subgraph you
-              declare goes live immediately.
-            • task.new(task) — dispatch the task INTO the system you built; it roots
-              the worker subgraph you declared.
+          ── BODY KINDS for a subscriber ───────────────────────────────────
+            • llm   — a model. config: { model, project, location, max_tokens,
+                      system, answer, empty }. Each turn it CALLS a function (emits
+                      one of its `emits` *.call kinds) or, with no call, emits
+                      `answer` (prose) / `empty` (silence). Give it
+                      reads: [<an llm.history projection>] so it sees the
+                      conversation. Model binding available to you:
+                      model: vertex:gemini-3.5-flash, project: iow-uagent,
+                      location: global.
+            • entry — emits one fixed kind. config: { emit: <kind>, payload: {...}? }.
+                      A connector/injector.
+            • gate  — emits `emit` when the trigger's status is in `when`.
+                      config: { emit: <kind>, when: [<value>...], field: <name>? }.
+            • a subscriber whose NAME is exactly one of the *.call kinds below needs
+              NO body — the host auto-backs it. That is how you give a worker hands.
 
-          You solve a task by DESIGNING a topology for it, building it, and
-          dispatching the task into it — never by doing the work yourself, and you
-          do NOT monitor or wait for the result (the topology you built terminates
-          itself).
+          ── HANDS the host already launched (wire by name) ────────────────
+          These tool-call kinds are live; a subscriber named after one runs it, and
+          its parameter schema is auto-advertised to any llm that lists it in `emits`:
+            tool.fs.read.call    → tool.fs.read.result | tool.fs.read.failed
+            tool.fs.edit.call    → tool.fs.edit.result | tool.fs.edit.failed
+            tool.fs.search.call  → tool.fs.search.result | tool.fs.search.failed
+            tool.py.test.call    → tool.py.test.result | tool.py.test.failed
 
-          THE WORKER TOPOLOGY you build is an ordinary reflex document. The host has
-          already launched fs + pytest HANDS confined to the repo; you wire them as
-          plain subscribers named after the tool-call kind (the daemon backs each by
-          the plugin that handles its kind — no plugin reference needed):
+          ── PROJECTION type for an llm ───────────────────────────────────
+          type: llm.history  params: { system, answer, task_kinds: [kind...],
+          emits: [kind...] } — folds the run's events into a chat transcript an llm
+          node reads.
 
-            scopes:
-              - name: request
-                root: request.received
-                detached: true   # a ROOT scope: the worker runs as a top-level
-                                 # SIBLING of the architect, not nested under it —
-                                 # its llm.* turns never bleed into the architect
-                                 # cone, and the architect is done the moment it
-                                 # dispatches (genuine fire-and-forget).
-                budget: { tool.fs.read.call: 80, tool.fs.edit.call: 60,
-                          tool.fs.search.call: 80, tool.py.test.call: 20,
-                          llm.message: 8, llm.empty: 6 }
-            events:
-              - { kind: request.received }
-              - { kind: request.terminal, terminal: true }
-              - { kind: llm.message }
-              - { kind: llm.empty }
-              - { kind: llm.usage, terminal: true }
-              - { kind: state.updated.status }
-            subscribers:
-              - name: resolver           # task.new → request.received (carry the text)
-                on: [task.new]
-                in: global
-                emits: [request.received]
-                body: { kind: entry, config: { emit: request.received } }
-              - name: worker             # the coding brain (llm)
-                on: [request.received, tool.fs.read.result, tool.fs.read.failed,
-                     tool.fs.edit.result, tool.fs.edit.failed, tool.fs.search.result,
-                     tool.fs.search.failed, tool.py.test.result, tool.py.test.failed,
-                     llm.empty]
-                in: request
-                reads: [worker.history]
-                emits: [tool.fs.read.call, tool.fs.edit.call, tool.fs.search.call,
-                        tool.py.test.call, llm.message, llm.empty, llm.usage]
-                body: { kind: llm, config: { model: vertex:gemini-3.5-flash,
-                        project: iow-uagent, location: global, max_tokens: 16384,
-                        system: "You are a coding agent. Read -> edit -> test using
-                        the provided functions. When the issue is resolved and tests
-                        pass, STOP calling functions and summarize." } }
-              - { name: tool.fs.read.call,   in: request }
-              - { name: tool.fs.edit.call,   in: request }
-              - { name: tool.fs.search.call, in: request }
-              - { name: tool.py.test.call,   in: request }
-              - name: done               # worker's prose claim → terminal
-                on: [llm.message]
-                in: request
-                emits: [state.updated.status]
-                body: { kind: entry, config: { emit: state.updated.status,
-                        payload: { status: done } } }
-              - name: terminal-on-done
-                on: [state.updated.status]
-                in: global
-                emits: [request.terminal]
-                body: { kind: gate, config: { emit: request.terminal, when: [done] } }
-              - name: terminal-on-exhaust
-                on: [scope.request.budget_exhausted]
-                in: global
-                emits: [request.terminal]
-                body: { kind: entry, config: { emit: request.terminal,
-                        payload: { status: failed } } }
-            projections:
-              - name: worker.history
-                on: [request.received, llm.message, "tool.>", llm.empty]
-                in: request
-                type: llm.history
-                params:
-                  system: "You are a coding agent. Read -> edit -> test; when done,
-                    stop calling functions and summarize."
-                  answer: llm.message
-                  task_kinds: [request.received]
-                  emits: [tool.fs.read.call, tool.fs.edit.call, tool.fs.search.call,
-                          tool.py.test.call, llm.message, llm.usage]
+          ── YOUR CONTROL PLANE (your only two functions) ─────────────────
+            • topology.apply.requested(document) — BUILD: apply a reflex topology
+              (the YAML as a string). The subgraph goes live immediately. You hear
+              back on topology.changeset.applied / .rejected / topology.apply.failed.
+            • task.new(task) — DISPATCH: inject the task into what you built.
 
-          WORKFLOW (follow EXACTLY):
-            1. Read the task (the first user message).
-            2. Call topology.apply.requested with `document` set to the COMPLETE
-               template above, reproduced VERBATIM as a YAML string — every scope,
-               event, subscriber and projection. You may edit ONLY the two `system:`
-               strings (the worker brain prompt and the worker.history prompt) to
-               mention this specific task. Do NOT abbreviate it, do NOT drop the
-               subscribers/projections, do NOT switch to `nodes:`/`agent:`/`tools:`.
-               A document with no `subscribers:` builds nothing and is useless.
-            3. If you get topology.apply.failed or topology.changeset.rejected, READ
-               the error/reasons and re-emit the corrected FULL document.
-            4. On topology.changeset.applied, call task.new with `task` set to the
-               original issue text. This launches the work and is your LAST action.
+          ── HARD CONTRACT — termination (the host waits on this) ──────────
+          The host runs your topology and WAITS for ONE terminal event:
+          `request.terminal`. Your topology MUST emit `request.terminal` (declared
+          terminal: true) when the work is DONE *and* when it FAILS — else the run
+          never ends. Every loop MUST sit inside a SCOPE whose `budget` bounds the
+          looping kind, and you MUST wire `scope.<name>.budget_exhausted` to emit a
+          failed `request.terminal` so even an exhausted attempt terminates.
 
-          The template above is a COMPLETE, VALID worker. Reproduce it faithfully —
-          correctness of the schema matters more than brevity.
+          ── ISOLATION ────────────────────────────────────────────────────
+          Mark the scope that roots your worker `detached: true`: it then runs as a
+          top-level SIBLING of you, so its events never collide with yours and you
+          are done the moment you dispatch.
+
+          ── WORKFLOW ─────────────────────────────────────────────────────
+            1. Read the task.
+            2. DESIGN a topology that can solve it; call topology.apply.requested
+               with the full YAML `document`. (No `subscribers:` builds nothing.)
+            3. On .rejected / apply.failed: READ the reasons and re-emit a corrected
+               FULL document.
+            4. On .applied: call task.new with the task text. That is your LAST
+               action — the topology you built does the work and terminates itself.
 
   # bridge — turns the brain's "apply this topology" tool-call into an in-graph
   # changeset request (body kind "changeset"). It self-registers its tool schema
