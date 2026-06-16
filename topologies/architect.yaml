@@ -14,11 +14,12 @@
 #   topology.event.add{kind, terminal, schema}               — register an event
 #   topology.subscriber.add{name, on, in, emits, reads, body}— add a subscriber
 #   topology.projection.add{name, on, in, type, params}      — add a projection
-#   topology.build{}                                         — validate + COMMIT
-#       the accumulated draft as one changeset; the engine validates the WHOLE
-#       resulting graph and the subgraph goes LIVE in the same drain.
-#   task.new{task}                                          — DISPATCH the task
-#       into what it built (roots the worker subgraph).
+#   task.new{task}                                          — AUTO-BUILD + LAUNCH:
+#       the bridge commits the whole draft as one changeset (live-refresh) AND emits
+#       request.received{task} as a SIBLING, which roots the freshly-built worker in
+#       the same drain. The build is WIRED INTO the topology (the dispatch), so the
+#       brain never has to remember a separate build step — composing + dispatching
+#       is enough. (topology.build{} stays available to validate without launching.)
 #
 # The add-* pieces are SILENT (they just accumulate on the log); the brain emits
 # all its adds + topology.build in ONE turn and is re-driven only by the build
@@ -46,7 +47,7 @@ scopes:
       topology.event.add: 24        # draft pieces — events
       topology.subscriber.add: 24   # draft pieces — subscribers
       topology.projection.add: 8    # draft pieces — projections
-      topology.build: 6             # commit attempts (iterate on rejection)
+      topology.build: 12            # commit attempts (iterate on rejection)
       task.new: 4                   # dispatches into built subgraphs
       architect.message: 8          # the brain's prose turns
       architect.empty: 8            # degenerate silent turns
@@ -60,15 +61,18 @@ events:
   # changeset bridge (nodes/changeset Catalog) — the typed tool schemas live with
   # the bridge, not here. task.new is the architect's OWN dispatch vocabulary, so its
   # {task} schema is declared here.
-  - kind: task.new                   # brain → (the worker it built): dispatch
-    terminal: true                   #   consumed by a subgraph built at runtime
+  - kind: task.new                   # brain → bridge: dispatch (AUTO-BUILDS the draft)
+    terminal: false                  #   consumed by the bridge, which builds + launches
     schema:
       type: object
       properties:
         task:
           type: string
-          description: "The task/issue text to dispatch into the worker subgraph you built."
+          description: "The task/issue text. Calling this AUTO-BUILDS your draft topology and launches the worker with this text — you do not call build yourself."
       required: [task]
+  - kind: request.received           # the worker's ENTRY — the bridge emits it
+    terminal: true                   #   (carrying the task) after auto-building; the
+                                     #   runtime-built worker is rooted by it.
   - kind: request.terminal           # the worker's terminal — the whole run's end
     terminal: true
   - kind: architect.message          # the brain's prose turn (terminal: no action)
@@ -88,6 +92,7 @@ subscribers:
   - name: brain
     on:
       - task.architect
+      - topology.piece.added
       - topology.changeset.applied
       - topology.changeset.rejected
       - topology.apply.failed
@@ -116,9 +121,26 @@ subscribers:
           You are an ARCHITECT agent for the REFLEX kernel. You are handed a
           software task. You do NOT solve it yourself — you have NO file, shell,
           python, or test tools. Your job: DESIGN a reflex topology that can solve
-          the task, BUILD it at runtime PIECE BY PIECE with the control plane, and
-          DISPATCH the task into it. The SHAPE of that topology — how many agents,
-          what loop, how it decides it is done — is entirely UP TO YOU.
+          the task, BUILD it at runtime with the control plane, and DISPATCH the
+          task into it. The SHAPE of that topology — how many agents, what loop, how
+          it decides it is done — is entirely UP TO YOU.
+
+          HOW THE LOOP WORKS: you compose a DRAFT topology by calling small typed
+          add-* functions (one or several per turn). Each add is acknowledged
+          (topology.piece.added with the running draft size) so you keep going. When
+          your design is complete, call task.new(task) — this AUTO-BUILDS your whole
+          draft and LAUNCHES the worker with the task text. You do NOT call build
+          yourself; dispatching builds. If the build is rejected you hear
+          topology.changeset.rejected with reasons — add/fix pieces and call task.new
+          again. (You may also call topology.build at any time to validate the draft
+          WITHOUT launching, if you want to check before dispatching.)
+
+          THE I/O PORTS of the worker you build (fixed contract):
+            • request.received — the host injects this (carrying the task text) to
+              START your worker. Root your worker scope on it (root: request.received)
+              and have your first node subscribe `on: [request.received]`.
+            • request.terminal — your worker MUST emit this (terminal: true) when the
+              work is DONE and when it FAILS. The host waits for it to end the run.
 
           ── THE REFLEX MODEL ──────────────────────────────────────────────
           Everything is events on a log. You compose a topology from declarations:
@@ -180,31 +202,31 @@ subscribers:
           node reads.
 
           ── COMMIT + DISPATCH ─────────────────────────────────────────────
-            • topology.build() — validate + COMMIT the whole draft. The engine checks
-              the resulting graph as a whole; you hear topology.changeset.applied or
-              .rejected (with reasons — fix by adding/correcting pieces and building
-              again), or topology.apply.failed for a malformed piece.
-            • task.new(task) — DISPATCH the task into what you built.
+            • task.new(task) — AUTO-BUILD the whole draft AND launch the worker with
+              the task. The engine validates the resulting graph as a whole; on a
+              problem you hear topology.changeset.rejected (with reasons) or
+              topology.apply.failed — fix pieces and call task.new again. This is your
+              one finishing move.
+            • topology.build() — OPTIONAL: validate the draft without launching.
 
-          ── HARD CONTRACT — termination (the host waits on this) ──────────
-          The host runs your topology and WAITS for ONE terminal event:
-          `request.terminal`. Your topology MUST emit `request.terminal` (added with
-          terminal: true) when the work is DONE *and* when it FAILS — else the run
-          never ends. Every loop MUST sit in a SCOPE whose `budget` bounds the
-          looping kind, and you MUST wire `scope.<name>.budget_exhausted` to a failed
-          `request.terminal` so even an exhausted attempt terminates.
+          ── TERMINATION (the host waits on this) ─────────────────────────
+          Every loop MUST sit in a SCOPE whose `budget` bounds the looping kind, and
+          you MUST wire `scope.<name>.budget_exhausted` to a failed `request.terminal`
+          so even an exhausted attempt terminates (otherwise the run hangs).
 
           ── WORKFLOW ─────────────────────────────────────────────────────
             1. Read the task.
-            2. In ONE response, emit every piece — the scope(s) (root the worker in a
-               `detached: true` scope), events, subscribers, projection(s) — AND
-               topology.build last. The build commits the whole draft at once.
-            3. You hear topology.changeset.applied or .rejected (with reasons) /
-               topology.apply.failed. On a failure, emit MORE add calls to fix the
-               gap PLUS topology.build again (the draft keeps the pieces you already
-               added — only add what is missing/corrected).
-            4. On .applied: call task.new with the task text. That is your LAST
-               action — the topology you built does the work and terminates itself.
+            2. Compose the worker draft with add-* calls: a `detached: true` scope
+               rooted on request.received; the events (request.received,
+               request.terminal terminal:true, and any llm/tool kinds you use); the
+               subscribers (e.g. an llm worker that emits the tool *.call kinds, the
+               tool subscribers named after the *.call kinds, a terminator); and an
+               llm.history projection. Watch the topology.piece.added acks.
+            3. When the design is complete, call task.new(task). It auto-builds and
+               launches. If you hear topology.changeset.rejected / apply.failed, READ
+               the reasons, add/fix pieces, and call task.new again.
+            4. Once launched you are DONE — the worker does the work and terminates
+               itself via request.terminal.
 
   # bridge — the in-graph control plane (body kind "changeset"). It self-registers
   # the typed control functions (with structured JSON schemas), ACKs each add piece,
@@ -217,17 +239,23 @@ subscribers:
       - topology.subscriber.add
       - topology.projection.add
       - topology.build
+      - task.new
     in: architect
     reads: [topology.draft]
     emits:
+      - topology.piece.added
       - topology.changeset.requested
       - topology.apply.failed
+      - request.received
     body:
       kind: changeset
       config:
         fail: topology.apply.failed
+        ack: topology.piece.added
         principal: architect
         draft: topology.draft
+        dispatch: task.new
+        dispatch_emit: request.received
 
   # architect-exhaust — the only meta-level terminator, and only for the FAILURE
   # path: if the architect never builds a worker (budget exhausted), emit a failed

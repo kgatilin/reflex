@@ -49,15 +49,55 @@ func addEvent(kind string, payload string) engine.Event {
 	return engine.Event{Subject: kind, Payload: json.RawMessage(payload)}
 }
 
-// TestBridge_AddIsSilent proves an add-* piece emits NOTHING — it just accumulates
-// on the log (the draft projection folds it). The brain re-drives only on the build
-// outcome, so a turn that emits several add siblings does not branch the brain.
-func TestBridge_AddIsSilent(t *testing.T) {
-	for _, kind := range []string{KindScopeAdd, KindEventAdd, KindSubscriberAdd, KindProjectionAdd} {
-		emits := react(t, Config{}, kind, `{"name":"x"}`, draftViews{})
-		if len(emits) != 0 {
-			t.Errorf("%s emitted %+v, want nothing (adds are silent)", kind, emits)
+// TestBridge_AddAcks proves an add-* piece is ACKed (the brain re-drives and adds
+// the next), echoing the added kind/name and the running DEDUPED draft total.
+func TestBridge_AddAcks(t *testing.T) {
+	views := draftViews{draft: []engine.Event{
+		addEvent(KindScopeAdd, `{"name":"request","root":"r"}`),
+		addEvent(KindSubscriberAdd, `{"name":"worker"}`),
+	}}
+	emits := react(t, Config{}, KindSubscriberAdd, `{"name":"worker"}`, views)
+	if len(emits) != 1 || emits[0].Kind != defaultAck {
+		t.Fatalf("emits = %+v, want one %q ack", emits, defaultAck)
+	}
+	var body map[string]any
+	_ = json.Unmarshal(emits[0].Payload, &body)
+	if body["added"] != KindSubscriberAdd || body["name"] != "worker" {
+		t.Errorf("ack body = %v, want added=%q name=worker", body, KindSubscriberAdd)
+	}
+	if body["total"].(float64) != 2 {
+		t.Errorf("ack total = %v, want 2 (deduped draft size)", body["total"])
+	}
+}
+
+// TestBridge_BuildDedupesByName proves a draft with repeated/refined adds of the
+// same name collapses to one decl (last-writer-wins) — so a branched/iterating
+// brain still assembles a clean topology.
+func TestBridge_BuildDedupesByName(t *testing.T) {
+	draft := []engine.Event{
+		addEvent(KindScopeAdd, `{"name":"request","root":"old"}`),
+		addEvent(KindScopeAdd, `{"name":"request","root":"new","detached":true}`), // refine same name
+		addEvent(KindSubscriberAdd, `{"name":"worker","in":"request"}`),
+		addEvent(KindSubscriberAdd, `{"name":"worker","in":"request"}`), // duplicate
+	}
+	decls, err := declsFromDraft(draft)
+	if err != nil {
+		t.Fatalf("declsFromDraft: %v", err)
+	}
+	var scopes, subs int
+	for _, d := range decls {
+		switch v := d.(type) {
+		case engine.Scope:
+			scopes++
+			if v.Root != "new" || !v.Detached {
+				t.Errorf("scope not last-writer-wins: %+v", v)
+			}
+		case engine.Subscriber:
+			subs++
 		}
+	}
+	if scopes != 1 || subs != 1 {
+		t.Fatalf("deduped decls: scopes=%d subs=%d, want 1 and 1", scopes, subs)
 	}
 }
 
@@ -128,6 +168,38 @@ func TestBridge_BuildDecodesScopeDetachedAndBody(t *testing.T) {
 	}
 	if !sawBody {
 		t.Error("subscriber body descriptor was lost")
+	}
+}
+
+// TestBridge_DispatchAutoBuilds proves dispatch (task.new) AUTO-BUILDS the draft
+// AND emits the worker entry kind (request.received) carrying the task payload, as
+// siblings — so the brain never has to call build: composing + dispatching launches.
+func TestBridge_DispatchAutoBuilds(t *testing.T) {
+	views := draftViews{draft: []engine.Event{
+		addEvent(KindScopeAdd, `{"name":"request","root":"request.received","detached":true}`),
+		addEvent(KindSubscriberAdd, `{"name":"worker","on":["request.received"],"in":"request"}`),
+	}}
+	emits := react(t, Config{}, defaultDispatch, `{"task":"fix the bug"}`, views)
+	if len(emits) != 2 {
+		t.Fatalf("emits = %+v, want 2 (build + entry)", emits)
+	}
+	if emits[0].Kind != engine.KindChangesetRequested {
+		t.Errorf("emit[0] = %q, want the build changeset request", emits[0].Kind)
+	}
+	if emits[1].Kind != defaultDispatchEmit {
+		t.Fatalf("emit[1] = %q, want the worker entry %q", emits[1].Kind, defaultDispatchEmit)
+	}
+	// The entry carries the task payload through to the worker.
+	var p map[string]string
+	_ = json.Unmarshal(emits[1].Payload, &p)
+	if p["task"] != "fix the bug" {
+		t.Errorf("entry payload = %v, want it to carry the task text", p)
+	}
+	// And the build it emits is the assembled draft (2 ops).
+	var rp reqPayload
+	_ = json.Unmarshal(emits[0].Payload, &rp)
+	if len(rp.Ops) != 2 {
+		t.Errorf("build ops = %d, want 2", len(rp.Ops))
 	}
 }
 

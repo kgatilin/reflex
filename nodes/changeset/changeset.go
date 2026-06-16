@@ -58,14 +58,25 @@ const (
 type Config struct {
 	Emit      string `json:"emit,omitempty"`
 	Fail      string `json:"fail,omitempty"`
+	Ack       string `json:"ack,omitempty"`
 	Principal string `json:"principal,omitempty"`
 	Draft     string `json:"draft,omitempty"`
+	// Dispatch is the kind that AUTO-BUILDS the draft and launches the worker
+	// (default "task.new"). DispatchEmit is the worker's entry kind the bridge
+	// emits — as a sibling of the build — carrying the dispatch payload (default
+	// "request.received"). Folding the build into dispatch means the brain never
+	// has to remember to call build: composing + dispatching is enough.
+	Dispatch     string `json:"dispatch,omitempty"`
+	DispatchEmit string `json:"dispatch_emit,omitempty"`
 }
 
 const (
-	defaultFail  = "topology.apply.failed"
-	defaultDraft = "topology.draft"
-	defaultPrinc = "in-graph"
+	defaultFail         = "topology.apply.failed"
+	defaultAck          = "topology.piece.added"
+	defaultDraft        = "topology.draft"
+	defaultPrinc        = "in-graph"
+	defaultDispatch     = "task.new"
+	defaultDispatchEmit = "request.received"
 )
 
 // structuredSchemas are the per-piece parameter schemas the bridge advertises
@@ -114,6 +125,8 @@ func Catalog(s engine.Subscriber) []engine.EventKind {
 	}
 	out := []engine.EventKind{
 		{Kind: orDefault(cfg.Fail, defaultFail)}, // bridge → brain: build-failure feedback
+		{Kind: orDefault(cfg.Ack, defaultAck), Schema: json.RawMessage( // bridge → brain: per-add ack
+			`{"type":"object","properties":{"added":{"type":"string"},"name":{"type":"string"},"total":{"type":"integer"}}}`)},
 	}
 	for _, k := range s.On { // the structured control functions the brain calls
 		if schema, ok := structuredSchemas[k]; ok {
@@ -135,38 +148,71 @@ func Factory(s engine.Subscriber) (engine.Reaction, error) {
 	}
 	emit := orDefault(cfg.Emit, engine.KindChangesetRequested)
 	fail := orDefault(cfg.Fail, defaultFail)
+	ack := orDefault(cfg.Ack, defaultAck)
 	principal := orDefault(cfg.Principal, defaultPrinc)
 	draft := orDefault(cfg.Draft, defaultDraft)
+	dispatch := orDefault(cfg.Dispatch, defaultDispatch)
+	dispatchEmit := orDefault(cfg.DispatchEmit, defaultDispatchEmit)
 
-	return engine.ReactionFunc(func(_ context.Context, ev engine.Event, views engine.Views) ([]engine.Emit, error) {
-		if engine.KindOf(ev) != KindBuild {
-			// An add-* piece: it is already on the log (the draft projection folds
-			// the whole cone), so it just accumulates — NO emit. Acking each add
-			// would re-drive the brain once PER add, and since a model emits several
-			// add calls in one turn (siblings), that branches the brain into many
-			// parallel chains. Instead the brain re-drives only on the BUILD outcome
-			// (changeset.applied/.rejected) — one linear loop: add… add… build.
-			return nil, nil
-		}
-		// Build: fold the draft and commit the whole topology as one changeset.
-		events := engine.ViewAs[[]engine.Event](views, draft)
-		decls, err := declsFromDraft(events)
+	buildEmits := func(views engine.Views, also *engine.Emit) ([]engine.Emit, error) {
+		decls, err := declsFromDraft(engine.ViewAs[[]engine.Event](views, draft))
 		if err != nil {
 			return []engine.Emit{failEmit(fail, err)}, nil
 		}
 		if len(decls) == 0 {
 			return []engine.Emit{failEmit(fail, fmt.Errorf(
-				"the draft is empty — add pieces first with topology.subscriber.add / topology.scope.add / topology.event.add / topology.projection.add, THEN call topology.build"))}, nil
+				"the draft is empty — add pieces first (topology.scope.add / topology.event.add / topology.subscriber.add / topology.projection.add)"))}, nil
 		}
-		return []engine.Emit{{Kind: emit, Payload: engine.ChangesetRequestPayload(decls, principal)}}, nil
+		out := []engine.Emit{{Kind: emit, Payload: engine.ChangesetRequestPayload(decls, principal)}}
+		if also != nil {
+			out = append(out, *also)
+		}
+		return out, nil
+	}
+
+	return engine.ReactionFunc(func(_ context.Context, ev engine.Event, views engine.Views) ([]engine.Emit, error) {
+		switch engine.KindOf(ev) {
+		case KindBuild:
+			// Explicit build: fold the draft and commit it as one changeset (a
+			// validation checkpoint — the brain hears applied/rejected).
+			return buildEmits(views, nil)
+		case dispatch:
+			// AUTO-BUILD ON DISPATCH (the build is wired into the topology, not a
+			// model decision): the brain need never call build — when it dispatches,
+			// the bridge commits the whole draft AND emits the worker's entry kind as
+			// a SIBLING. The changeset goes live first (engine live-refresh), so the
+			// entry — carrying the task payload — roots the freshly-built worker in the
+			// same drain. On a rejected build the entry lands on no live worker
+			// (harmless); the brain hears the rejection and re-dispatches with fixes.
+			entry := engine.Emit{Kind: dispatchEmit, Payload: ev.Payload}
+			return buildEmits(views, &entry)
+		default:
+			// An add-* piece: already on the log (the draft projection folds the whole
+			// CONE — siblings included). ACK it so the brain re-drives and adds the
+			// next: a function-calling model emits ~one call per turn and waits for a
+			// result, so without this it would stall. A multi-call turn branches the
+			// brain, but every branch reads the same cone-wide draft and declsFromDraft
+			// dedups by name, so the assembled topology is identical regardless.
+			return []engine.Emit{ackEmit(ack, ev, views, draft)}, nil
+		}
 	}), nil
 }
 
 // declsFromDraft turns the accumulated add-* events (the draft, a `log` view) into
-// engine.Decls, decoding each by its kind. A malformed piece aborts the build with
-// an error naming the offending kind — the brain re-adds a corrected piece.
+// engine.Decls, decoding each by its kind. Pieces are DEDUPED by (kind, name),
+// last-writer-wins: a model that re-adds or refines a piece (or whose turn branched)
+// collapses to its latest version, so the assembled topology is clean regardless of
+// how the draft accumulated. A malformed piece aborts the build with an error naming
+// the offending kind — the brain re-adds a corrected piece.
 func declsFromDraft(events []engine.Event) ([]engine.Decl, error) {
-	var out []engine.Decl
+	order := []string{}             // dedup key in first-seen order (stable output)
+	byKey := map[string]engine.Decl{}
+	put := func(key string, d engine.Decl) {
+		if _, seen := byKey[key]; !seen {
+			order = append(order, key)
+		}
+		byKey[key] = d // last-writer-wins
+	}
 	for _, ev := range events {
 		kind := engine.KindOf(ev)
 		switch kind {
@@ -175,13 +221,13 @@ func declsFromDraft(events []engine.Event) ([]engine.Decl, error) {
 			if err := json.Unmarshal(ev.Payload, &p); err != nil {
 				return nil, fmt.Errorf("%s: %w", kind, err)
 			}
-			out = append(out, engine.Scope{Name: p.Name, Root: p.Root, Detached: p.Detached, Budget: p.Budget})
+			put("scope:"+p.Name, engine.Scope{Name: p.Name, Root: p.Root, Detached: p.Detached, Budget: p.Budget})
 		case KindEventAdd:
 			var p eventArgs
 			if err := json.Unmarshal(ev.Payload, &p); err != nil {
 				return nil, fmt.Errorf("%s: %w", kind, err)
 			}
-			out = append(out, engine.EventKind{Kind: p.Kind, Terminal: p.Terminal, Schema: p.Schema})
+			put("event:"+p.Kind, engine.EventKind{Kind: p.Kind, Terminal: p.Terminal, Schema: p.Schema})
 		case KindSubscriberAdd:
 			var p subscriberArgs
 			if err := json.Unmarshal(ev.Payload, &p); err != nil {
@@ -192,14 +238,18 @@ func declsFromDraft(events []engine.Event) ([]engine.Decl, error) {
 				n.BodyKind = p.Body.Kind
 				n.BodyConfig = p.Body.Config
 			}
-			out = append(out, n)
+			put("subscriber:"+p.Name, n)
 		case KindProjectionAdd:
 			var p projectionArgs
 			if err := json.Unmarshal(ev.Payload, &p); err != nil {
 				return nil, fmt.Errorf("%s: %w", kind, err)
 			}
-			out = append(out, engine.Projection{Name: p.Name, On: p.On, In: engine.Horizon(p.In), Type: p.Type, Params: p.Params})
+			put("projection:"+p.Name, engine.Projection{Name: p.Name, On: p.On, In: engine.Horizon(p.In), Type: p.Type, Params: p.Params})
 		}
+	}
+	out := make([]engine.Decl, 0, len(order))
+	for _, key := range order {
+		out = append(out, byKey[key])
 	}
 	return out, nil
 }
@@ -239,6 +289,23 @@ type projectionArgs struct {
 	In     string          `json:"in"`
 	Type   string          `json:"type"`
 	Params json.RawMessage `json:"params"`
+}
+
+// ackEmit builds the per-add acknowledgement, echoing what was added and the
+// running DEDUPED draft size so the brain tracks progress and knows to call build.
+func ackEmit(kind string, ev engine.Event, views engine.Views, draft string) engine.Emit {
+	var probe struct {
+		Name string `json:"name"`
+		Kind string `json:"kind"`
+	}
+	_ = json.Unmarshal(ev.Payload, &probe)
+	name := probe.Name
+	if name == "" {
+		name = probe.Kind
+	}
+	decls, _ := declsFromDraft(engine.ViewAs[[]engine.Event](views, draft))
+	p, _ := json.Marshal(map[string]any{"added": engine.KindOf(ev), "name": name, "total": len(decls)})
+	return engine.Emit{Kind: kind, Payload: p}
 }
 
 // failEmit builds the build-failure feedback event carrying the error text.
