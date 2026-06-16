@@ -49,24 +49,15 @@ func addEvent(kind string, payload string) engine.Event {
 	return engine.Event{Subject: kind, Payload: json.RawMessage(payload)}
 }
 
-// TestBridge_AddAcks proves an add-* piece is ACKed (the brain re-drives and adds
-// the next), echoing the added kind/name and the running DEDUPED draft total.
-func TestBridge_AddAcks(t *testing.T) {
-	views := draftViews{draft: []engine.Event{
-		addEvent(KindScopeAdd, `{"name":"request","root":"r"}`),
-		addEvent(KindSubscriberAdd, `{"name":"worker"}`),
-	}}
-	emits := react(t, Config{}, KindSubscriberAdd, `{"name":"worker"}`, views)
-	if len(emits) != 1 || emits[0].Kind != defaultAck {
-		t.Fatalf("emits = %+v, want one %q ack", emits, defaultAck)
-	}
-	var body map[string]any
-	_ = json.Unmarshal(emits[0].Payload, &body)
-	if body["added"] != KindSubscriberAdd || body["name"] != "worker" {
-		t.Errorf("ack body = %v, want added=%q name=worker", body, KindSubscriberAdd)
-	}
-	if body["total"].(float64) != 2 {
-		t.Errorf("ack total = %v, want 2 (deduped draft size)", body["total"])
+// TestBridge_AddIsSilent proves an add-* piece emits NOTHING — it just accumulates
+// on the log (the draft projection folds it). The brain re-drives once per TURN via
+// the scope-closure barrier, not per add, so a multi-call turn does not branch.
+func TestBridge_AddIsSilent(t *testing.T) {
+	for _, kind := range []string{KindScopeAdd, KindEventAdd, KindSubscriberAdd, KindProjectionAdd} {
+		emits := react(t, Config{}, kind, `{"name":"x"}`, draftViews{})
+		if len(emits) != 0 {
+			t.Errorf("%s emitted %+v, want nothing (adds are silent)", kind, emits)
+		}
 	}
 }
 

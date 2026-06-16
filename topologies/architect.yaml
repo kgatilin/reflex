@@ -21,13 +21,18 @@
 #       brain never has to remember a separate build step — composing + dispatching
 #       is enough. (topology.build{} stays available to validate without launching.)
 #
-# The add-* pieces are SILENT (they just accumulate on the log); the brain emits
-# all its adds + topology.build in ONE turn and is re-driven only by the build
-# outcome — topology.changeset.applied / .rejected (engine-owned), or
-# topology.apply.failed (the bridge's, a malformed piece). Acking each add instead
-# would re-drive the brain once per add, branching it into parallel chains. The
-# draft is the `topology.draft` projection — a `log` fold of the add-* events over
-# the WHOLE architect cone (so the build sees every sibling piece), no hidden state.
+# RE-DRIVE BY SCOPE CLOSURE (the multi-call-turn fix). A function-calling model
+# emits several calls in ONE turn (siblings). Acking each one would re-drive the
+# brain once PER call, branching it into parallel chains. Instead each brain turn is
+# wrapped in a `compose` scope (rooted by `compose.tick`): the add-* pieces are
+# SILENT (consumed by the bridge, folded by the draft), so the turn's cone quiesces
+# as soon as the calls settle, and the engine fires ONE `scope.compose.closed`. The
+# `ticker` re-drives on that closure with the next `compose.tick` — exactly ONE
+# re-drive per turn, whether the turn made 1 call or 25. The draft is the
+# `topology.draft` projection — a `log` fold of the add-* events over the WHOLE
+# architect cone (so a build/dispatch sees every piece across every turn). Build
+# outcomes (changeset.applied/.rejected, apply.failed) are read from history on the
+# next tick, not subscribed as triggers.
 #
 # Termination: the WORKER's own request.terminal ends the run (`emit --wait
 # request.terminal`). If the architect never manages to build a worker, the
@@ -43,23 +48,34 @@ scopes:
   - name: architect
     root: task.architect
     budget:
-      topology.scope.add: 8         # draft pieces — scopes
-      topology.event.add: 24        # draft pieces — events
-      topology.subscriber.add: 24   # draft pieces — subscribers
-      topology.projection.add: 8    # draft pieces — projections
-      topology.build: 12            # commit attempts (iterate on rejection)
+      compose.tick: 30              # the TURN count — bounds the compose loop
       task.new: 4                   # dispatches into built subgraphs
-      architect.message: 8          # the brain's prose turns
-      architect.empty: 8            # degenerate silent turns
+      architect.message: 30         # the brain's prose turns
+      architect.empty: 30           # degenerate silent turns
+  # compose — one instance per brain TURN, rooted by compose.tick. Its closure
+  # (scope.compose.closed) is the per-turn barrier the ticker re-drives on, so a
+  # turn that makes many parallel calls yields ONE re-drive, not one per call. The
+  # budget also bounds runaway pieces within a single turn (and makes the
+  # ticker↔brain cycle a budgeted, terminating loop).
+  - name: compose
+    root: compose.tick
+    budget:
+      topology.scope.add: 8
+      topology.event.add: 40
+      topology.subscriber.add: 40
+      topology.projection.add: 8
+      topology.build: 4
 
 events:
   - kind: task.architect       # external entry: the task for the meta-agent
     terminal: false
+  - kind: compose.tick         # the ticker → brain re-drive (roots one compose turn)
+    terminal: false
   # The control-plane kinds (topology.scope.add / .event.add / .subscriber.add /
-  # .projection.add / .build) + the ACK (topology.piece.added) + the FAIL
-  # (topology.apply.failed) are SELF-REGISTERED with their structured schemas by the
-  # changeset bridge (nodes/changeset Catalog) — the typed tool schemas live with
-  # the bridge, not here. task.new is the architect's OWN dispatch vocabulary, so its
+  # .projection.add / .build) + the FAIL (topology.apply.failed) are SELF-REGISTERED
+  # with their structured schemas by the changeset bridge (nodes/changeset Catalog) —
+  # the typed tool schemas live with the bridge, not here. task.new is the
+  # architect's OWN dispatch vocabulary, so its
   # {task} schema is declared here.
   - kind: task.new                   # brain → bridge: dispatch (AUTO-BUILDS the draft)
     terminal: false                  #   consumed by the bridge, which builds + launches
@@ -85,19 +101,28 @@ events:
   # terminal) — the brain subscribes to applied/rejected without declaring them.
 
 subscribers:
-  # brain — the meta-reasoner (Gemini Pro). It hears the task, each piece ACK, and
-  # the build outcomes, reads its history, and CALLS a structured control function
-  # to compose the draft, build it, then dispatch. NO fs/py/verify tools — only the
-  # control plane. It does NOT subscribe to the worker's result.
+  # ticker — the per-turn re-drive. Fires on the initial task AND on each compose
+  # closure, emitting the next compose.tick (which roots the next compose turn and
+  # drives the brain). This is what collapses a multi-call turn to one re-drive: the
+  # brain runs once per tick, and a tick only comes after the previous turn's cone
+  # has fully settled (its closure fired).
+  - name: ticker
+    on: [task.architect, scope.compose.closed]
+    in: architect
+    emits: [compose.tick]
+    body:
+      kind: entry
+      config: { emit: compose.tick }
+
+  # brain — the meta-reasoner (Gemini Pro). Driven once per compose.tick. It reads
+  # the task + its own composition + the build outcomes from history, and CALLS the
+  # structured control functions to compose the draft and dispatch. NO fs/py/verify
+  # tools — only the control plane. It does NOT subscribe to the worker's result.
   - name: brain
     on:
-      - task.architect
-      - topology.piece.added
-      - topology.changeset.applied
-      - topology.changeset.rejected
-      - topology.apply.failed
-    in: architect
-    reads: [brain.history]
+      - compose.tick
+    in: compose
+    reads: [brain.history, topology.draft]
     emits:
       - topology.scope.add
       - topology.event.add
@@ -126,14 +151,14 @@ subscribers:
           it decides it is done — is entirely UP TO YOU.
 
           HOW THE LOOP WORKS: you compose a DRAFT topology by calling small typed
-          add-* functions (one or several per turn). Each add is acknowledged
-          (topology.piece.added with the running draft size) so you keep going. When
-          your design is complete, call task.new(task) — this AUTO-BUILDS your whole
-          draft and LAUNCHES the worker with the task text. You do NOT call build
-          yourself; dispatching builds. If the build is rejected you hear
-          topology.changeset.rejected with reasons — add/fix pieces and call task.new
-          again. (You may also call topology.build at any time to validate the draft
-          WITHOUT launching, if you want to check before dispatching.)
+          add-* functions (one or several per turn). The add calls are silent — you
+          are simply driven again on the next turn, with your whole draft and history
+          visible, so keep adding pieces across turns until the design is complete.
+          Then call task.new(task) — this AUTO-BUILDS your whole draft and LAUNCHES
+          the worker with the task text. You do NOT call build yourself; dispatching
+          builds. If the build is rejected you see topology.changeset.rejected with
+          reasons in your history — add/fix pieces and call task.new again. (You may
+          also call topology.build to validate the draft WITHOUT launching.)
 
           THE I/O PORTS of the worker you build (fixed contract):
             • request.received — the host injects this (carrying the task text) to
@@ -151,13 +176,10 @@ subscribers:
           A "tool" is NOT special — it is a subscriber that consumes a *.call kind
           and produces a *.result kind.
 
-          ── HOW YOU BUILD — typed pieces into a DRAFT, then build ─────────
+          ── HOW YOU BUILD — typed pieces into a DRAFT, then dispatch ──────
           You do NOT write a YAML document. You call typed functions, each adding ONE
-          piece to a DRAFT topology, THEN call topology.build to commit the whole
-          draft. Emit ALL your add calls AND topology.build TOGETHER in ONE response
-          (the build sees every piece you added in the same turn). The pieces are
-          silent — you are re-driven only by the BUILD outcome
-          (topology.changeset.applied / .rejected). Functions:
+          piece to a DRAFT topology, across as many turns as you like; then call
+          task.new to auto-build + launch. Functions:
 
             topology.scope.add(name, root, detached?, budget?)
                 — root: the event kind whose dispatch opens an instance.
@@ -216,22 +238,25 @@ subscribers:
 
           ── WORKFLOW ─────────────────────────────────────────────────────
             1. Read the task.
-            2. Compose the worker draft with add-* calls: a `detached: true` scope
-               rooted on request.received; the events (request.received,
-               request.terminal terminal:true, and any llm/tool kinds you use); the
-               subscribers (e.g. an llm worker that emits the tool *.call kinds, the
-               tool subscribers named after the *.call kinds, a terminator); and an
-               llm.history projection. Watch the topology.piece.added acks.
+            2. Compose the worker draft with add-* calls (one or several per turn —
+               each is silent; you continue automatically on the next turn): a
+               `detached: true` scope rooted on request.received; the events
+               (request.received, request.terminal terminal:true, and any llm/tool
+               kinds you use); the subscribers (e.g. an llm worker that emits the tool
+               *.call kinds, the tool subscribers named after the *.call kinds, a
+               terminator); and an llm.history projection.
             3. When the design is complete, call task.new(task). It auto-builds and
-               launches. If you hear topology.changeset.rejected / apply.failed, READ
-               the reasons, add/fix pieces, and call task.new again.
+               launches. If you hear topology.changeset.rejected / apply.failed
+               (visible in your history), READ the reasons, add/fix pieces, and call
+               task.new again.
             4. Once launched you are DONE — the worker does the work and terminates
                itself via request.terminal.
 
   # bridge — the in-graph control plane (body kind "changeset"). It self-registers
-  # the typed control functions (with structured JSON schemas), ACKs each add piece,
-  # and on topology.build folds the draft (topology.draft) into one changeset
-  # request the engine validates + commits. Scoped in the architect loop.
+  # the typed control functions (with structured JSON schemas), accumulates the add-*
+  # pieces SILENTLY (the brain re-drives via the compose-scope closure, not per add),
+  # and on task.new AUTO-BUILDS the draft (topology.draft) + emits the worker entry
+  # request.received. Scoped in the architect loop.
   - name: bridge
     on:
       - topology.scope.add
@@ -243,7 +268,6 @@ subscribers:
     in: architect
     reads: [topology.draft]
     emits:
-      - topology.piece.added
       - topology.changeset.requested
       - topology.apply.failed
       - request.received
@@ -251,7 +275,6 @@ subscribers:
       kind: changeset
       config:
         fail: topology.apply.failed
-        ack: topology.piece.added
         principal: architect
         draft: topology.draft
         dispatch: task.new
@@ -282,9 +305,10 @@ projections:
     type: log
 
   # brain.history — the meta-agent's conversation: the task as the first user
-  # message, the brain's own control calls as assistant turns, the piece ACKs and
-  # build outcomes as tool results / user turns. params.emits mirrors the brain's
-  # control menu so each call is rendered as a function call in the transcript.
+  # message, the brain's own control calls as assistant turns, the build outcomes
+  # (applied/rejected/failed) as user turns. Folded over the architect cone so it
+  # spans every compose turn. params.emits mirrors the brain's control menu so each
+  # call is rendered as a function call in the transcript.
   - name: brain.history
     on:
       - task.architect
@@ -305,8 +329,8 @@ projections:
       system: |
         You are an ARCHITECT agent with only the control plane: compose a draft
         topology piece by piece (topology.scope.add / .event.add / .subscriber.add /
-        .projection.add), commit it (topology.build), and dispatch the task into it
-        (task.new). You have no file/python tools and you do not monitor the result.
+        .projection.add), then dispatch (task.new) — which auto-builds the draft and
+        launches the worker. You have no file/python tools; you do not monitor the result.
       answer: architect.message
       task_kinds: [task.architect]
       emits:
