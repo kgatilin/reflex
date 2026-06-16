@@ -284,3 +284,68 @@ func anyContains(ss []string, sub string) bool {
 	}
 	return false
 }
+
+// TestValidate_DetachedScopeSuppressesCrossScopeCycle is the doc 31 §4 / increment
+// 2 proof: a meta-agent and the sub-topology it dispatches live in ONE validated
+// document, REUSE the same turn kind (llm.message), and the meta-agent subscribes
+// to that kind — which, scope-blind, draws a phantom cross-scope cycle through the
+// global injector:
+//
+//	meta-brain  On [task.meta, llm.message]      in meta    → task.new
+//	resolver    On [task.new]                    in global  → request.received  (PORT)
+//	worker      On [request.received, llm.message] in worker → llm.message       (REUSED)
+//
+// SCC {meta-brain, resolver, worker} runs through `resolver` (global, unbudgeted),
+// so a scope-blind validator reports it unbounded and REJECTS. With the worker
+// scope DETACHED it is top-level — a sibling of the externally-rooted meta scope —
+// so the worker→meta-brain edge on llm.message is a phantom the validator no longer
+// draws (deliverableStatic), leaving only the worker's own budgeted self-loop. No
+// cut pass, no per-component split: plain whole-graph SCC on a scope-aware edge set.
+func TestValidate_DetachedScopeSuppressesCrossScopeCycle(t *testing.T) {
+	build := func(detached bool) []Decl {
+		return []Decl{
+			// meta: externally-rooted (task.meta is produced by no node) → top-level.
+			Scope{Name: "meta", Root: "task.meta", Budget: map[string]int{"task.new": 4}},
+			// worker: rooted by request.received, which resolver PRODUCES — so it is
+			// top-level ONLY when declared Detached. That toggle is the whole test.
+			Scope{Name: "worker", Root: "request.received", Budget: map[string]int{"llm.message": 8}, Detached: detached},
+			Subscriber{Name: "meta-brain", On: []string{"task.meta", "llm.message"}, In: "meta", Emits: []string{"task.new"}},
+			Subscriber{Name: "resolver", On: []string{"task.new"}, In: "global", Emits: []string{"request.received"}},
+			Subscriber{Name: "worker", On: []string{"request.received", "llm.message"}, In: "worker", Emits: []string{"llm.message"}},
+			EventKind{Kind: "task.meta"}, EventKind{Kind: "task.new"},
+			EventKind{Kind: "request.received"}, EventKind{Kind: "llm.message"},
+		}
+	}
+
+	t.Run("detached worker is isolated — no cross-scope cycle", func(t *testing.T) {
+		rep, err := Validate(build(true)...)
+		if err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if len(rep.UnboundedCycles) != 0 {
+			t.Fatalf("a detached worker must not form a cross-scope unbounded cycle; got %v", rep.UnboundedCycles)
+		}
+		if !rep.Connected {
+			t.Fatalf("expected Connected==true with a detached worker; gaps: dead=%v unreach=%v cycles=%v stalled=%v",
+				rep.DeadEnds, rep.UnreachableNodes, rep.UnboundedCycles, rep.StalledClosures)
+		}
+	})
+
+	t.Run("nested control leaks the phantom cycle", func(t *testing.T) {
+		rep, err := Validate(build(false)...)
+		if err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		// Scope-blind, the worker's llm.message reaches meta-brain → the cross-scope
+		// SCC through the global resolver is reported unbounded.
+		found := false
+		for _, scc := range rep.UnboundedCycles {
+			if contains(scc, "meta-brain") && contains(scc, "worker") && contains(scc, "resolver") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected the cross-scope SCC {meta-brain,resolver,worker} reported unbounded without detachment; got %v", rep.UnboundedCycles)
+		}
+	})
+}

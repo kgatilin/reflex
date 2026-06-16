@@ -125,20 +125,6 @@ func Validate(decls ...Decl) (Report, error) {
 	// lifecycle terminator of doc 26 §3f) reads as unreachable.
 	emitsByNode := effectiveEmits(decls, nodes)
 
-	var gvEdges []graphval.Edge
-	for _, x := range nodes {
-		for _, y := range nodes {
-			if producesFor(emitsByNode[x.Name], y) {
-				gvEdges = append(gvEdges, graphval.Edge{From: x.Name, To: y.Name})
-			}
-		}
-	}
-
-	g, err := graphval.New(gvNodes, gvEdges)
-	if err != nil {
-		return Report{}, fmt.Errorf("engine: build topology graph: %w", err)
-	}
-
 	// produced is every concrete kind some subscriber emits (declared Emits plus
 	// engine-emitted scope closures). A kind consumed by some subscriber but
 	// produced by none is fed from OUTSIDE the topology — the entry-point signal
@@ -149,6 +135,34 @@ func Validate(decls ...Decl) (Report, error) {
 		for _, k := range ks {
 			produced[k] = struct{}{}
 		}
+	}
+
+	// topLevel / scopeRoot make the edge graph SCOPE-AWARE for top-level scopes
+	// (doc 31 §4): a top-level scope — Detached, or externally-rooted (its Root
+	// kind is produced by no node) — roots a cone that nests in NO other top-level
+	// scope's cone. Two top-level scopes are siblings, so an event in one is never
+	// delivered to a subscriber `in:` the other (except through that consumer's own
+	// root kind — the injection PORT — or via a `global` node, whose cone is
+	// inherited dynamically). Mirroring that in the kind-graph drops the phantom
+	// cross-scope edge a scope-BLIND validator would draw, so plain whole-graph SCC
+	// detection no longer reports a spurious unbounded cycle between a meta-agent and
+	// the sub-topology it dispatches. No "cut" pass, no per-component split — just an
+	// edge that reflects real delivery (the runtime's `deliver`). Dormant for every
+	// topology with ≤1 top-level scope (the suppression needs two distinct ones).
+	topLevel, scopeRoot := topLevelScopes(decls, produced)
+
+	var gvEdges []graphval.Edge
+	for _, x := range nodes {
+		for _, y := range nodes {
+			if producesForScoped(emitsByNode[x.Name], x.In, y, topLevel, scopeRoot) {
+				gvEdges = append(gvEdges, graphval.Edge{From: x.Name, To: y.Name})
+			}
+		}
+	}
+
+	g, err := graphval.New(gvNodes, gvEdges)
+	if err != nil {
+		return Report{}, fmt.Errorf("engine: build topology graph: %w", err)
 	}
 
 	roots := rootNodes(nodes, produced)
@@ -299,18 +313,80 @@ func foldSubscribers(decls []Decl) []Subscriber {
 	return out
 }
 
-// producesFor reports whether any kind in produced is matched by some pattern
-// in y.On (doc 27 §4): the directed edge X→Y of the topology graph, generalised
-// to take X's effective produced kinds (Emits + rooted closures).
-func producesFor(produced []string, y Subscriber) bool {
+// producesForScoped is the directed edge X→Y of the topology graph (doc 27 §4),
+// made SCOPE-AWARE for top-level scopes (doc 31
+// §4): the directed edge X→Y exists iff X produces a kind Y consumes AND that
+// delivery is not severed by a top-level scope boundary. xIn is X's (defaulted)
+// scope; topLevel marks the scopes that root a cone nesting in no other top-level
+// scope's cone; scopeRoot maps a scope name to its Root kind (the injection port).
+func producesForScoped(produced []string, xIn string, y Subscriber, topLevel map[string]struct{}, scopeRoot map[string]string) bool {
 	for _, kind := range produced {
 		for _, pat := range y.On {
-			if subjectMatch(pat, kind) {
+			if subjectMatch(pat, kind) && deliverableStatic(kind, xIn, y.In, topLevel, scopeRoot) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// deliverableStatic is the static mirror of the runtime cone-delivery rule
+// (`scopeRuntime.deliver`) restricted to what is decidable from the topology
+// alone (doc 31 §4). It returns false ONLY for a provably phantom edge: a kind
+// produced inside one top-level scope and consumed by a node `in:` a DIFFERENT
+// top-level scope, where the kind is not that consumer scope's root. Two
+// top-level scopes are siblings (neither cone nests in the other), so such an
+// event is never delivered. Every other edge is kept (conservative: a kept edge
+// can at worst over-report a cycle, never hide one):
+//
+//   - a `global`/empty consumer receives anything (its cone is inherited
+//     dynamically — undecidable here, so never suppressed);
+//   - the consumer scope's own root kind is the injection PORT (delivered from
+//     anywhere, e.g. a launcher dispatching into the sub-topology);
+//   - same scope on both ends is ordinary in-cone delivery;
+//   - if either end is NOT top-level the nesting is undecidable statically, so
+//     the edge is kept (the scope-blind legacy behaviour, unchanged).
+func deliverableStatic(kind, xIn, yIn string, topLevel map[string]struct{}, scopeRoot map[string]string) bool {
+	if yIn == "" || yIn == "global" {
+		return true
+	}
+	if scopeRoot[yIn] != "" && subjectMatch(scopeRoot[yIn], kind) {
+		return true // injection port: the consumer scope's own root kind
+	}
+	if xIn == yIn {
+		return true
+	}
+	_, xTop := topLevel[xIn]
+	_, yTop := topLevel[yIn]
+	if xTop && yTop {
+		return false // two sibling top-level scopes never share a cone
+	}
+	return true
+}
+
+// topLevelScopes returns the declared scopes that root a TOP-LEVEL cone (doc 31
+// §4) and a map from scope name to its Root kind. A scope is top-level iff it is
+// Detached (declared so) OR externally-rooted (its Root kind is produced by no
+// node, so an instance is opened only by an event arriving from outside) — the
+// latter is the property the architect's own scope already has, which Detached
+// generalises to internally-triggered roots. produced is the set of kinds some
+// node emits (the external-root discriminator).
+func topLevelScopes(decls []Decl, produced map[string]struct{}) (topLevel map[string]struct{}, scopeRoot map[string]string) {
+	topLevel = map[string]struct{}{}
+	scopeRoot = map[string]string{}
+	for _, d := range decls {
+		s, ok := d.(Scope)
+		if !ok || s.Name == "" {
+			continue
+		}
+		if s.Root != "" {
+			scopeRoot[s.Name] = s.Root
+		}
+		if s.Detached || (s.Root != "" && isExternalPattern(s.Root, produced)) {
+			topLevel[s.Name] = struct{}{}
+		}
+	}
+	return topLevel, scopeRoot
 }
 
 // effectiveEmits maps each node to its effective produced kinds: declared
