@@ -1,6 +1,10 @@
 # 31 — The meta-agent, and isolation via root scopes (problem + thinking)
 
-> **Status: DESIGN / working notes.** Captures a concrete problem found while
+> **Status: IMPLEMENTED (3 increments) + working notes.** The model below is
+> built: (1) the `Detached` scope property + parent-free `admit`, (2) scope-aware
+> validator edges, (3) foreign-scope-only changesets. See the boxed
+> "Implemented" notes in §4 and the per-increment summary in §5. Captures a
+> concrete problem found while
 > building the *architect* — a meta-agent that BUILDS a sub-topology at runtime
 > (via the in-graph control plane, [doc 20](./outdated/) / [`CONCEPT.md`](./CONCEPT.md) §8)
 > and DISPATCHES a task into it — and the design thinking about how to isolate the
@@ -173,73 +177,95 @@ or modify subscribers/scopes that live in OTHER scopes, but **not** scope X
 itself. The architect (running in `architect`) builds `request`; it cannot rewrite
 the `architect` loop it is running in. This keeps the live-refresh coherent (a
 running cone is never mutated out from under itself) and is the natural authority
-boundary: you compose *downstream* topology, you do not self-modify. Enforcement
-is a check in `commitChangeset`: reject ops whose target scope equals the issuing
-event's scope. (Open: an external operator `Apply` has no issuing scope, so the
-rule applies only to in-graph changesets.)
+boundary: you compose *downstream* topology, you do not self-modify.
 
-### Identifying the port (entry detection) — a basic graph operation
+> **Implemented (increment 3).** `selfMutationReasons(issuing, decls)`
+> (`engine/changeset.go`) flags any added/modified subscriber/projection `in:X` or
+> `Scope` named X when X is an issuing scope; the in-graph hook (`engine/engine.go`
+> `process`) rejects before commit, so the live table is untouched and the
+> requesting node hears the reasons on `changeset.rejected`. The issuing scopes are
+> `scopeRuntime.scopesOf(span)` — the cones the `changeset.requested` event is a
+> member of, read off the same membership fold delivery uses. An external operator
+> `Apply` has no issuing cone (issuing empty), so the rule applies only to in-graph
+> changesets — exactly as intended. `global`/empty targets and `Event` decls
+> (catalog-global) are exempt. Proven by `TestSelfMutationReasons` and
+> `TestInGraphChangeset_RejectsSelfScope`.
 
-The validator already finds entry points structurally: a node is a **root** when
-it consumes a kind no node produces (`isRoot`, `engine/validate.go`). A root
-scope's Root kind is an entry of the **same structural shape**, with one twist —
-it may ALSO be produced by a node in a *different* component (the meta-agent's
-launch). That production is a **port**, not an internal edge, so the validator
-**cuts** it: a root-scope Root kind is treated as an external entry to its
-component even when some node elsewhere emits it.
+### Identifying the port — and why no "cut" pass is needed
 
-Two equivalent ways to mark the entry (your call):
-- **Flag it** — like the existing `terminal: true` (a declared graph *output*),
-  but the other way: a declared *input*. A root scope's Root kind is implicitly
-  this.
-- **Detect it** — structurally: a node with **0 `on` and >0 `emits`** is a pure
-  input (an injector); and any root-scope Root kind is an entry. No flag needed.
-
-With the ports cut, partitioning is a **basic graph operation**: weakly-connected
-components (or directed reachability from each entry — `graphval.ReachableFromNames`,
-already used here). Each component is one root scope's subgraph; validate
-connectivity + the unbounded-cycle check **per component**. The architect↔worker
-cycle disappears because the `task.new` port is cut at the worker's entry — they
-are two components, each acyclic on its own.
+> **Implemented (increment 2) — and simpler than first framed.** The validator
+> does NOT cut ports or partition into components. Cycle detection (SCC) already
+> handles a disconnected graph natively — Tarjan finds every SCC in one pass
+> regardless of weak-connectivity — so "validate per weakly-connected component"
+> bought nothing. The real defect was a **phantom edge**: the validator drew edges
+> by kind-match while being scope-BLIND, so a meta-agent reusing a kind the
+> sub-topology also emits got a spurious cross-scope edge → a false unbounded cycle
+> through the global injector → rejection.
+>
+> The fix makes edge construction mirror the runtime's cone-delivery rule
+> (`deliverableStatic`, `engine/validate.go`): two **top-level** scopes — `Detached`,
+> or externally-rooted (`Root` produced by no node) — root sibling cones that nest
+> in neither, so an event in one is never delivered to a subscriber `in:` the other,
+> EXCEPT through that consumer's own root kind (the injection **port**) or via a
+> `global` node (cone inherited dynamically). The phantom edge is therefore never
+> drawn, and plain whole-graph SCC just works. It is conservative (only a provably
+> phantom both-top-level edge is dropped; a kept edge can over-report a cycle, never
+> hide one) and **dormant** for any document with ≤1 top-level scope.
+> Proven by `TestValidate_DetachedScopeSuppressesCrossScopeCycle`.
 
 ---
 
-## 5. Open problems (not yet settled)
+## 5. Implementation increments + what is still open
 
-1. **Per-component validation is the easy part** (see §4 "Identifying the port").
-   Cut the root-scope ports, then run weakly-connected components / reachability
-   (`graphval`, already available) and validate each component independently. The
-   only real choice is how to mark the port — a declared `input` flag (the mirror
-   of `terminal`) vs. structural detection (0 `on` + >0 `emits`, plus any
-   root-scope Root kind). No "graph" abstraction is introduced: a component is
-   just the reachable set of one root scope.
+**Settled by (a) — the scope decides, not the emit.** Detachment is a property of
+the *scope* (`engine.Scope.Detached`): any instance is top-level however triggered.
+The rejected alternative — marking a specific *emit* detached — would split
+caused_by from membership at the emit site, the invariant doc 26 §2 leans on. With
+the scope-based choice, caused_by is untouched and only scope membership detaches.
 
-2. **How is a dispatch "detached" decided — by the SCOPE or by the EMIT?** Two
-   options: (a) the *scope* is declared root (any instance is top-level, however
-   triggered) — clean, declarative, what §4 assumes; (b) a specific *emit* is
-   marked detached (the producer chooses to launch a fresh cone) — more flexible
-   but splits caused_by from membership at the emit site, which is the invariant
-   doc 26 §2 leans on. §4 prefers (a).
+The three shipped increments:
 
-3. **Monitoring is the projection axis, not the execution axis** (see §4 "Two
-   orthogonal axes"). A meta-agent that wants to WATCH its sub-computation does not
-   subscribe (dispatch is cone-local, by design) — it declares a **global
-   projection** that folds the sub-scope's events from the shared log and `reads:`
-   it. Observation never re-nests the child in the parent. Open: a node only *acts*
-   on a trigger, and triggers are cone-local — so a meta-agent that must *react* to
-   (not just read) the sub-computation needs an explicit **port** back (a declared
-   cross-scope trigger, the inbound mirror of launch), or that reaction belongs to
-   a node inside the sub-scope / a global terminal handler. The fire-and-forget
-   architect needs neither: it builds, launches, and is done.
+1. **Root (detached) scopes** — `engine.Scope.Detached`; `admit`/`inheritedCones`
+   skip parent-cone inheritance when an event roots a detached scope
+   (`engine/scope.go`); detachment propagates transitively for free. Proven by
+   `TestDetachedScope_ReusesKindInIsolation`.
+2. **Scope-aware validator edges** — `deliverableStatic`/`topLevelScopes`
+   (`engine/validate.go`): the phantom cross-scope edge between two top-level scopes
+   is never drawn, so plain whole-graph SCC reports no false cycle. No cut pass, no
+   per-component split (SCC is already component-agnostic). Proven by
+   `TestValidate_DetachedScopeSuppressesCrossScopeCycle`.
+3. **Foreign-scope-only changesets** — `selfMutationReasons`/`scopesOf`: an
+   in-graph changeset may build OTHER scopes but not the cone it runs in. Proven by
+   `TestSelfMutationReasons` + `TestInGraphChangeset_RejectsSelfScope`.
 
-4. **Relation to the control plane.** Build (`topology.changeset.requested`) and
-   launch (`task.new` into a root scope) are the meta-agent's two control ops.
-   With root scopes, *launch* is just "emit the root-scope's Root kind" — no new
-   mechanism, because the root-ness lives on the scope, not the emit. Build is the
-   in-graph changeset we already have. So the meta-agent needs **no new
-   primitive** beyond the root-scope property — which is the whole point: keep the
-   substrate (log + subscribers + projections), move the isolation into the scope
-   model where it belongs.
+Still open:
+
+- **Monitoring is the projection axis, not the execution axis** (see §4 "Two
+  orthogonal axes"). A meta-agent that wants to WATCH its sub-computation declares a
+  **global projection** that folds the sub-scope's events from the shared log and
+  `reads:` it — it never subscribes (dispatch is cone-local, by design). A
+  meta-agent that must *react* to (not just read) the sub-computation needs an
+  explicit **port** back (a declared cross-scope trigger, the inbound mirror of
+  launch), or that reaction belongs to a node inside the sub-scope / a global
+  terminal handler. The fire-and-forget architect needs neither. Not yet built —
+  no global-horizon projection over a sibling scope has been exercised.
+- **Nested-scope edge precision.** `deliverableStatic` only suppresses an edge when
+  BOTH endpoints are top-level (provably siblings). An edge from a node in a scope
+  nested under top-level A to a node in a different top-level B is kept (conservative
+  — could over-report, never hides a real cycle). Tightening this needs static
+  nesting inference, left as future work.
+- **Apply the capability to the architect.** The `architect` topology still uses the
+  band-aid distinct turn kinds (`architect.message`/`architect.empty`). Marking the
+  dispatched worker scope `detached: true` makes it a true sibling (genuine
+  fire-and-forget); note the band-aid is also load-bearing for a *separate* reason —
+  the architect's prose turn is terminal (no consumer) while the worker's
+  `llm.message` is consumed, and `terminal` is a catalog-global property — so kind
+  reuse across the two is constrained independently of detachment.
+
+**No new primitive.** Build (`topology.changeset.requested`) and launch (emit the
+root scope's Root kind) remain the meta-agent's two control ops; root-ness lives on
+the scope, not the emit. The substrate (log + subscribers + projections) is
+unchanged — the isolation moved into the scope model where it belongs.
 
 ---
 
@@ -258,9 +284,9 @@ are two components, each acyclic on its own.
   be global, folding neighboring scopes from the shared log. So observation is
   decoupled from execution — a meta-agent reads its sub-scope via a global
   projection, never by a subscription.
-- Settling it needs: a root-scope property on scopes; `admit` not inheriting
-  parents for a root-scope instance; a changeset that may only mutate a FOREIGN
-  scope; and a validator that **cuts the root-scope ports** and validates each
-  weakly-connected component independently (a basic graph op — `graphval` already
-  has reachability/SCCs). Monitoring is a global projection over the shared log,
-  not a subscription.
+- **Built in three increments**: (1) the `Detached` scope property + parent-free
+  `admit`; (2) **scope-aware validator edges** — NOT a port-cut/per-component pass:
+  SCC already handles disconnected graphs, so the only fix needed was to stop
+  drawing the phantom cross-scope edge between two top-level scopes; (3) a changeset
+  that may only mutate a FOREIGN scope. Monitoring (a global projection over the
+  shared log, not a subscription) remains the open piece.

@@ -14,7 +14,7 @@ when an older doc disagrees, `CONCEPT.md` wins.
 | [`28-substrate-rebuild-roadmap.md`](./28-substrate-rebuild-roadmap.md) | **LIVE** build tracker — what shipped, what is next. |
 | [`29-swebench-target.md`](./29-swebench-target.md) | **TARGET** — one SWE-bench Lite instance on the new stack: the goal, the agent topology, the framework plan. |
 | [`30-scopes-state-and-fan-out.md`](./30-scopes-state-and-fan-out.md) | **DESIGN** — scopes/cones, per-scope state, parallel fan-out/fan-in, subscriber roles. |
-| [`31-meta-agent-and-root-scopes.md`](./31-meta-agent-and-root-scopes.md) | **DESIGN** — the meta-agent (builds + dispatches a sub-topology) and isolation via **root scopes** (not a "graph" partition). |
+| [`31-meta-agent-and-root-scopes.md`](./31-meta-agent-and-root-scopes.md) | **IMPLEMENTED** — the meta-agent (builds + dispatches a sub-topology) and isolation via **root (detached) scopes**: parent-free `admit`, scope-aware validator edges, foreign-scope-only changesets. |
 
 ## History
 
