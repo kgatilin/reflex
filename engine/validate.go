@@ -210,7 +210,7 @@ func Validate(decls ...Decl) (Report, error) {
 	rep.UnknownViewTypes = unknownViewTypes(decls)
 	rep.DanglingReads = danglingReads(decls, nodes)
 
-	rep.Suggestions = suggestions(rep)
+	rep.Suggestions = suggestions(rep, cat.kinds())
 	rep.Connected = len(rep.DeadEnds) == 0 &&
 		len(rep.UnreachableNodes) == 0 &&
 		len(rep.Fragments) == 0 &&
@@ -817,8 +817,11 @@ func budgetedScopes(decls []Decl) map[string]struct{} {
 
 // suggestions renders human-readable bridge proposals for the gaps (doc 27
 // §1/§5). Dead-ends get an LLM-bridge suggestion; unreachable nodes and
-// unbounded cycles get explanatory lines.
-func suggestions(rep Report) []string {
+// unbounded cycles get explanatory lines. catKinds is the catalog's concrete
+// kinds, used to add a "did you mean X?" hint to an unknown kind / dead
+// subscription — a meta-agent that misspells a kind (separator confusion, a typo,
+// or an invented tool) gets steered to the real one (doc 27 §5).
+func suggestions(rep Report, catKinds []string) []string {
 	var out []string
 	for _, k := range rep.DeadEnds {
 		out = append(out, fmt.Sprintf(
@@ -847,15 +850,107 @@ func suggestions(rep Report) []string {
 	}
 	for _, k := range rep.UnknownKinds {
 		out = append(out, fmt.Sprintf(
-			"kind %q is emitted but not in the event catalog — register it (an EventKind decl, or emit an \"event.registered\" fact carrying {kind: %q, schema}) or fix the name (doc 26 §4a)",
-			k, k))
+			"kind %q is emitted but not in the event catalog — register it (an EventKind decl, or emit an \"event.registered\" fact carrying {kind: %q, schema}) or fix the name%s (doc 26 §4a)",
+			k, k, didYouMean(k, catKinds)))
 	}
 	for _, pat := range rep.DeadSubscriptions {
 		out = append(out, fmt.Sprintf(
-			"subscription pattern %q matches no catalog kind — it can never fire; fix the pattern or register a producer kind it matches (an EventKind / \"event.registered\", doc 26 §4a)",
-			pat))
+			"subscription pattern %q matches no catalog kind — it can never fire; fix the pattern or register a producer kind it matches (an EventKind / \"event.registered\")%s (doc 26 §4a)",
+			pat, didYouMean(pat, catKinds)))
 	}
 	return out
+}
+
+// didYouMean returns a trailing hint naming the catalog kind(s) closest to an
+// unknown kind, plus — when the unknown looks like a tool call — the actual
+// available *.call kinds. The closeness is edit distance bounded to roughly a
+// third of the length, so a separator slip (tool_fs_read_call → tool.fs.read.call)
+// or a small typo (….read.return → ….read.result) is caught while an unrelated
+// name yields no false suggestion. Returns "" when nothing is close and the kind
+// is not tool-shaped. The leading space lets it be concatenated into a sentence.
+func didYouMean(unknown string, catKinds []string) string {
+	best, bestDist := "", 1<<30
+	for _, k := range catKinds {
+		if d := levenshtein(unknown, k); d < bestDist {
+			best, bestDist = k, d
+		}
+	}
+	var hint string
+	if best != "" && bestDist <= editThreshold(unknown) {
+		hint = fmt.Sprintf(" — did you mean %q?", best)
+	}
+	// Invented tools (e.g. tool.bash.call) are usually too far for an edit-distance
+	// hit, so additionally list the real tool-call kinds when the name is tool-shaped.
+	if looksLikeToolKind(unknown) {
+		var tools []string
+		for _, k := range catKinds {
+			if isToolCallKind(k) {
+				tools = append(tools, k)
+			}
+		}
+		sort.Strings(tools)
+		if len(tools) > 0 {
+			hint += fmt.Sprintf(" — the available tool kinds are: %v", tools)
+		}
+	}
+	return hint
+}
+
+// editThreshold is how close a candidate must be to be offered as "did you mean":
+// at most a third of the (longer-of-the-two-ish) length, floored at 2 so a short
+// kind still tolerates a small slip.
+func editThreshold(s string) int {
+	if t := len(s) / 3; t > 2 {
+		return t
+	}
+	return 2
+}
+
+func looksLikeToolKind(k string) bool {
+	toks := splitTokens(k)
+	if len(toks) > 0 && toks[0] == "tool" {
+		return true
+	}
+	// underscore-mangled tool names (tool_fs_read_call) tokenise as one token.
+	return len(k) >= 5 && k[:5] == "tool_"
+}
+
+// isToolCallKind reports whether a kind is a host tool's call kind (tool.<…>.call).
+func isToolCallKind(k string) bool {
+	toks := splitTokens(k)
+	return len(toks) >= 2 && toks[0] == "tool" && toks[len(toks)-1] == "call"
+}
+
+// levenshtein is the standard edit distance (insert/delete/substitute), used only
+// for the "did you mean" suggestion — a tiny O(len²) over short kind strings.
+func levenshtein(a, b string) int {
+	prev := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur := make([]int, len(b)+1)
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min3(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev = cur
+	}
+	return prev[len(b)]
+}
+
+func min3(a, b, c int) int {
+	if b < a {
+		a = b
+	}
+	if c < a {
+		a = c
+	}
+	return a
 }
 
 // allowlistLint is the runtime allowlist check (doc 24 §A.4): a node emitting

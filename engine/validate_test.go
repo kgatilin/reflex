@@ -349,3 +349,47 @@ func TestValidate_DetachedScopeSuppressesCrossScopeCycle(t *testing.T) {
 		}
 	})
 }
+
+// TestValidate_DidYouMeanForUnknownKinds proves the validator steers a misspelled
+// or invented kind to the real one (doc 27 §5): separator confusion and small
+// typos get a "did you mean" hit, and a tool-shaped name additionally lists the
+// real tool-call kinds — the feedback a meta-agent needs to fix a hallucinated kind.
+func TestValidate_DidYouMeanForUnknownKinds(t *testing.T) {
+	// A catalog with the real host tool kinds + an external entry.
+	catalog := []Decl{
+		EventKind{Kind: "request.received"},
+		EventKind{Kind: "tool.fs.read.call"}, EventKind{Kind: "tool.fs.read.result"},
+		EventKind{Kind: "tool.fs.edit.call"}, EventKind{Kind: "tool.py.test.call"},
+	}
+
+	t.Run("separator confusion is corrected", func(t *testing.T) {
+		decls := append([]Decl{
+			Subscriber{Name: "w", On: []string{"request.received"}, In: "global", Emits: []string{"tool_fs_read_call"}},
+		}, catalog...)
+		rep, _ := Validate(decls...)
+		if !anyContains(rep.Suggestions, `did you mean "tool.fs.read.call"`) {
+			t.Fatalf("expected a did-you-mean for tool_fs_read_call; got %v", rep.Suggestions)
+		}
+	})
+
+	t.Run("typo is corrected", func(t *testing.T) {
+		decls := append([]Decl{
+			Subscriber{Name: "w", On: []string{"request.received"}, In: "global", Emits: []string{"tool.fs.read.return"}},
+		}, catalog...)
+		rep, _ := Validate(decls...)
+		if !anyContains(rep.Suggestions, `did you mean "tool.fs.read.result"`) {
+			t.Fatalf("expected a did-you-mean for tool.fs.read.return; got %v", rep.Suggestions)
+		}
+	})
+
+	t.Run("invented tool lists the real tool kinds", func(t *testing.T) {
+		decls := append([]Decl{
+			Subscriber{Name: "w", On: []string{"request.received"}, In: "global", Emits: []string{"tool.bash.call"}},
+		}, catalog...)
+		rep, _ := Validate(decls...)
+		if !anyContains(rep.Suggestions, "available tool kinds are") ||
+			!anyContains(rep.Suggestions, "tool.fs.read.call") {
+			t.Fatalf("expected the available tool kinds listed for tool.bash.call; got %v", rep.Suggestions)
+		}
+	})
+}
