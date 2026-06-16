@@ -1,62 +1,63 @@
 # architect — a meta-agent that has NO file/python tools, only the in-graph
-# control plane. Its whole job: read a task, DECIDE what topology solves it,
-# BUILD that topology at runtime, and DISPATCH the task into it. It is
-# FIRE-AND-FORGET: the architect builds and launches, then it is done. It does
-# NOT subscribe to the worker's result — checking/terminating the work is the
-# built topology's concern, not the architect's.
+# control plane. Its whole job: read a task, DESIGN a topology that solves it,
+# BUILD that topology at runtime PIECE BY PIECE, and DISPATCH the task into it. It
+# is FIRE-AND-FORGET: the architect builds and launches, then it is done. It does
+# NOT subscribe to the worker's result — terminating the work is the built
+# topology's concern, not the architect's.
 #
-# This is the in-graph control plane (doc 20) made into an agent. The brain's two
-# capabilities are not plugins — they are ordinary event emits the kernel already
-# understands:
+# The brain composes a DRAFT topology with small STRUCTURED, typed function calls,
+# then commits it — instead of authoring one big YAML document. Its control plane
+# (all self-registered by the `bridge`, body kind "changeset", with PROPER JSON
+# schemas so function-calling is forced to produce well-formed structured pieces):
 #
-#   topology.apply.requested{document}  — "apply this topology" — a friendly
-#       tool-call carrying a YAML topology document. The `bridge` (body kind
-#       "changeset") parses it and emits topology.changeset.requested; the engine
-#       validates + commits it like an operator apply and the new subgraph goes
-#       LIVE in the same drain (engine live-refresh). The brain hears the outcome
-#       on topology.changeset.applied / .rejected (engine-owned) and the parse
-#       outcome on topology.apply.failed (the bridge's) — its feedback to iterate.
+#   topology.scope.add{name, root, detached, budget}         — add a scope
+#   topology.event.add{kind, terminal, schema}               — register an event
+#   topology.subscriber.add{name, on, in, emits, reads, body}— add a subscriber
+#   topology.projection.add{name, on, in, type, params}      — add a projection
+#   topology.build{}                                         — validate + COMMIT
+#       the accumulated draft as one changeset; the engine validates the WHOLE
+#       resulting graph and the subgraph goes LIVE in the same drain.
+#   task.new{task}                                          — DISPATCH the task
+#       into what it built (roots the worker subgraph).
 #
-#   task.new{...}                       — "dispatch a prompt into the system" —
-#       roots the worker subgraph the brain just built. Because the apply already
-#       went live, the dispatched task runs against the freshly-built topology.
-#
-# The brain builds INCREMENTALLY if it wants: each apply must yield a CONNECTED
-# graph (the validator rejects a disconnected outcome, and the reasons come back
-# as feedback). Once a worker is built it dispatches task.new and stops.
+# Each add is ACKed by topology.piece.added (the brain re-drives and adds the next
+# piece — the add-* behave like a tool loop). The build outcome arrives on
+# topology.changeset.applied / .rejected (engine-owned); a malformed build on
+# topology.apply.failed (the bridge's). The draft itself is the `topology.draft`
+# projection — a `log` fold of the add-* events, no hidden state.
 #
 # Termination: the WORKER's own request.terminal ends the run (`emit --wait
-# request.terminal`). The architect does not produce or wait on a terminal of its
-# own — it launched the work and is done. If the architect never manages to build
-# a worker, the architect scope budget is exhausted and architect-exhaust emits a
-# failed request.terminal so the run still terminates with a verdict.
+# request.terminal`). If the architect never manages to build a worker, the
+# architect scope budget is exhausted and architect-exhaust emits a failed
+# request.terminal so the run still terminates with a verdict.
 #
 # The architect brain's own non-tool turns use DISTINCT kinds (architect.message /
-# architect.empty, both terminal). The worker scope is now `detached: true` (a root
-# scope, doc 31 §4), so the cone-collision/cross-scope-cycle reason for distinct
-# kinds is gone — the worker's llm.* turns live in a sibling cone the architect
-# never sees. The distinct kinds remain for a SEPARATE reason: the architect's prose
-# turn is TERMINAL (no consumer — it just talks), while the worker's llm.message is
-# CONSUMED (by worker-done / worker.history); `terminal` is a catalog-global
-# property, so the two roles cannot share one kind regardless of detachment.
+# architect.empty, both terminal): its prose turn is TERMINAL (no consumer — it
+# just talks), while the worker's llm.message is CONSUMED, and `terminal` is a
+# catalog-global property, so the two roles cannot share one kind.
 
 scopes:
   - name: architect
     root: task.architect
     budget:
-      topology.apply.requested: 12   # topology build/iterate attempts
-      task.new: 4                    # dispatches into built subgraphs
-      architect.message: 6           # the brain's prose turns
-      architect.empty: 6             # degenerate silent turns
+      topology.scope.add: 8         # draft pieces — scopes
+      topology.event.add: 24        # draft pieces — events
+      topology.subscriber.add: 24   # draft pieces — subscribers
+      topology.projection.add: 8    # draft pieces — projections
+      topology.build: 6             # commit attempts (iterate on rejection)
+      task.new: 4                   # dispatches into built subgraphs
+      architect.message: 8          # the brain's prose turns
+      architect.empty: 8            # degenerate silent turns
 
 events:
   - kind: task.architect       # external entry: the task for the meta-agent
     terminal: false
-  # topology.apply.requested{document} + topology.apply.failed are SELF-REGISTERED
-  # by the changeset bridge (nodes/changeset Catalog) — its tool schema lives with
-  # the bridge, not here. task.new is the architect's OWN dispatch vocabulary, so
-  # its {task} schema is declared here (the catalog schema IS the function
-  # parameter schema the llm node advertises, forcing the model to provide it).
+  # The control-plane kinds (topology.scope.add / .event.add / .subscriber.add /
+  # .projection.add / .build) + the ACK (topology.piece.added) + the FAIL
+  # (topology.apply.failed) are SELF-REGISTERED with their structured schemas by the
+  # changeset bridge (nodes/changeset Catalog) — the typed tool schemas live with
+  # the bridge, not here. task.new is the architect's OWN dispatch vocabulary, so its
+  # {task} schema is declared here.
   - kind: task.new                   # brain → (the worker it built): dispatch
     terminal: true                   #   consumed by a subgraph built at runtime
     schema:
@@ -78,21 +79,25 @@ events:
   # terminal) — the brain subscribes to applied/rejected without declaring them.
 
 subscribers:
-  # brain — the meta-reasoner (Gemini Pro). It hears the task and the BUILD
-  # outcomes (applied/rejected/failed), reads its history, and CALLS a control
-  # function: build (topology.apply.requested) or dispatch (task.new). It has NO
-  # fs/py/verify tools — only the control plane. It does NOT subscribe to the
-  # worker's result: it builds and launches, then it is done.
+  # brain — the meta-reasoner (Gemini Pro). It hears the task, each piece ACK, and
+  # the build outcomes, reads its history, and CALLS a structured control function
+  # to compose the draft, build it, then dispatch. NO fs/py/verify tools — only the
+  # control plane. It does NOT subscribe to the worker's result.
   - name: brain
     on:
       - task.architect
+      - topology.piece.added
       - topology.changeset.applied
       - topology.changeset.rejected
       - topology.apply.failed
     in: architect
     reads: [brain.history]
     emits:
-      - topology.apply.requested
+      - topology.scope.add
+      - topology.event.add
+      - topology.subscriber.add
+      - topology.projection.add
+      - topology.build
       - task.new
       - architect.message
       - architect.empty
@@ -110,13 +115,12 @@ subscribers:
           You are an ARCHITECT agent for the REFLEX kernel. You are handed a
           software task. You do NOT solve it yourself — you have NO file, shell,
           python, or test tools. Your job: DESIGN a reflex topology that can solve
-          the task, BUILD it with the control plane, and DISPATCH the task into it.
-          The SHAPE of that topology is entirely UP TO YOU — how many agents, what
-          loop, how it decides it is done. Below is the substrate's grammar and the
-          parts available to you; the design is yours.
+          the task, BUILD it at runtime PIECE BY PIECE with the control plane, and
+          DISPATCH the task into it. The SHAPE of that topology — how many agents,
+          what loop, how it decides it is done — is entirely UP TO YOU.
 
           ── THE REFLEX MODEL ──────────────────────────────────────────────
-          Everything is events on a log. You wire declarations:
+          Everything is events on a log. You compose a topology from declarations:
             • a SUBSCRIBER reacts to event kinds and emits event kinds;
             • a SCOPE is a budgeted bubble that bounds loops and roots a run;
             • a PROJECTION folds past events into a read-model (e.g. chat history);
@@ -124,93 +128,106 @@ subscribers:
           A "tool" is NOT special — it is a subscriber that consumes a *.call kind
           and produces a *.result kind.
 
-          ── DOCUMENT FORMAT (the ONLY top-level keys) ─────────────────────
-          YAML with ONLY: `scopes:`, `events:`, `subscribers:`, `projections:`.
-          There is NO `nodes:`, NO `agent:`, NO `tools:` — those are other
-          frameworks and are REJECTED. The fields:
-            subscriber: { name, on: [kind...], in: <scope|global>, emits: [kind...],
-                          reads: [projection...], body: { kind, config } }
-            scope:      { name, root: <kind>, budget: { <kind>: <int>, ... },
-                          detached: <bool> }
-            event:      { kind, terminal: <bool>, schema: <json-schema> }
-            projection: { name, on: [kind...], in: <scope|global>, type, params }
+          ── HOW YOU BUILD — one typed piece at a time (a DRAFT) ───────────
+          You do NOT write a YAML document. You call typed functions, each adding ONE
+          piece to a DRAFT topology. Add pieces in any order; each is acknowledged
+          (topology.piece.added with a running total) so you can add the next:
 
-          ── BODY KINDS for a subscriber ───────────────────────────────────
+            topology.scope.add(name, root, detached?, budget?)
+                — root: the event kind whose dispatch opens an instance.
+                — budget: { "<kind>": <int> } bounds a looping kind in the cone.
+                — detached: true ⇒ a top-level SIBLING cone (use it for the worker
+                  you dispatch into, so it is isolated from you).
+            topology.event.add(kind, terminal?, schema?)
+                — schema: the JSON Schema of the event's payload; it is advertised as
+                  the FUNCTION PARAMETERS to any llm that emits this kind.
+                — terminal: true ⇒ a graph output/leaf needing no consumer.
+            topology.subscriber.add(name, on?, in?, emits?, reads?, body?)
+                — on: kinds it reacts to; emits: kinds it may emit; in: a scope name
+                  or "global"; reads: projection names.
+                — body: { kind: "llm"|"entry"|"gate", config: {...} }. OMIT body and
+                  name the subscriber EXACTLY after a *.call kind to get a host-backed
+                  tool (see HANDS below).
+            topology.projection.add(name, on, in?, type?, params?)
+
+          ── BODY KINDS ────────────────────────────────────────────────────
             • llm   — a model. config: { model, project, location, max_tokens,
-                      system, answer, empty }. Each turn it CALLS a function (emits
-                      one of its `emits` *.call kinds) or, with no call, emits
-                      `answer` (prose) / `empty` (silence). Give it
-                      reads: [<an llm.history projection>] so it sees the
-                      conversation. Model binding available to you:
-                      model: vertex:gemini-3.5-flash, project: iow-uagent,
+                      system }. Each turn it CALLS a function (emits one of its
+                      `emits` *.call kinds) or, with no call, emits llm.message
+                      (prose) / llm.empty (silence). Give it reads: [<an llm.history
+                      projection>] so it sees the conversation. Model binding
+                      available: model: vertex:gemini-3.5-flash, project: iow-uagent,
                       location: global.
             • entry — emits one fixed kind. config: { emit: <kind>, payload: {...}? }.
-                      A connector/injector.
             • gate  — emits `emit` when the trigger's status is in `when`.
                       config: { emit: <kind>, when: [<value>...], field: <name>? }.
-            • a subscriber whose NAME is exactly one of the *.call kinds below needs
-              NO body — the host auto-backs it. That is how you give a worker hands.
 
-          ── HANDS the host already launched (wire by name) ────────────────
-          These tool-call kinds are live; a subscriber named after one runs it, and
-          its parameter schema is auto-advertised to any llm that lists it in `emits`:
+          ── HANDS the host already launched (wire a subscriber NAMED after one) ──
             tool.fs.read.call    → tool.fs.read.result | tool.fs.read.failed
             tool.fs.edit.call    → tool.fs.edit.result | tool.fs.edit.failed
             tool.fs.search.call  → tool.fs.search.result | tool.fs.search.failed
             tool.py.test.call    → tool.py.test.result | tool.py.test.failed
+          A subscriber named exactly e.g. "tool.fs.read.call" (no body) runs that
+          tool; its parameter schema is auto-advertised to any llm that emits it.
 
           ── PROJECTION type for an llm ───────────────────────────────────
           type: llm.history  params: { system, answer, task_kinds: [kind...],
           emits: [kind...] } — folds the run's events into a chat transcript an llm
           node reads.
 
-          ── YOUR CONTROL PLANE (your only two functions) ─────────────────
-            • topology.apply.requested(document) — BUILD: apply a reflex topology
-              (the YAML as a string). The subgraph goes live immediately. You hear
-              back on topology.changeset.applied / .rejected / topology.apply.failed.
-            • task.new(task) — DISPATCH: inject the task into what you built.
+          ── COMMIT + DISPATCH ─────────────────────────────────────────────
+            • topology.build() — validate + COMMIT the whole draft. The engine checks
+              the resulting graph as a whole; you hear topology.changeset.applied or
+              .rejected (with reasons — fix by adding/correcting pieces and building
+              again), or topology.apply.failed for a malformed piece.
+            • task.new(task) — DISPATCH the task into what you built.
 
           ── HARD CONTRACT — termination (the host waits on this) ──────────
           The host runs your topology and WAITS for ONE terminal event:
-          `request.terminal`. Your topology MUST emit `request.terminal` (declared
+          `request.terminal`. Your topology MUST emit `request.terminal` (added with
           terminal: true) when the work is DONE *and* when it FAILS — else the run
-          never ends. Every loop MUST sit inside a SCOPE whose `budget` bounds the
-          looping kind, and you MUST wire `scope.<name>.budget_exhausted` to emit a
-          failed `request.terminal` so even an exhausted attempt terminates.
-
-          ── ISOLATION ────────────────────────────────────────────────────
-          Mark the scope that roots your worker `detached: true`: it then runs as a
-          top-level SIBLING of you, so its events never collide with yours and you
-          are done the moment you dispatch.
+          never ends. Every loop MUST sit in a SCOPE whose `budget` bounds the
+          looping kind, and you MUST wire `scope.<name>.budget_exhausted` to a failed
+          `request.terminal` so even an exhausted attempt terminates.
 
           ── WORKFLOW ─────────────────────────────────────────────────────
             1. Read the task.
-            2. DESIGN a topology that can solve it; call topology.apply.requested
-               with the full YAML `document`. (No `subscribers:` builds nothing.)
-            3. On .rejected / apply.failed: READ the reasons and re-emit a corrected
-               FULL document.
+            2. Compose the draft: add the scope(s), events, subscribers and
+               projection(s) with the typed functions above. Root the worker in a
+               `detached: true` scope.
+            3. Call topology.build. On .rejected/apply.failed READ the reasons, add
+               or correct pieces, and build again.
             4. On .applied: call task.new with the task text. That is your LAST
                action — the topology you built does the work and terminates itself.
 
-  # bridge — turns the brain's "apply this topology" tool-call into an in-graph
-  # changeset request (body kind "changeset"). It self-registers its tool schema
-  # (topology.apply.requested{document}); it is the only place the document format
-  # is parsed on the in-graph path. Scoped in the architect loop.
+  # bridge — the in-graph control plane (body kind "changeset"). It self-registers
+  # the typed control functions (with structured JSON schemas), ACKs each add piece,
+  # and on topology.build folds the draft (topology.draft) into one changeset
+  # request the engine validates + commits. Scoped in the architect loop.
   - name: bridge
-    on: [topology.apply.requested]
+    on:
+      - topology.scope.add
+      - topology.event.add
+      - topology.subscriber.add
+      - topology.projection.add
+      - topology.build
     in: architect
-    emits: [topology.changeset.requested, topology.apply.failed]
+    reads: [topology.draft]
+    emits:
+      - topology.piece.added
+      - topology.changeset.requested
+      - topology.apply.failed
     body:
       kind: changeset
       config:
         fail: topology.apply.failed
+        ack: topology.piece.added
         principal: architect
+        draft: topology.draft
 
   # architect-exhaust — the only meta-level terminator, and only for the FAILURE
-  # path: if the architect never manages to build a worker (budget exhausted), emit
-  # a failed request.terminal so the run still ends with a verdict. The SUCCESS path
-  # terminates through the worker's own request.terminal — the architect does not
-  # wait for it.
+  # path: if the architect never builds a worker (budget exhausted), emit a failed
+  # request.terminal so the run still ends with a verdict.
   - name: architect-exhaust
     on: [scope.architect.budget_exhausted]
     in: global
@@ -220,14 +237,31 @@ subscribers:
       config: { emit: request.terminal, payload: { status: failed } }
 
 projections:
+  # topology.draft — the DRAFT topology: a `log` fold of every add-* piece the brain
+  # has emitted in the architect cone. The bridge reads it on topology.build to
+  # assemble the changeset. The draft is a projection over the log, not hidden state.
+  - name: topology.draft
+    on:
+      - topology.scope.add
+      - topology.event.add
+      - topology.subscriber.add
+      - topology.projection.add
+    in: architect
+    type: log
+
   # brain.history — the meta-agent's conversation: the task as the first user
-  # message, the brain's own control calls as assistant turns, the build outcomes
-  # (applied/rejected/failed) as user turns. params.emits mirrors the brain's menu
-  # MINUS architect.empty (a silent turn is roled a user re-prompt).
+  # message, the brain's own control calls as assistant turns, the piece ACKs and
+  # build outcomes as tool results / user turns. params.emits mirrors the brain's
+  # control menu so each call is rendered as a function call in the transcript.
   - name: brain.history
     on:
       - task.architect
-      - topology.apply.requested
+      - topology.scope.add
+      - topology.event.add
+      - topology.subscriber.add
+      - topology.projection.add
+      - topology.build
+      - topology.piece.added
       - topology.changeset.applied
       - topology.changeset.rejected
       - topology.apply.failed
@@ -238,13 +272,18 @@ projections:
     type: llm.history
     params:
       system: |
-        You are an ARCHITECT agent with only the control plane: build a topology
-        for the task (topology.apply.requested) and dispatch the task into it
+        You are an ARCHITECT agent with only the control plane: compose a draft
+        topology piece by piece (topology.scope.add / .event.add / .subscriber.add /
+        .projection.add), commit it (topology.build), and dispatch the task into it
         (task.new). You have no file/python tools and you do not monitor the result.
       answer: architect.message
       task_kinds: [task.architect]
       emits:
-        - topology.apply.requested
+        - topology.scope.add
+        - topology.event.add
+        - topology.subscriber.add
+        - topology.projection.add
+        - topology.build
         - task.new
         - architect.message
         - llm.usage

@@ -8,148 +8,208 @@ import (
 	"github.com/kgatilin/reflex/engine"
 )
 
-// reqPayload mirrors the engine's (unexported) changeset request payload so the
-// test can read the ops the bridge produced. engine.Op is exported.
+// reqPayload mirrors the engine's changeset request payload so the test can read
+// the ops the bridge assembled from the draft. engine.Op is exported.
 type reqPayload struct {
 	Ops       []engine.Op `json:"ops"`
 	Principal string      `json:"principal"`
 }
 
-const sampleDoc = `
-events:
-  - {kind: task.new, terminal: true}
-  - {kind: worker.done, terminal: true}
-subscribers:
-  - name: worker
-    on: [task.new]
-    emits: [worker.done]
-    body: {kind: entry, config: {emit: worker.done}}
-`
+// draftViews is a fake engine.Views whose `draft` view is a fixed []Event — the
+// accumulated add-* pieces. Everything else is the null object.
+type draftViews struct{ draft []engine.Event }
 
-func react(t *testing.T, cfg Config, payload string) []engine.Emit {
-	t.Helper()
-	raw, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatalf("marshal config: %v", err)
+func (v draftViews) Value(name string) any {
+	if name == "topology.draft" {
+		return v.draft
 	}
+	return nil
+}
+func (draftViews) KV(string) engine.KV                          { return nil }
+func (v draftViews) Log(name string) []engine.Event             { return v.draft }
+func (draftViews) Schema(string) (json.RawMessage, bool)        { return nil, false }
+
+func react(t *testing.T, cfg Config, kind string, payload string, views engine.Views) []engine.Emit {
+	t.Helper()
+	raw, _ := json.Marshal(cfg)
 	r, err := Factory(engine.Subscriber{Name: "bridge", BodyConfig: raw})
 	if err != nil {
 		t.Fatalf("Factory: %v", err)
 	}
-	emits, err := r.React(context.Background(), engine.Event{Payload: json.RawMessage(payload)}, nil)
+	ev := engine.Event{Subject: kind, Payload: json.RawMessage(payload)}
+	emits, err := r.React(context.Background(), ev, views)
 	if err != nil {
 		t.Fatalf("React: %v", err)
 	}
 	return emits
 }
 
-// TestBridge_DocumentToChangesetRequest proves the bridge turns a topology
-// document (a brain's "apply this topology" tool-call) into a single
-// engine.KindChangesetRequested emit carrying the document's decls as add-ops.
-func TestBridge_DocumentToChangesetRequest(t *testing.T) {
-	payload, _ := json.Marshal(map[string]string{"document": sampleDoc})
-	emits := react(t, Config{}, string(payload))
+// addEvent builds a draft entry: an add-* event of the given kind + payload.
+func addEvent(kind string, payload string) engine.Event {
+	return engine.Event{Subject: kind, Payload: json.RawMessage(payload)}
+}
 
-	if len(emits) != 1 {
-		t.Fatalf("emits = %d, want 1", len(emits))
+// TestBridge_AddAcks proves an add-* piece is ACKed (so the brain re-drives and
+// adds the next), echoing the added kind + name + running draft total.
+func TestBridge_AddAcks(t *testing.T) {
+	// The draft already holds one scope; this add is the second piece.
+	views := draftViews{draft: []engine.Event{
+		addEvent(KindScopeAdd, `{"name":"request"}`),
+		addEvent(KindSubscriberAdd, `{"name":"worker"}`),
+	}}
+	emits := react(t, Config{}, KindSubscriberAdd, `{"name":"worker"}`, views)
+	if len(emits) != 1 || emits[0].Kind != defaultAck {
+		t.Fatalf("emits = %+v, want one %q ack", emits, defaultAck)
 	}
-	if emits[0].Kind != engine.KindChangesetRequested {
-		t.Fatalf("emit kind = %q, want %q", emits[0].Kind, engine.KindChangesetRequested)
+	var body map[string]any
+	_ = json.Unmarshal(emits[0].Payload, &body)
+	if body["added"] != KindSubscriberAdd || body["name"] != "worker" {
+		t.Errorf("ack body = %v, want added=%q name=worker", body, KindSubscriberAdd)
 	}
-
-	var rp reqPayload
-	if err := json.Unmarshal(emits[0].Payload, &rp); err != nil {
-		t.Fatalf("unmarshal request payload: %v", err)
-	}
-	if rp.Principal != defaultPrinc {
-		t.Errorf("principal = %q, want %q", rp.Principal, defaultPrinc)
-	}
-	// The doc has 2 events + 1 subscriber → 3 add-ops.
-	if len(rp.Ops) != 3 {
-		t.Fatalf("ops = %d, want 3 (2 events + 1 subscriber)", len(rp.Ops))
-	}
-	var subOps, evOps int
-	for _, op := range rp.Ops {
-		if op.Verb != "add" {
-			t.Errorf("op %q verb = %q, want add", op.Name, op.Verb)
-		}
-		switch op.Kind {
-		case "subscriber":
-			subOps++
-		case "event":
-			evOps++
-		}
-	}
-	if subOps != 1 || evOps != 2 {
-		t.Errorf("op kinds: subscriber=%d event=%d, want 1 and 2", subOps, evOps)
+	if body["total"].(float64) != 2 {
+		t.Errorf("ack total = %v, want 2", body["total"])
 	}
 }
 
-// TestBridge_InlineObjectDocument proves the document field may be an inline JSON
-// object (already structured), not only a YAML string.
-func TestBridge_InlineObjectDocument(t *testing.T) {
-	payload := `{"document": {"events": [{"kind": "x.k", "terminal": true}]}}`
-	emits := react(t, Config{}, payload)
+// TestBridge_BuildAssemblesDraft is the core: topology.build folds the accumulated
+// add-* pieces into ONE changeset request whose ops carry the right decls.
+func TestBridge_BuildAssemblesDraft(t *testing.T) {
+	views := draftViews{draft: []engine.Event{
+		addEvent(KindScopeAdd, `{"name":"request","root":"request.received","detached":true,"budget":{"llm.message":8}}`),
+		addEvent(KindEventAdd, `{"kind":"request.terminal","terminal":true}`),
+		addEvent(KindSubscriberAdd, `{"name":"worker","on":["request.received"],"in":"request","emits":["llm.message"],"body":{"kind":"llm","config":{"model":"vertex:gemini-3.5-flash"}}}`),
+		addEvent(KindProjectionAdd, `{"name":"worker.history","on":["request.received"],"in":"request","type":"llm.history"}`),
+	}}
+	emits := react(t, Config{}, KindBuild, `{}`, views)
 	if len(emits) != 1 || emits[0].Kind != engine.KindChangesetRequested {
 		t.Fatalf("emits = %+v, want one changeset request", emits)
 	}
 	var rp reqPayload
-	_ = json.Unmarshal(emits[0].Payload, &rp)
-	if len(rp.Ops) != 1 || rp.Ops[0].Kind != "event" {
-		t.Errorf("ops = %+v, want one event op", rp.Ops)
+	if err := json.Unmarshal(emits[0].Payload, &rp); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	if rp.Principal != defaultPrinc {
+		t.Errorf("principal = %q, want %q", rp.Principal, defaultPrinc)
+	}
+	// 1 scope + 1 event + 1 subscriber + 1 projection = 4 add-ops.
+	if len(rp.Ops) != 4 {
+		t.Fatalf("ops = %d, want 4", len(rp.Ops))
+	}
+	kinds := map[string]int{}
+	for _, op := range rp.Ops {
+		if op.Verb != "add" {
+			t.Errorf("op %q verb = %q, want add", op.Name, op.Verb)
+		}
+		kinds[op.Kind]++
+	}
+	for _, want := range []string{"scope", "event", "subscriber", "projection"} {
+		if kinds[want] != 1 {
+			t.Errorf("op kind %q count = %d, want 1 (got %v)", want, kinds[want], kinds)
+		}
 	}
 }
 
-// TestBridge_ParseFailureEmitsFail proves a malformed document yields the fail
-// feedback kind (carrying the error) rather than a changeset request — the
-// brain's signal to fix the document.
-func TestBridge_ParseFailureEmitsFail(t *testing.T) {
-	payload := `{"document": "this: : : not valid yaml: ["}`
-	emits := react(t, Config{}, payload)
-	if len(emits) != 1 {
-		t.Fatalf("emits = %d, want 1", len(emits))
+// TestBridge_BuildDecodesScopeDetachedAndBody proves the structured fields survive
+// into the decls: the detached flag and the subscriber's nested body descriptor.
+func TestBridge_BuildDecodesScopeDetachedAndBody(t *testing.T) {
+	draft := []engine.Event{
+		addEvent(KindScopeAdd, `{"name":"request","root":"request.received","detached":true}`),
+		addEvent(KindSubscriberAdd, `{"name":"worker","in":"request","body":{"kind":"llm","config":{"model":"m"}}}`),
 	}
-	if emits[0].Kind != defaultFail {
-		t.Fatalf("emit kind = %q, want %q", emits[0].Kind, defaultFail)
+	decls, err := declsFromDraft(draft)
+	if err != nil {
+		t.Fatalf("declsFromDraft: %v", err)
 	}
-	var body map[string]string
-	if err := json.Unmarshal(emits[0].Payload, &body); err != nil || body["error"] == "" {
-		t.Errorf("fail payload = %s, want a non-empty error field", emits[0].Payload)
+	var sawDetached, sawBody bool
+	for _, d := range decls {
+		switch v := d.(type) {
+		case engine.Scope:
+			if v.Name == "request" && v.Detached {
+				sawDetached = true
+			}
+		case engine.Subscriber:
+			if v.Name == "worker" && v.BodyKind == "llm" && len(v.BodyConfig) > 0 {
+				sawBody = true
+			}
+		}
+	}
+	if !sawDetached {
+		t.Error("scope detached flag was lost")
+	}
+	if !sawBody {
+		t.Error("subscriber body descriptor was lost")
 	}
 }
 
-// TestBridge_ZeroDeclsRejected proves a well-formed YAML that matches NO reflex
-// field (a foreign agent format) is rejected — not applied as a silent no-op. The
-// fail message names the keys actually sent, so the brain can correct the format.
-func TestBridge_ZeroDeclsRejected(t *testing.T) {
-	foreign := "nodes:\n- agent:\n    tools: [bash, python]\n  name: worker\n"
-	payload, _ := json.Marshal(map[string]string{"document": foreign})
-	emits := react(t, Config{}, string(payload))
+// TestBridge_BuildEmptyDraftFails proves committing an empty draft is rejected with
+// guidance (not a vacuous apply).
+func TestBridge_BuildEmptyDraftFails(t *testing.T) {
+	emits := react(t, Config{}, KindBuild, `{}`, draftViews{})
 	if len(emits) != 1 || emits[0].Kind != defaultFail {
-		t.Fatalf("emits = %+v, want one fail emit (0-decl document)", emits)
+		t.Fatalf("emits = %+v, want one fail emit", emits)
 	}
 	var body map[string]string
 	_ = json.Unmarshal(emits[0].Payload, &body)
-	if body["error"] == "" || !contains(body["error"], "nodes") {
-		t.Errorf("fail error = %q, want it to name the foreign top-level key 'nodes'", body["error"])
+	if !contains(body["error"], "draft is empty") {
+		t.Errorf("error = %q, want it to say the draft is empty", body["error"])
+	}
+}
+
+// TestBridge_BuildMalformedPieceFails proves a corrupt draft entry aborts the build
+// naming the offending kind.
+func TestBridge_BuildMalformedPieceFails(t *testing.T) {
+	views := draftViews{draft: []engine.Event{
+		addEvent(KindScopeAdd, `{"name":"ok","root":"x"}`),
+		addEvent(KindSubscriberAdd, `{"on": "not-an-array"}`),
+	}}
+	emits := react(t, Config{}, KindBuild, `{}`, views)
+	if len(emits) != 1 || emits[0].Kind != defaultFail {
+		t.Fatalf("emits = %+v, want one fail emit", emits)
+	}
+	var body map[string]string
+	_ = json.Unmarshal(emits[0].Payload, &body)
+	if !contains(body["error"], KindSubscriberAdd) {
+		t.Errorf("error = %q, want it to name %q", body["error"], KindSubscriberAdd)
+	}
+}
+
+// TestCatalog_AdvertisesStructuredSchemas proves the bridge self-registers each
+// control kind in its On WITH a structured (typed) schema — the whole point: the
+// model calls a typed function, not a free-text document field.
+func TestCatalog_AdvertisesStructuredSchemas(t *testing.T) {
+	s := engine.Subscriber{
+		Name: "bridge",
+		On:   []string{KindScopeAdd, KindSubscriberAdd, KindBuild},
+	}
+	kinds := Catalog(s)
+	byKind := map[string]engine.EventKind{}
+	for _, k := range kinds {
+		byKind[k.Kind] = k
+	}
+	for _, want := range []string{KindScopeAdd, KindSubscriberAdd} {
+		ek, ok := byKind[want]
+		if !ok || len(ek.Schema) == 0 {
+			t.Errorf("%q not advertised with a schema (got %+v)", want, ek)
+			continue
+		}
+		if !contains(string(ek.Schema), `"properties"`) || !contains(string(ek.Schema), `"name"`) {
+			t.Errorf("%q schema is not a structured object: %s", want, ek.Schema)
+		}
+	}
+	// The fail + ack feedback kinds are registered too.
+	if _, ok := byKind[defaultFail]; !ok {
+		t.Errorf("fail kind %q not registered", defaultFail)
+	}
+	if _, ok := byKind[defaultAck]; !ok {
+		t.Errorf("ack kind %q not registered", defaultAck)
 	}
 }
 
 func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (func() bool {
-		for i := 0; i+len(sub) <= len(s); i++ {
-			if s[i:i+len(sub)] == sub {
-				return true
-			}
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
 		}
-		return false
-	})()
-}
-
-// TestBridge_MissingField proves a payload with no document field fails cleanly.
-func TestBridge_MissingField(t *testing.T) {
-	emits := react(t, Config{}, `{"something": "else"}`)
-	if len(emits) != 1 || emits[0].Kind != defaultFail {
-		t.Fatalf("emits = %+v, want one fail emit", emits)
 	}
+	return len(sub) == 0
 }
