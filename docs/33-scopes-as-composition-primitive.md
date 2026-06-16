@@ -264,51 +264,113 @@ an enclosing scope may budget `step.start` to cap the number of iterations.
 
 ---
 
-## 9. The LLM agent loop, expressed in scopes
+## 9. The agent loop, expressed as a STATE MACHINE (the chosen form)
 
-The agent loop is a *specialisation* of §8 where the discriminant is **the shape
-of the LLM turn**, not an explicit output field. Two levels of scope:
+> Supersedes an earlier "turn-scope per turn + ticker + router" sketch. For the
+> *within-agent* loop, the per-turn child scope is **not needed** — the join is a
+> state predicate. The turn-scope/router shape of §8 is for *between-phase* chains
+> and for isolated fan-out (§9b), not for the tool loop.
 
-- **agent scope (outer, PERSISTS the whole loop):** holds the `llm` node and its
-  `llm.history` view; its budget bounds the loop (turn count).
-- **turn scope (child, one per tool-calling turn):** holds the tool subscribers
-  (the hands, `in: turn`); the llm emits its tool-call events into it; the hands
-  answer; the scope closes when **all results are in** — a **fan-out/join** over
-  the turn's parallel calls.
+**State is the interface; the scope is the hidden mechanism.** You design the
+agent as a state machine and subscribe to *state* events; the scope underneath
+only provides isolation + a budget backstop.
 
-One turn:
+### The state (a projection `agent`, one per task scope)
 
-- llm fires →
-  - **tool calls** → open a turn scope, emit the calls into it; the llm is
-    subscribed to `scope.turn.closed` → it re-fires once, with *all* results
-    gathered. **= continue.**
-  - **message** (no calls) → no turn scope opens → no `scope.turn.closed` → no
-    re-drive; the `llm.message` flows on to the verifier/judge/parent in the agent
-    scope. **= done.**
-  - **empty** → edge case (a bounded re-prompt).
-- until `llm.message` or `scope.agent.budget_exhausted`.
+```
+{ task:       <issue text>           # set once, from task.new
+  requested:  { id … }               # request events emitted, by id
+  responses:  { id … }               # responses received, by the request id they answer
+  status:     DERIVED:
+              done        — a message was produced (explicit terminal mark)
+              waiting     — requested ⊆ responses   (nothing outstanding → the LLM's turn)
+              processing  — otherwise               (awaiting responses) }
+```
 
-Why this matters:
+`status` is **value-in-subject**: the view emits `state.status.<value>` only on a
+*change* (CDC — "subscribing to a projection change is subscribing to a
+`state_changed` event"). The value rides in the kind, so dispatch stays
+payload-blind. (Implementable as a passive projection + a `derive-status`
+reaction, so projections need not become active.)
 
-- 💡 **Persisting the outer scope beats a chain of siblings here**, because the
-  agent's context *accumulates*: `llm.history in: agent` folds the whole outer cone
-  (all turns) for free; a fresh sibling per turn would have to promote the history
-  each time.
-- 💡 **The turn scope's closure is the join barrier by construction.** A turn with
-  N parallel calls re-drives the brain **once** (on the closure with all N results),
-  not N times. This is exactly the multi-call / lost-`thought_signature` problem
-  from the prior session — solved structurally, not by the hack we shipped. It is
-  already half-built: commits `a809eba` ("re-drive by scope-closure barrier — one
-  re-drive per turn, not per call") + `a89b310`. This model generalises that into
-  the universal agent-loop shape.
-- 💡 **The discriminant gates the loop for free:** whether a turn scope opened (=
-  there were tool calls) *is* the continue/done signal — no status field for the
-  model to set.
+### The reactions (everything written by hand)
 
-**Two granularities of the same "scope + re-drive on closure":**
-*within a phase* the discriminant is the turn shape (§9); *between phases*
-(research → plan → implement) it is an explicit continue/done over a chain of
-sibling phase-scopes with a small closure-State handoff (§8).
+```
+init    on task.new                 → state.updated.task{text}      # opens the task scope, seeds state
+llm     on state.status.waiting,    → tool.*.call …   OR   llm.message
+        reads agent
+hands   on tool.*.call              → tool.*.result | tool.*.failed
+finish  on llm.message              → state.updated.status{done}    # terminal mark
+```
+
+`requested` / `responses` are **not reactions** — they are the projection's own
+fold (the projection *is* the bookkeeping: what was asked, what came back, collapse
+into `status`).
+
+### Trace
+
+```
+task.new{"fix the bug"}
+  agent={requested:∅,responses:∅} ⇒ status waiting → state.status.waiting
+    llm fires, reads agent → emits read, search, test  (3 calls)
+      agent.requested={r,s,t} ⇒ processing → state.status.processing
+  hands answer (one at a time, single-writer log):
+    read.result   → responses={r}     ⇒ processing
+    search.result → responses={r,s}   ⇒ processing
+    test.result   → responses={r,s,t} ⇒ status waiting (all in!) → state.status.waiting
+      llm fires AGAIN, reads agent (3 results folded in) → emits edit
+        requested={…,e} ⇒ processing
+  edit.result → responses covers ⇒ waiting → state.status.waiting
+      llm fires → emits llm.message "fixed"   (no calls)
+        requested unchanged, still ⊆ responses ⇒ status STAYS waiting (no transition → no re-drive)
+        finish on llm.message → state.updated.status{done} → terminal
+```
+
+### Why this is the chosen form
+
+- ✅ **The LLM subscribes to nothing but `state.status.waiting`** — not to itself,
+  not to tool results, not to a scope closure. One trigger.
+- ✅ **The join ("all results in") is a state predicate** (`requested ⊆ responses`),
+  computed by the projection. **No turn scope, no ticker, no router** — and the
+  §11 node-vs-kind-rooting fork **dissolves** (there is no turn scope to root).
+- ✅ **One LLM firing per turn, automatically:** it fires once per `→ waiting`
+  transition; a turn's N parallel calls flip to `processing` once, N responses flip
+  back to `waiting` once. This is the multi-call / lost-`thought_signature` problem
+  solved *structurally* — without the per-call re-drive that caused it.
+- ✅ **Done is the absence of a transition:** a message turn adds no calls → no
+  `processing → waiting` cycle → no re-drive; `finish` marks done. No loop risk.
+- ✅ **Expressible in today's primitives** — projection (passive fold) + reactions +
+  value-in-subject. The only engine addition is emitting `state.status.<value>` on
+  a derived-field change (a `derive-status` reaction; §10).
+
+### 9a. The two layers
+
+- **System level:** scopes and scope-lifecycle events (`scope.X.opened`,
+  `scope.X.closed`). You *may* subscribe to these — it is legitimate, but it is
+  plumbing.
+- **Interface (programmatic) level:** you declare a scope (e.g. `task`) with a
+  *state* (optionally a schema — it can be left unschematised), and you subscribe to
+  **state events** (`state.status.waiting`, `state.updated.*`). This is the surface
+  an agent author works on; the scope mechanism stays out of sight.
+
+### 9b. A tool can BE a scope
+
+A *simple* tool is an ordinary reaction (`tool.X.call → tool.X.result`), managed
+in the same scope purely through the projection (above). A *complex* tool **opens
+its own scope**: the call is the scope's input, it does whatever inside (its own
+loop, its own budget, its own state), and it yields the result through its
+**closure** (output). This unifies "a tool" and "a scope": input = the call,
+output = the result. Simple ⇒ reaction; complex ⇒ scope — same `tool.X.call →
+tool.X.result` contract from the caller's view (the caller cannot tell which).
+
+### 9c. When you DO still need a sub-scope
+
+The state-predicate join is for a *lightweight* gather (tool results in the same
+scope). **Heavyweight fan-out** — parallel sub-agents, each needing its own
+isolated budget/history — still uses a scope closure barrier (§7 nested + §3
+output). The choice: parallel branches need **isolation/budget** → separate scopes
++ barrier; just **collecting answers** → a state predicate. Same "await all", two
+weight classes.
 
 ---
 
@@ -332,18 +394,21 @@ sibling phase-scopes with a small closure-State handoff (§8).
    `closed` / `budget_exhausted` exist; opening should be observable too.
 6. **Output = a declarable exported view, snapshotted at close** (§3) — generalise
    the closure payload beyond the default per-scope kv.
+7. **The agent-state machine (§9):** a projection that folds `requested` /
+   `responses` and derives `status`, plus a `derive-status` reaction that emits
+   `state.status.<value>` on a *change* (value-in-subject CDC). This is what the
+   *first SWE-bench experiment* exercises — the smallest agent, no phases.
 
 ---
 
 ## 11. Open questions / forks
 
-- ❓ **turn-scope rooting (§9) — node-rooted vs kind-rooted.** *Node-rooted:* the
-  llm firing itself roots the turn scope, so its N call emits land in that instance
-  directly (no indirection) — but reintroduces the second rooting knob
-  ([30](./30-scopes-state-and-fan-out.md) P2 wanted kind-rooted only).
-  *Kind-rooted:* the llm emits `turn.start{calls}` and a fanner `in: turn`
-  re-emits the calls — cleaner per P2, one more hop. **This is the one mechanism
-  fork we still need to pick.**
+- ✅ **turn-scope rooting — DISSOLVED.** The §9 state-machine has no turn scope, so
+  the node-vs-kind-rooting fork is moot for the agent loop. Separately, **P2 is
+  settled toward kind-rooted only** (spawn a scope = emit its root kind; the
+  homeostat/router/opener all spawn by emit); `Subscriber.Scope` (node-rooting)
+  should be removed. node-rooting's "trigger inside the cone" is not needed — the
+  input rides on the root event's payload (§3).
 - ⚠️ **Output = exported view** (§3) — accepted as the working default; revisit if
   a counter-example needs a richer output than a view snapshot.
 - ❓ **Aspect exclusions** (§5) — negative/match pattern on the `*` axis (e.g.
