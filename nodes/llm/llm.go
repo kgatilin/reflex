@@ -282,6 +282,13 @@ type Config struct {
 	HistoryName string
 	HistoryOn   []string
 	HistoryIn   engine.Horizon
+	// historyReads are the node's declared Reads (set by Factory from the
+	// Subscriber, not serialized). They are the FALLBACK when HistoryName does not
+	// resolve: a hand-wired node may name its llm.history projection anything and
+	// list it in `reads:` rather than matching the Name+".history" default, so the
+	// body tries HistoryName first, then each read, taking the first that resolves
+	// to a History. This makes the history wiring forgiving of the projection name.
+	historyReads []string
 }
 
 // defaults fills the optional Config fields with their conventional values.
@@ -425,6 +432,10 @@ func Factory(s engine.Subscriber) (engine.Reaction, error) {
 	// on the Subscriber — the resolver passes the whole node in rather than the
 	// operator duplicating Emits into the body config.
 	cfg.Emits = s.Emits
+	// The Reads are the history-view fallback (see Config.historyReads): a hand-built
+	// node that names its history projection something other than Name+".history"
+	// still resolves it, as long as it lists it in `reads:`.
+	cfg.historyReads = s.Reads
 	return Reaction(cfg)
 }
 
@@ -458,7 +469,20 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 
 		var system string
 		var msgs []provider.Message
-		if h := engine.ViewAs[History](views, cfg.HistoryName); h != nil {
+		h := engine.ViewAs[History](views, cfg.HistoryName)
+		if h == nil {
+			// Fallback: the projection is named something other than the default
+			// Name+".history"; find it among the node's declared reads (the first
+			// read that resolves to a History). A non-history read (e.g. a log view)
+			// yields nil through ViewAs and is skipped.
+			for _, r := range cfg.historyReads {
+				if hh := engine.ViewAs[History](views, r); hh != nil {
+					h = hh
+					break
+				}
+			}
+		}
+		if h != nil {
 			system = h.System()
 			msgs = h.Messages()
 		}
