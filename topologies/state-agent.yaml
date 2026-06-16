@@ -1,0 +1,159 @@
+# state-agent — the simplest agent, written as a STATE MACHINE (doc 33 §9).
+#
+# State is the interface; the scope is the hidden mechanism. The whole loop — the
+# join, the re-drive, the done condition — is ONE view-as-reducer (`agent.state`,
+# body kind "view", reducer type "agent"). The llm and the hands are LIBRARY nodes
+# wired around it. The llm never subscribes to tool results or to itself — only to
+# `state.status.waiting`. The reducer flips the status spine:
+#
+#   request.received          → status waiting        (the llm's turn)
+#   llm emits a tool call      → status processing      (awaiting the result)
+#   the result comes back      → status waiting         (the llm's turn again)
+#   llm emits a prose message  → status done            (claim of completion)
+#
+# state.status.<value> is value-in-subject (the value rides in the kind), so the
+# llm triggers on a specific value and dispatch stays payload-blind.
+#
+# SEQUENTIAL tool use (one call per turn) keeps the reducer's "all answered"
+# predicate exact under depth-first dispatch (doc 33 §9c); the prompt enforces it.
+#
+# The `task` scope is the only scope: per-instance state (isolation) + a budget
+# backstop (the loop bound). Run it like coding-agent (topologies/README.md):
+# `reflexd serve --root <repo>`, `reflexd apply`, `reflexd emit --subject task.new`.
+
+scopes:
+  - name: task
+    root: request.received
+    budget:
+      # The loop bound: each turn is one state.status.waiting, so capping it caps
+      # the loop. The per-tool caps bound a runaway tool storm.
+      state.status.waiting: 60
+      tool.fs.read.call: 120
+      tool.fs.edit.call: 60
+      tool.fs.write.call: 30
+      tool.fs.search.call: 120
+      tool.py.test.call: 30
+
+events:
+  - kind: task.new
+  - kind: request.received
+  - kind: state.status.waiting       # the llm's turn (the reducer's CDC)
+  - kind: state.status.processing    # awaiting a tool result — an observability leaf
+    terminal: true
+  - kind: state.status.done          # the claim of completion
+  - kind: llm.message
+  - kind: llm.empty
+  - kind: llm.usage
+    terminal: true
+  - kind: request.terminal
+    terminal: true
+
+subscribers:
+  # resolver — external task.new → the domain root request.received (carries the task).
+  - name: resolver
+    on: [task.new]
+    in: global
+    emits: [request.received]
+    body: { kind: entry, config: { emit: request.received } }
+
+  # agent.state — the VIEW-as-reducer: the state machine. Its declared On/In/Emits
+  # is what the graph reads; the reducer code (nodes/view/agent.go) is the logic.
+  - name: agent.state
+    in: task
+    on: [request.received, tool.>, llm.message, llm.empty]
+    emits: [state.status.waiting, state.status.processing, state.status.done]
+    body: { kind: view, config: { type: agent } }
+
+  # agent — the llm (a LIBRARY node). It triggers ONLY on state.status.waiting,
+  # reads its history, and either calls ONE tool or stops with a prose claim.
+  - name: agent
+    in: task
+    on: [state.status.waiting]
+    reads: [agent.history]
+    emits:
+      - tool.fs.read.call
+      - tool.fs.edit.call
+      - tool.fs.write.call
+      - tool.fs.search.call
+      - tool.py.test.call
+      - llm.message
+      - llm.empty
+      - llm.usage
+    body:
+      kind: llm
+      config:
+        model: vertex:gemini-3.5-flash
+        project: iow-uagent
+        location: global
+        max_tokens: 16384
+        system: |
+          You are a coding agent resolving a real GitHub issue in a repository
+          checked out at /testbed. The issue text is your task.
+
+          Work in a read → edit → test loop with the provided functions:
+            - tool.fs.search / tool.fs.read to locate and read the relevant code
+              (the library source lives under the package directory, not tests/),
+            - tool.fs.edit / tool.fs.write to change the SOURCE,
+            - tool.py.test to run tests.
+
+          IMPORTANT — make exactly ONE function call per turn and wait for its
+          result before the next. Do not batch multiple calls.
+
+          You CANNOT see the hidden grading test — reason from the issue: reproduce
+          the described behaviour in your head, find the ROOT CAUSE in the source,
+          and fix it minimally. The fix must edit the SOURCE; do not just add or
+          edit tests (the grader supplies its own tests).
+
+          When — and ONLY when — you are confident the issue is resolved, STOP
+          calling functions and reply with a short prose summary of the root cause
+          and your fix. That prose is your claim of completion.
+
+  # The hands — library tool subscribers, named after the tool-call kind, in the
+  # task loop. The daemon backs each with the plugin that handles its kind.
+  - { name: tool.fs.read.call,   in: task }
+  - { name: tool.fs.edit.call,   in: task }
+  - { name: tool.fs.write.call,  in: task }
+  - { name: tool.fs.search.call, in: task }
+  - { name: tool.py.test.call,   in: task }
+
+  # finish — the claim of completion is the terminal (this simplest agent trusts
+  # the prose; a verifier/judge would gate it, as in coding-agent.yaml).
+  - name: finish
+    on: [state.status.done]
+    in: task
+    emits: [request.terminal]
+    body: { kind: entry, config: { emit: request.terminal, payload: { status: done } } }
+
+  # exhausted — the budget backstop: a stuck loop still terminates with a verdict.
+  - name: exhausted
+    on: [scope.task.budget_exhausted]
+    in: global
+    emits: [request.terminal]
+    body: { kind: entry, config: { emit: request.terminal, payload: { status: failed } } }
+
+projections:
+  # agent.history — the llm.history the agent reads: the task as the first user
+  # message, the agent's own tool calls as assistant function-calls, the results as
+  # function responses, its prose as the answer. params.emits mirrors the agent's
+  # tool menu so calls render structured (with the thought signature reattached).
+  - name: agent.history
+    on: [request.received, tool.>, llm.message]
+    in: task
+    type: llm.history
+    params:
+      system: |
+        You are a coding agent resolving a real GitHub issue in the repository at
+        /testbed. Work in a read → edit → test loop, ONE function call per turn.
+        Reason from the issue (you cannot see the grading test); fix the ROOT CAUSE
+        in the SOURCE, not the tests. When the issue is resolved, STOP calling
+        functions and summarize the fix.
+      answer: llm.message
+      task_kinds: [request.received]
+      emits:
+        - tool.fs.read.call
+        - tool.fs.edit.call
+        - tool.fs.write.call
+        - tool.fs.search.call
+        - tool.py.test.call
+        - llm.message
+        - llm.usage
