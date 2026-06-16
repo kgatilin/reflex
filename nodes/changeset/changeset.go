@@ -58,14 +58,12 @@ const (
 type Config struct {
 	Emit      string `json:"emit,omitempty"`
 	Fail      string `json:"fail,omitempty"`
-	Ack       string `json:"ack,omitempty"`
 	Principal string `json:"principal,omitempty"`
 	Draft     string `json:"draft,omitempty"`
 }
 
 const (
 	defaultFail  = "topology.apply.failed"
-	defaultAck   = "topology.piece.added"
 	defaultDraft = "topology.draft"
 	defaultPrinc = "in-graph"
 )
@@ -116,8 +114,6 @@ func Catalog(s engine.Subscriber) []engine.EventKind {
 	}
 	out := []engine.EventKind{
 		{Kind: orDefault(cfg.Fail, defaultFail)}, // bridge → brain: build-failure feedback
-		{Kind: orDefault(cfg.Ack, defaultAck), Schema: json.RawMessage(
-			`{"type":"object","properties":{"added":{"type":"string"},"name":{"type":"string"},"total":{"type":"integer"}}}`)},
 	}
 	for _, k := range s.On { // the structured control functions the brain calls
 		if schema, ok := structuredSchemas[k]; ok {
@@ -139,15 +135,18 @@ func Factory(s engine.Subscriber) (engine.Reaction, error) {
 	}
 	emit := orDefault(cfg.Emit, engine.KindChangesetRequested)
 	fail := orDefault(cfg.Fail, defaultFail)
-	ack := orDefault(cfg.Ack, defaultAck)
 	principal := orDefault(cfg.Principal, defaultPrinc)
 	draft := orDefault(cfg.Draft, defaultDraft)
 
 	return engine.ReactionFunc(func(_ context.Context, ev engine.Event, views engine.Views) ([]engine.Emit, error) {
 		if engine.KindOf(ev) != KindBuild {
 			// An add-* piece: it is already on the log (the draft projection folds
-			// it). ACK so the brain re-drives and adds the next piece.
-			return []engine.Emit{ackEmit(ack, ev, views, draft)}, nil
+			// the whole cone), so it just accumulates — NO emit. Acking each add
+			// would re-drive the brain once PER add, and since a model emits several
+			// add calls in one turn (siblings), that branches the brain into many
+			// parallel chains. Instead the brain re-drives only on the BUILD outcome
+			// (changeset.applied/.rejected) — one linear loop: add… add… build.
+			return nil, nil
 		}
 		// Build: fold the draft and commit the whole topology as one changeset.
 		events := engine.ViewAs[[]engine.Event](views, draft)
@@ -240,26 +239,6 @@ type projectionArgs struct {
 	In     string          `json:"in"`
 	Type   string          `json:"type"`
 	Params json.RawMessage `json:"params"`
-}
-
-// ackEmit builds the per-add acknowledgement, echoing what was added and the
-// running draft size so the brain can track its progress.
-func ackEmit(kind string, ev engine.Event, views engine.Views, draft string) engine.Emit {
-	name := ""
-	var probe struct {
-		Name string `json:"name"`
-		Kind string `json:"kind"`
-	}
-	if json.Unmarshal(ev.Payload, &probe) == nil {
-		if probe.Name != "" {
-			name = probe.Name
-		} else {
-			name = probe.Kind
-		}
-	}
-	total := len(engine.ViewAs[[]engine.Event](views, draft))
-	p, _ := json.Marshal(map[string]any{"added": engine.KindOf(ev), "name": name, "total": total})
-	return engine.Emit{Kind: kind, Payload: p}
 }
 
 // failEmit builds the build-failure feedback event carrying the error text.

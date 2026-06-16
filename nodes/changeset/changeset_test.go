@@ -49,25 +49,15 @@ func addEvent(kind string, payload string) engine.Event {
 	return engine.Event{Subject: kind, Payload: json.RawMessage(payload)}
 }
 
-// TestBridge_AddAcks proves an add-* piece is ACKed (so the brain re-drives and
-// adds the next), echoing the added kind + name + running draft total.
-func TestBridge_AddAcks(t *testing.T) {
-	// The draft already holds one scope; this add is the second piece.
-	views := draftViews{draft: []engine.Event{
-		addEvent(KindScopeAdd, `{"name":"request"}`),
-		addEvent(KindSubscriberAdd, `{"name":"worker"}`),
-	}}
-	emits := react(t, Config{}, KindSubscriberAdd, `{"name":"worker"}`, views)
-	if len(emits) != 1 || emits[0].Kind != defaultAck {
-		t.Fatalf("emits = %+v, want one %q ack", emits, defaultAck)
-	}
-	var body map[string]any
-	_ = json.Unmarshal(emits[0].Payload, &body)
-	if body["added"] != KindSubscriberAdd || body["name"] != "worker" {
-		t.Errorf("ack body = %v, want added=%q name=worker", body, KindSubscriberAdd)
-	}
-	if body["total"].(float64) != 2 {
-		t.Errorf("ack total = %v, want 2", body["total"])
+// TestBridge_AddIsSilent proves an add-* piece emits NOTHING — it just accumulates
+// on the log (the draft projection folds it). The brain re-drives only on the build
+// outcome, so a turn that emits several add siblings does not branch the brain.
+func TestBridge_AddIsSilent(t *testing.T) {
+	for _, kind := range []string{KindScopeAdd, KindEventAdd, KindSubscriberAdd, KindProjectionAdd} {
+		emits := react(t, Config{}, kind, `{"name":"x"}`, draftViews{})
+		if len(emits) != 0 {
+			t.Errorf("%s emitted %+v, want nothing (adds are silent)", kind, emits)
+		}
 	}
 }
 
@@ -196,12 +186,9 @@ func TestCatalog_AdvertisesStructuredSchemas(t *testing.T) {
 			t.Errorf("%q schema is not a structured object: %s", want, ek.Schema)
 		}
 	}
-	// The fail + ack feedback kinds are registered too.
+	// The fail feedback kind is registered too.
 	if _, ok := byKind[defaultFail]; !ok {
 		t.Errorf("fail kind %q not registered", defaultFail)
-	}
-	if _, ok := byKind[defaultAck]; !ok {
-		t.Errorf("ack kind %q not registered", defaultAck)
 	}
 }
 

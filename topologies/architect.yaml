@@ -20,11 +20,13 @@
 #   task.new{task}                                          — DISPATCH the task
 #       into what it built (roots the worker subgraph).
 #
-# Each add is ACKed by topology.piece.added (the brain re-drives and adds the next
-# piece — the add-* behave like a tool loop). The build outcome arrives on
-# topology.changeset.applied / .rejected (engine-owned); a malformed build on
-# topology.apply.failed (the bridge's). The draft itself is the `topology.draft`
-# projection — a `log` fold of the add-* events, no hidden state.
+# The add-* pieces are SILENT (they just accumulate on the log); the brain emits
+# all its adds + topology.build in ONE turn and is re-driven only by the build
+# outcome — topology.changeset.applied / .rejected (engine-owned), or
+# topology.apply.failed (the bridge's, a malformed piece). Acking each add instead
+# would re-drive the brain once per add, branching it into parallel chains. The
+# draft is the `topology.draft` projection — a `log` fold of the add-* events over
+# the WHOLE architect cone (so the build sees every sibling piece), no hidden state.
 #
 # Termination: the WORKER's own request.terminal ends the run (`emit --wait
 # request.terminal`). If the architect never manages to build a worker, the
@@ -86,7 +88,6 @@ subscribers:
   - name: brain
     on:
       - task.architect
-      - topology.piece.added
       - topology.changeset.applied
       - topology.changeset.rejected
       - topology.apply.failed
@@ -128,10 +129,13 @@ subscribers:
           A "tool" is NOT special — it is a subscriber that consumes a *.call kind
           and produces a *.result kind.
 
-          ── HOW YOU BUILD — one typed piece at a time (a DRAFT) ───────────
+          ── HOW YOU BUILD — typed pieces into a DRAFT, then build ─────────
           You do NOT write a YAML document. You call typed functions, each adding ONE
-          piece to a DRAFT topology. Add pieces in any order; each is acknowledged
-          (topology.piece.added with a running total) so you can add the next:
+          piece to a DRAFT topology, THEN call topology.build to commit the whole
+          draft. Emit ALL your add calls AND topology.build TOGETHER in ONE response
+          (the build sees every piece you added in the same turn). The pieces are
+          silent — you are re-driven only by the BUILD outcome
+          (topology.changeset.applied / .rejected). Functions:
 
             topology.scope.add(name, root, detached?, budget?)
                 — root: the event kind whose dispatch opens an instance.
@@ -192,11 +196,13 @@ subscribers:
 
           ── WORKFLOW ─────────────────────────────────────────────────────
             1. Read the task.
-            2. Compose the draft: add the scope(s), events, subscribers and
-               projection(s) with the typed functions above. Root the worker in a
-               `detached: true` scope.
-            3. Call topology.build. On .rejected/apply.failed READ the reasons, add
-               or correct pieces, and build again.
+            2. In ONE response, emit every piece — the scope(s) (root the worker in a
+               `detached: true` scope), events, subscribers, projection(s) — AND
+               topology.build last. The build commits the whole draft at once.
+            3. You hear topology.changeset.applied or .rejected (with reasons) /
+               topology.apply.failed. On a failure, emit MORE add calls to fix the
+               gap PLUS topology.build again (the draft keeps the pieces you already
+               added — only add what is missing/corrected).
             4. On .applied: call task.new with the task text. That is your LAST
                action — the topology you built does the work and terminates itself.
 
@@ -214,14 +220,12 @@ subscribers:
     in: architect
     reads: [topology.draft]
     emits:
-      - topology.piece.added
       - topology.changeset.requested
       - topology.apply.failed
     body:
       kind: changeset
       config:
         fail: topology.apply.failed
-        ack: topology.piece.added
         principal: architect
         draft: topology.draft
 
@@ -261,7 +265,6 @@ projections:
       - topology.subscriber.add
       - topology.projection.add
       - topology.build
-      - topology.piece.added
       - topology.changeset.applied
       - topology.changeset.rejected
       - topology.apply.failed
