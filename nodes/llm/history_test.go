@@ -2,6 +2,7 @@ package llm
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/kgatilin/reflex/engine"
@@ -11,6 +12,13 @@ import (
 // subject grammar splitSubject/KindOf expect (app.session.{id}.{kind...}).
 func ev(kind, payload string) engine.Event {
 	return engine.Event{Subject: "app.session.s1." + kind, Payload: json.RawMessage(payload)}
+}
+
+// evMeta is ev plus an engine-blind Meta blob (the thought signature rides here).
+func evMeta(kind, payload, meta string) engine.Event {
+	e := ev(kind, payload)
+	e.Meta = json.RawMessage(meta)
+	return e
 }
 
 // TestBuildHistory_PositionalSplit locks the doc 26 §4b default split: the
@@ -107,6 +115,55 @@ func TestBuildHistory_StructuredToolParts(t *testing.T) {
 	// prose stays plain.
 	if msgs[4].ToolCall != nil || msgs[4].Role != "assistant" {
 		t.Errorf("msgs[4] = %+v, want plain assistant prose", msgs[4])
+	}
+}
+
+// TestBuildHistory_ControlPlaneStructuredMapping proves the explicit calls/results
+// config renders a NON-tool control plane as structured function calls + responses
+// (not plain text), preserving the thought signature, and synthesizes an ack for a
+// fire-and-forget call. This is what the architect's brain needs: its add-* calls
+// and the engine's outcomes must be structured, or a thinking model loses continuity.
+func TestBuildHistory_ControlPlaneStructuredMapping(t *testing.T) {
+	params := historyParams{
+		System:    "architect",
+		Emits:     []string{"topology.subscriber.add", "task.new"},
+		TaskKinds: []string{"task.architect"},
+		Calls:     []string{"topology.subscriber.add", "task.new"},
+		Results:   []resultPair{{Kind: "topology.changeset.rejected", Answers: "task.new"}},
+		AckCalls:  []string{"topology.subscriber.add"}, // silent add → synthetic ack
+	}
+	p := engine.Projection{Type: "llm.history", Params: mustMarshal(params)}
+
+	events := []engine.Event{
+		ev("task.architect", `{"task":"build a worker"}`),
+		evMeta("topology.subscriber.add", `{"name":"worker"}`, `{"thought_signature":"c2ln"}`), // call w/ signature
+		ev("task.new", `{"task":"build a worker"}`),                                              // dispatch call
+		ev("topology.changeset.rejected", `{"reasons":["kind X is a dead-end"]}`),                // its response
+	}
+
+	h := buildHistory(p, events).(History)
+	msgs := h.Messages()
+	// task(user) ; add(assistant call) ; ack(user result) ; task.new(assistant call) ; rejected(user result)
+	if len(msgs) != 5 {
+		t.Fatalf("Messages() len = %d, want 5: %+v", len(msgs), msgs)
+	}
+	// the add renders as a structured assistant function call WITH its signature.
+	if c := msgs[1].ToolCall; c == nil || c.Name != "topology.subscriber.add" || string(c.Signature) == "" {
+		t.Errorf("msgs[1].ToolCall = %+v, want a topology.subscriber.add call with a signature", c)
+	}
+	// the silent add gets a synthetic ok response (well-formed alternation).
+	if r := msgs[2].ToolResult; r == nil || r.Name != "topology.subscriber.add" || string(r.Content) != `{"ok":true}` {
+		t.Errorf("msgs[2] = %+v, want a synthetic ack for the silent add", msgs[2])
+	}
+	// task.new is a structured call; the rejection is its paired function response.
+	if c := msgs[3].ToolCall; c == nil || c.Name != "task.new" {
+		t.Errorf("msgs[3].ToolCall = %+v, want a task.new call", c)
+	}
+	if r := msgs[4].ToolResult; r == nil || r.Name != "task.new" {
+		t.Errorf("msgs[4].ToolResult = %+v, want the rejection paired to task.new", r)
+	}
+	if !strings.Contains(msgs[4].Text, "dead-end") {
+		t.Errorf("msgs[4].Text = %q, want the rejection reasons readable as text too", msgs[4].Text)
 	}
 }
 

@@ -363,3 +363,26 @@ projections:
         - task.new
         - architect.message
         - llm.usage
+      # Structured-message mapping: the brain's control calls are NOT tool.X.call,
+      # so without this they would render as plain TEXT (losing the function-call
+      # shape AND the thought signature a thinking model needs). Render them as
+      # assistant function calls; the silent add-* get a synthetic ack (no result
+      # event); the engine outcomes pair back as function responses.
+      calls:
+        - topology.scope.add
+        - topology.event.add
+        - topology.subscriber.add
+        - topology.projection.add
+        - topology.build
+        - topology.events.list
+        - task.new
+      ack_calls:                       # fire-and-forget — silent, no result event
+        - topology.scope.add
+        - topology.event.add
+        - topology.subscriber.add
+        - topology.projection.add
+      results:
+        - { kind: topology.changeset.applied, answers: task.new }
+        - { kind: topology.changeset.rejected, answers: task.new }
+        - { kind: topology.apply.failed, answers: task.new }
+        - { kind: topology.events.catalog, answers: topology.events.list }

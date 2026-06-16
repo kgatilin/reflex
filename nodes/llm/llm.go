@@ -83,6 +83,35 @@ type historyParams struct {
 	Emits     []string `json:"emits"`
 	Answer    string   `json:"answer"`
 	TaskKinds []string `json:"task_kinds"`
+
+	// Calls / Results / AckCalls are the EXPLICIT structured-message mapping (doc
+	// 26 §4b): which kinds render as assistant function-CALL parts and which as user
+	// function-RESPONSE parts. Without them the builder falls back to the tool.X.call
+	// / tool.X.result NAMING CONVENTION (isToolCall / toolResultCallName), which fits
+	// host tools but NOT a control plane whose calls are topology.subscriber.add and
+	// whose results are topology.changeset.applied/rejected — those would degrade to
+	// plain text, losing the function-call structure AND the thought signature a
+	// thinking model needs to keep reasoning across turns.
+	//
+	//   - Calls: kind patterns rendered as assistant ToolCall (name = the kind, the
+	//     same name advertised as a function). Overrides the convention when set.
+	//   - Results: each {kind → answers} renders a result event as a user ToolResult
+	//     whose function name is `answers` (the CALL it responds to), e.g.
+	//     topology.events.catalog answers topology.events.list.
+	//   - AckCalls: call patterns that are FIRE-AND-FORGET (the silent add-* pieces
+	//     produce no result event). The builder synthesizes an immediate "ok" user
+	//     function-response after each so the call/response alternation the provider
+	//     API requires stays well-formed without a real result on the log.
+	Calls    []string     `json:"calls,omitempty"`
+	Results  []resultPair `json:"results,omitempty"`
+	AckCalls []string     `json:"ack_calls,omitempty"`
+}
+
+// resultPair maps a result kind pattern to the call-function name it answers, so
+// a control-plane outcome renders as a paired function response (historyParams).
+type resultPair struct {
+	Kind    string `json:"kind"`
+	Answers string `json:"answers"`
 }
 
 // buildHistory is the "llm.history" view-type builder (doc 26 §4b): the
@@ -101,7 +130,7 @@ func buildHistory(p engine.Projection, events []engine.Event) any {
 		_ = json.Unmarshal(p.Params, &params)
 	}
 
-	isAssistant := func(kind string) bool { return matchesAny(params.Emits, kind) }
+	isAssistant := func(kind string) bool { return matchesAny(params.Emits, kind) || matchesAny(params.Calls, kind) }
 	isTask := func(kind string) bool { return matchesAny(params.TaskKinds, kind) }
 
 	// Boundary: first assistant-side event (first own-emit). None ⇒ all preamble.
@@ -139,21 +168,29 @@ func buildHistory(p engine.Projection, events []engine.Event) any {
 	for _, ev := range events[boundary:] {
 		kind := engine.KindOf(ev)
 		switch {
-		case isToolCall(kind, params.Emits):
+		case callKind(kind, params):
 			// The call's thought signature rides on the event's Meta (engine-blind);
 			// reattach it so the adapter can echo it on the function-call part.
 			h.messages = append(h.messages, provider.Message{
 				Role: "assistant", Text: messageText(ev),
 				ToolCall: &provider.ToolCall{Name: kind, Input: ev.Payload, Signature: thoughtSignature(ev)},
 			})
-		case toolResultCallName(kind, params.Emits) != "":
-			// A result whose CALL kind the seat emits — pair it as a function
-			// response. A seat that only OBSERVES a result it never called (e.g. a
-			// judge reading test output) keeps it as text: an unpaired response is
+			// A fire-and-forget call (a silent add-* with no result event) gets a
+			// synthetic "ok" response so the call/response alternation stays
+			// well-formed for the provider API — the model sees its action acked.
+			if matchesAny(params.AckCalls, kind) {
+				h.messages = append(h.messages, provider.Message{
+					Role: "user", ToolResult: &provider.ToolResult{Name: kind, Content: json.RawMessage(`{"ok":true}`)},
+				})
+			}
+		case resultAnswers(kind, params) != "":
+			// A result paired to a call the seat made — render it as a function
+			// response named after the CALL it answers. A seat that only OBSERVES a
+			// result it never called keeps it as text: an unpaired response is
 			// malformed.
 			h.messages = append(h.messages, provider.Message{
 				Role: "user", Text: messageText(ev),
-				ToolResult: &provider.ToolResult{Name: toolResultCallName(kind, params.Emits), Content: ev.Payload},
+				ToolResult: &provider.ToolResult{Name: resultAnswers(kind, params), Content: ev.Payload},
 			})
 		default:
 			role := "user"
@@ -164,6 +201,33 @@ func buildHistory(p engine.Projection, events []engine.Event) any {
 		}
 	}
 	return h
+}
+
+// callKind reports whether kind renders as an assistant function-CALL. When the
+// projection declares an explicit Calls list it wins (the control-plane mapping —
+// topology.subscriber.add etc.); otherwise the tool.X.call naming convention is
+// used (host tools), so existing topologies are unaffected.
+func callKind(kind string, params historyParams) bool {
+	if len(params.Calls) > 0 {
+		return matchesAny(params.Calls, kind)
+	}
+	return isToolCall(kind, params.Emits)
+}
+
+// resultAnswers returns the call-function name a result kind responds to, or ""
+// when the kind is not a paired result. An explicit Results map wins (a control
+// outcome — topology.changeset.applied answers task.new); otherwise the tool.X
+// naming convention pairs tool.X.result/failed with tool.X.call.
+func resultAnswers(kind string, params historyParams) string {
+	if len(params.Results) > 0 {
+		for _, r := range params.Results {
+			if engine.MatchKind(r.Kind, kind) {
+				return r.Answers
+			}
+		}
+		return ""
+	}
+	return toolResultCallName(kind, params.Emits)
 }
 
 // isToolCall reports whether kind is a tool call the seat itself makes — in its
