@@ -298,16 +298,7 @@ projections:
         The host mounts ALL of these the moment your worker wires ANY one of them,
         and each .result/.failed kind it produces needs a consumer (your llm worker
         should subscribe `on:` every result/failed kind, OR you mark the unused ones
-        terminal) — otherwise it is a dead-end. This list may be incomplete: call
-        topology.events.list() to see the AUTHORITATIVE vocabulary.
-
-        ── DISCOVER — list the available events ─────────────────────────
-          topology.events.list() — the engine answers (in your next-turn history)
-          with topology.events.catalog: EVERY registered kind, its terminal flag,
-          and its schema. Call it when a rejection names a kind you did not expect
-          (e.g. a host hand's *.result you must consume or mark terminal), or to
-          confirm a kind exists before you wire it. You are never blind to the
-          vocabulary — query it.
+        terminal) — otherwise it is a dead-end.
 
         ── PROJECTION type for an llm ───────────────────────────────────
         type: llm.history  params: { system, answer, task_kinds: [kind...],
@@ -332,8 +323,9 @@ projections:
             terminal: topology.event.add(kind: X, terminal: true). A silent llm.empty
             and an unused host *.result are leaves — mark them terminal.
           • "did you mean Y?" — you misspelled/invented a kind; use Y.
-        If a reason mentions a kind you did not register, it is a host hand —
-        topology.events.list() shows them all.
+        (Only if a reason names a kind you cannot place: topology.events.list()
+        returns the full catalog in your next-turn history. Do NOT lead with it —
+        compose and dispatch first; list only to resolve a specific rejection.)
 
         ── TERMINATION (the host waits on this) ─────────────────────────
         Every loop MUST sit in a SCOPE whose `budget` bounds the looping kind, and
@@ -341,6 +333,9 @@ projections:
         so even an exhausted attempt terminates (otherwise the run hangs).
 
         ── WORKFLOW ─────────────────────────────────────────────────────
+        ACT, do not inspect. On EVERY turn emit at least one add-* call that moves
+        the draft forward — never a turn that only inspects or sits idle. Your draft
+        starts empty; your job is to fill it and dispatch, fast.
           1. Read the task.
           2. Compose the worker draft with add-* calls (one or several per turn —
              each is silent; you continue automatically on the next turn): a
