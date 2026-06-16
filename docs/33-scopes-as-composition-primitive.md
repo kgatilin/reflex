@@ -479,6 +479,30 @@ weight classes.
 
 ---
 
+## 12. Experiment 1 — VALIDATED on SWE-bench (psf/requests-3362)
+
+The §9 state machine, built (engine `Reducer` + `nodes/view` + `topologies/state-agent.yaml`)
+and run on the **real** instance the architect's worker had FAILED (doc 32: it
+edited only tests). Brain: `vertex:gemini-3.1-pro-preview`. Result:
+
+- ✅ **RESOLVED** — official grader: F2P `test_response_decode_unicode` **1 passed**,
+  P2P **75 passed** (no regression). The diff is **source-only** (`requests/utils.py`
+  `stream_decode_response_unicode`: when `r.encoding is None`, default to utf-8 +
+  an incremental decoder instead of yielding raw bytes — the exact root cause).
+- ✅ **The state machine drove every turn.** The llm subscribes ONLY to
+  `state.status.waiting`; it fired **47** times = 47 `state.status.waiting` emits,
+  whose sole source is the `agent.state` reducer. Spine cycled clean:
+  `waiting 47 / processing 46 / done 1`, `llm.empty 0`, `request.terminal 1`.
+- 46 real tool actions (12 edit, 11 read, 6 search, 3 write, 14 test); ~1.04M in /
+  13.5k thought / 4.4k out tokens (~$1.4).
+
+What this validates: **state-as-interface works.** The whole agent loop is one
+~60-line `Reduce` (the join as a `Pending==0` predicate, the re-drive as a status
+transition, the done condition as a no-tool turn) wired around library `llm` + tool
+nodes; the scope is invisible plumbing (per-task state isolation + the budget
+backstop). Sequential tool use kept the predicate exact under depth-first dispatch
+(§9c); the parallel-batch gather (obligation counting) is the next refinement.
+
 ## See also
 
 - [`CONCEPT.md`](./CONCEPT.md) — §2–§3 to be rewritten against this doc once built.
