@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -60,11 +61,51 @@ func (g *geminiVertex) Complete(ctx context.Context, req Request) (Response, err
 	if err != nil {
 		return Response{}, err
 	}
-	resp, err := client.Models.GenerateContent(ctx, req.Model, contents, cfg)
-	if err != nil {
-		return Response{}, fmt.Errorf("vertex-gemini generateContent: %w", err)
+	// Retry with exponential backoff on transient transport errors — a rate limit
+	// (429 RESOURCE_EXHAUSTED) or a server blip (5xx). The architect drives the
+	// model in a tight loop, so a per-minute quota is easily tripped; without
+	// backoff each 429 became a node.failed and the whole run burned its budget on
+	// throttling. A non-retriable error (a malformed request, an auth failure)
+	// breaks out immediately.
+	const maxAttempts = 6
+	backoff := 2 * time.Second
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return Response{}, ctx.Err()
+			case <-time.After(backoff):
+			}
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+		}
+		resp, err := client.Models.GenerateContent(ctx, req.Model, contents, cfg)
+		if err == nil {
+			return decodeGeminiResponse(resp), nil
+		}
+		lastErr = err
+		if !isRetriableGeminiErr(err) {
+			break
+		}
 	}
-	return decodeGeminiResponse(resp), nil
+	return Response{}, fmt.Errorf("vertex-gemini generateContent: %w", lastErr)
+}
+
+// isRetriableGeminiErr reports whether a GenerateContent error is worth a backed-off
+// retry: a rate limit (429 / RESOURCE_EXHAUSTED) or a transient server error
+// (500 / 503 / INTERNAL / UNAVAILABLE). The genai SDK surfaces these as a formatted
+// string ("Error 429, … Status: RESOURCE_EXHAUSTED"), so we match on both the code
+// and the status name to be robust to formatting.
+func isRetriableGeminiErr(err error) bool {
+	s := err.Error()
+	for _, marker := range []string{"429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "500", "INTERNAL"} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // geminiParams translates the neutral Request into genai contents + config.

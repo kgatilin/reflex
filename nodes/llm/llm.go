@@ -567,6 +567,19 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 
 		// First, the actions: every allowlisted function call advances the loop.
 		var emits []engine.Emit
+		// Parallel function calls share ONE thinking turn, and Gemini returns the
+		// thought signature on only the FIRST call part. reflex flattens the turn
+		// into independent call events replayed as separate contents, so calls 2..N
+		// would carry no signature and a thinking model rejects the NEXT request
+		// ("Function call is missing a thought_signature"). Propagate the turn's
+		// signature (whichever call carries it) to every call so each replays valid.
+		var turnSig []byte
+		for _, tc := range resp.ToolCalls {
+			if len(tc.Signature) > 0 {
+				turnSig = tc.Signature
+				break
+			}
+		}
 		actionable := 0
 		for _, tc := range resp.ToolCalls {
 			kind := provider.DottedToolName(tc.Name)
@@ -577,13 +590,17 @@ func body(cfg Config, p provider.Provider) engine.Reaction {
 			if len(payload) == 0 {
 				payload = json.RawMessage("{}")
 			}
-			// The call's thought signature rides on the event's Meta (engine-blind,
-			// kept off the args the tool consumes), so the next turn's history can
-			// replay it on the function-call part. Without it a thinking model rejects
-			// the next request ("Function call is missing a thought_signature").
+			// The thought signature rides on the event's Meta (engine-blind, kept off
+			// the args the tool consumes) so the next turn's history replays it on the
+			// function-call part. Prefer the call's own signature, fall back to the
+			// turn's (parallel-call propagation above).
+			sig := tc.Signature
+			if len(sig) == 0 {
+				sig = turnSig
+			}
 			var meta json.RawMessage
-			if len(tc.Signature) > 0 {
-				meta = mustMarshal(callMeta{ThoughtSignature: tc.Signature})
+			if len(sig) > 0 {
+				meta = mustMarshal(callMeta{ThoughtSignature: sig})
 			}
 			emits = append(emits, engine.Emit{Kind: kind, Payload: payload, Meta: meta})
 			actionable++
