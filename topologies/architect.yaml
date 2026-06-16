@@ -1,6 +1,9 @@
 # architect — a meta-agent that has NO file/python tools, only the in-graph
 # control plane. Its whole job: read a task, DECIDE what topology solves it,
-# BUILD that topology at runtime, and DISPATCH the task into it.
+# BUILD that topology at runtime, and DISPATCH the task into it. It is
+# FIRE-AND-FORGET: the architect builds and launches, then it is done. It does
+# NOT subscribe to the worker's result — checking/terminating the work is the
+# built topology's concern, not the architect's.
 #
 # This is the in-graph control plane (doc 20) made into an agent. The brain's two
 # capabilities are not plugins — they are ordinary event emits the kernel already
@@ -18,15 +21,24 @@
 #       roots the worker subgraph the brain just built. Because the apply already
 #       went live, the dispatched task runs against the freshly-built topology.
 #
-# The brain builds INCREMENTALLY: it need not emit the whole worker topology at
-# once. It can apply a minimal slice (e.g. just enough to explore), watch the
-# outcome, and grow the topology with further changesets — each must be a
-# CONNECTED graph (the validator rejects a disconnected outcome, and the rejection
-# reasons come back as feedback).
+# The brain builds INCREMENTALLY if it wants: each apply must yield a CONNECTED
+# graph (the validator rejects a disconnected outcome, and the reasons come back
+# as feedback). Once a worker is built it dispatches task.new and stops.
 #
-# Termination: the architect scope is budgeted (the loop backstop). The run ends
-# when the brain, having seen the worker reach request.terminal, STOPS calling
-# functions and summarizes — that prose claim (llm.message) becomes architect.terminal.
+# Termination: the WORKER's own request.terminal ends the run (`emit --wait
+# request.terminal`). The architect does not produce or wait on a terminal of its
+# own — it launched the work and is done. If the architect never manages to build
+# a worker, the architect scope budget is exhausted and architect-exhaust emits a
+# failed request.terminal so the run still terminates with a verdict.
+#
+# The architect brain's own non-tool turns use DISTINCT kinds (architect.message /
+# architect.empty, both terminal). The worker scope is now `detached: true` (a root
+# scope, doc 31 §4), so the cone-collision/cross-scope-cycle reason for distinct
+# kinds is gone — the worker's llm.* turns live in a sibling cone the architect
+# never sees. The distinct kinds remain for a SEPARATE reason: the architect's prose
+# turn is TERMINAL (no consumer — it just talks), while the worker's llm.message is
+# CONSUMED (by worker-done / worker.history); `terminal` is a catalog-global
+# property, so the two roles cannot share one kind regardless of detachment.
 
 scopes:
   - name: architect
@@ -34,8 +46,8 @@ scopes:
     budget:
       topology.apply.requested: 12   # topology build/iterate attempts
       task.new: 4                    # dispatches into built subgraphs
-      llm.message: 6                 # prose turns (incl. the final claim)
-      llm.empty: 6                   # degenerate silent turns
+      architect.message: 6           # the brain's prose turns
+      architect.empty: 6             # degenerate silent turns
 
 events:
   - kind: task.architect       # external entry: the task for the meta-agent
@@ -54,42 +66,36 @@ events:
           type: string
           description: "The task/issue text to dispatch into the worker subgraph you built."
       required: [task]
-  - kind: request.terminal           # the worker subgraph's terminal (heard by the brain)
+  - kind: request.terminal           # the worker's terminal — the whole run's end
     terminal: true
-  - kind: architect.terminal         # the meta-run's terminal (drive-to-terminal)
+  - kind: architect.message          # the brain's prose turn (terminal: no action)
     terminal: true
-  - kind: llm.message                # the brain's prose turn (a claim of done)
-  - kind: llm.empty                  # a degenerate silent turn (bounded re-prompt)
+  - kind: architect.empty            # a degenerate silent turn (terminal)
+    terminal: true
   - kind: llm.usage                  # token accounting
     terminal: true
   # topology.changeset.requested/applied/rejected are engine-owned (self-registered,
   # terminal) — the brain subscribes to applied/rejected without declaring them.
 
 subscribers:
-  # brain — the meta-reasoner (Gemini Pro). It hears the task and every control
-  # outcome, reads its history, and either CALLS a control function (build/dispatch)
-  # or STOPS (a prose claim = done). It has NO fs/py/verify tools — only the
-  # control plane. Its Emits allowlist IS its menu.
+  # brain — the meta-reasoner (Gemini Pro). It hears the task and the BUILD
+  # outcomes (applied/rejected/failed), reads its history, and CALLS a control
+  # function: build (topology.apply.requested) or dispatch (task.new). It has NO
+  # fs/py/verify tools — only the control plane. It does NOT subscribe to the
+  # worker's result: it builds and launches, then it is done.
   - name: brain
     on:
       - task.architect
       - topology.changeset.applied
       - topology.changeset.rejected
       - topology.apply.failed
-      - llm.empty
-    # NOTE: the brain deliberately does NOT subscribe to request.terminal. Doing so
-    # would form an unbounded cross-scope cycle (brain → task.new → worker → … →
-    # request.terminal → brain) through global nodes in no budgeted scope, which the
-    # connectivity validator rejects. The brain iterates on the BUILD feedback
-    # (applied/rejected/failed); the worker's completion is bridged to the meta
-    # terminal deterministically (architect-finish), not looped back into the brain.
     in: architect
     reads: [brain.history]
     emits:
       - topology.apply.requested
       - task.new
-      - llm.message
-      - llm.empty
+      - architect.message
+      - architect.empty
       - llm.usage
     body:
       kind: llm
@@ -98,6 +104,8 @@ subscribers:
         project: iow-uagent
         location: global
         max_tokens: 16384
+        answer: architect.message    # a no-tool prose turn (distinct from the worker's llm.message)
+        empty: architect.empty       # a no-tool empty turn (distinct from the worker's llm.empty)
         system: |
           You are an ARCHITECT agent for the REFLEX kernel. You build REFLEX
           topologies — NOT SWE-agent, NOT LangGraph, NOT any other framework.
@@ -110,18 +118,19 @@ subscribers:
           template below and change only the prompts — do not invent a new schema.
 
           You have NO file, shell, python, or test tools. You cannot read or write
-          code yourself. Your ONLY tools are the control plane:
+          code yourself. Your job is to BUILD a topology that can, and LAUNCH the
+          task into it. Your ONLY tools are the control plane:
 
             • topology.apply.requested(document) — apply a reflex topology DOCUMENT
-              (YAML, as a string). This BUILDS or EXTENDS the running system: the
-              nodes/scopes/events you declare go live immediately. Use it to
-              construct a worker subgraph that CAN solve the task (e.g. a coding
-              agent with fs/pytest hands).
-            • task.new(...) — dispatch a task INTO the system you built. Its payload
-              is the task text; it roots the worker subgraph you declared.
+              (YAML, as a string). This BUILDS the running system: the subgraph you
+              declare goes live immediately.
+            • task.new(task) — dispatch the task INTO the system you built; it roots
+              the worker subgraph you declared.
 
-          You solve a task by DESIGNING a topology for it, building that topology,
-          and dispatching the task into it — never by doing the work yourself.
+          You solve a task by DESIGNING a topology for it, building it, and
+          dispatching the task into it — never by doing the work yourself, and you
+          do NOT monitor or wait for the result (the topology you built terminates
+          itself).
 
           THE WORKER TOPOLOGY you build is an ordinary reflex document. The host has
           already launched fs + pytest HANDS confined to the repo; you wire them as
@@ -131,6 +140,11 @@ subscribers:
             scopes:
               - name: request
                 root: request.received
+                detached: true   # a ROOT scope: the worker runs as a top-level
+                                 # SIBLING of the architect, not nested under it —
+                                 # its llm.* turns never bleed into the architect
+                                 # cone, and the architect is done the moment it
+                                 # dispatches (genuine fire-and-forget).
                 budget: { tool.fs.read.call: 80, tool.fs.edit.call: 60,
                           tool.fs.search.call: 80, tool.py.test.call: 20,
                           llm.message: 8, llm.empty: 6 }
@@ -207,17 +221,15 @@ subscribers:
             3. If you get topology.apply.failed or topology.changeset.rejected, READ
                the error/reasons and re-emit the corrected FULL document.
             4. On topology.changeset.applied, call task.new with `task` set to the
-               original issue text — this dispatches it into the worker you built.
-               This is your FINAL action: the worker then runs to completion and the
-               run ends automatically. You do not need to wait or summarize.
+               original issue text. This launches the work and is your LAST action.
 
           The template above is a COMPLETE, VALID worker. Reproduce it faithfully —
-          do not try to be clever or minimal; correctness of the schema matters more
-          than brevity.
+          correctness of the schema matters more than brevity.
 
   # bridge — turns the brain's "apply this topology" tool-call into an in-graph
-  # changeset request (body kind "changeset"). It is the only place the document
-  # format is parsed on the in-graph path. Scoped in the architect loop.
+  # changeset request (body kind "changeset"). It self-registers its tool schema
+  # (topology.apply.requested{document}); it is the only place the document format
+  # is parsed on the in-graph path. Scoped in the architect loop.
   - name: bridge
     on: [topology.apply.requested]
     in: architect
@@ -228,45 +240,24 @@ subscribers:
         fail: topology.apply.failed
         principal: architect
 
-  # architect-finish — the worker's completion bridged to the meta terminal: a
-  # DETERMINISTIC global node (not the brain) maps the worker's request.terminal to
-  # architect.terminal. This is what lets the meta-run end when the built worker
-  # finishes WITHOUT the brain subscribing to request.terminal (which would form an
-  # unbounded cross-scope cycle). It is the drive-to-terminal fact (`emit --wait`).
-  - name: architect-finish
-    on: [request.terminal]
-    in: global
-    emits: [architect.terminal]
-    body:
-      kind: entry
-      config: { emit: architect.terminal, payload: { status: done } }
-
-  # architect-done — the brain's prose claim also ends the meta-run (e.g. if it
-  # gives up or finishes a build-only task): llm.message → architect.terminal.
-  - name: architect-done
-    on: [llm.message]
-    in: architect
-    emits: [architect.terminal]
-    body:
-      kind: entry
-      config: { emit: architect.terminal, payload: { status: done } }
-
-  # architect-exhaust — the budget backstop: exhaustion → a failed terminal so a
-  # stuck meta-loop still terminates with a verdict.
+  # architect-exhaust — the only meta-level terminator, and only for the FAILURE
+  # path: if the architect never manages to build a worker (budget exhausted), emit
+  # a failed request.terminal so the run still ends with a verdict. The SUCCESS path
+  # terminates through the worker's own request.terminal — the architect does not
+  # wait for it.
   - name: architect-exhaust
     on: [scope.architect.budget_exhausted]
     in: global
-    emits: [architect.terminal]
+    emits: [request.terminal]
     body:
       kind: entry
-      config: { emit: architect.terminal, payload: { status: failed } }
+      config: { emit: request.terminal, payload: { status: failed } }
 
 projections:
   # brain.history — the meta-agent's conversation: the task as the first user
-  # message, the brain's own control calls as assistant turns, the control
-  # outcomes (applied/rejected/failed) and the worker's request.terminal as user
-  # turns. params.emits mirrors the brain's menu MINUS llm.empty (so a silent turn
-  # is roled a user re-prompt).
+  # message, the brain's own control calls as assistant turns, the build outcomes
+  # (applied/rejected/failed) as user turns. params.emits mirrors the brain's menu
+  # MINUS architect.empty (a silent turn is roled a user re-prompt).
   - name: brain.history
     on:
       - task.architect
@@ -275,20 +266,19 @@ projections:
       - topology.changeset.rejected
       - topology.apply.failed
       - task.new
-      - llm.message
-      - llm.empty
+      - architect.message
+      - architect.empty
     in: architect
     type: llm.history
     params:
       system: |
         You are an ARCHITECT agent with only the control plane: build a topology
         for the task (topology.apply.requested) and dispatch the task into it
-        (task.new). You have no file/python tools. When the worker you built
-        reaches request.terminal, stop calling functions and summarize.
-      answer: llm.message
+        (task.new). You have no file/python tools and you do not monitor the result.
+      answer: architect.message
       task_kinds: [task.architect]
       emits:
         - topology.apply.requested
         - task.new
-        - llm.message
+        - architect.message
         - llm.usage
