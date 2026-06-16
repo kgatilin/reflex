@@ -135,6 +135,22 @@ root scope**, hence top-level regardless of what triggered it."
   rooting the worker cone) is a **port**, not an in-graph edge: causally linked,
   scope-detached.
 
+> **Implemented (increment 1).** The scope property is `Detached bool`
+> (`engine.Scope.Detached`, yaml `detached:`), threaded through the changeset
+> `scopeSpec` round-trip and `pkg/topology`. `admit` and `inheritedCones`
+> (`engine/scope.go`) skip parent-cone inheritance via `rootsDetached` when the
+> event roots a detached scope; detachment then propagates transitively for free
+> (descendants inherit from the now-parent-free membership). Proven by
+> `TestDetachedScope_ReusesKindInIsolation`: a worker reuses the meta-agent's
+> `llm.message`; detached → the meta cone never receives it (leak detector = 0)
+> while the worker's own in-scope consumer still fires; the nested control (same
+> wiring, `Detached:false`) leaks, proving the isolation is the detachment.
+> **Still open:** the validator (§4 "Identifying the port") still draws cross-scope
+> edges scope-blind, so an architect that reuses `llm.*` and subscribes across the
+> port would still be *rejected at apply time* even though it now runs cleanly —
+> the per-component / port-cutting validator change is increment 2. The
+> foreign-scope-only changeset rule is increment 3.
+
 ### Two orthogonal axes: execution isolation vs projection visibility
 
 The isolation is on EXECUTION only. A scope is an **execution scope**: a cone that
