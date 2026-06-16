@@ -569,7 +569,19 @@ func logTurnRequest(ctx context.Context, name, system string, msgs []provider.Me
 	}
 	slog.Debug("llm turn request", "node", name, "system_bytes", len(system), "messages", len(msgs), "tools", len(tools))
 	for i, m := range msgs {
-		slog.Debug("llm turn message", "node", name, "i", i, "role", m.Role, "bytes", len(m.Text), "preview", preview(m.Text))
+		// Log the STRUCTURED parts too, not just m.Text: a tool call / tool result
+		// rendered as a function-call / function-response carries its payload in
+		// ToolCall/ToolResult with an EMPTY Text, so a text-only preview would show
+		// "bytes=0" and hide exactly the content an operator needs to verify the
+		// transcript wired the result into the turn (the llm.history pairing).
+		attrs := []any{"node", name, "i", i, "role", m.Role, "bytes", len(m.Text), "preview", preview(m.Text)}
+		if m.ToolCall != nil {
+			attrs = append(attrs, "tool_call", m.ToolCall.Name, "call_args", preview(string(m.ToolCall.Input)))
+		}
+		if m.ToolResult != nil {
+			attrs = append(attrs, "tool_result", m.ToolResult.Name, "result", preview(string(m.ToolResult.Content)))
+		}
+		slog.Debug("llm turn message", attrs...)
 	}
 }
 
