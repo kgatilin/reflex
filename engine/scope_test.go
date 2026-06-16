@@ -322,3 +322,101 @@ func TestDrain_StallReDrivesIntoNewChildCone(t *testing.T) {
 		t.Fatalf("scope.session.closed count = %d, want 1 (the whole thing converges)", got)
 	}
 }
+
+// TestDetachedScope_ReusesKindInIsolation is the root-scope (doc 31 §4) proof: a
+// meta-agent dispatches a worker sub-computation that REUSES the meta-agent's own
+// turn kind (llm.message), and the worker's events must NOT bleed into the meta
+// cone. The topology is identical in both sub-cases; only the worker scope's
+// Detached flag differs, so the leak detector isolates the mechanism:
+//
+//	meta-brain  On task.meta        in meta    → task.new      (dispatch)
+//	meta-watch  On llm.message      in meta    → meta.leak     (LEAK DETECTOR)
+//	resolver    On task.new         in global  → request.received (the PORT)
+//	worker      On request.received in worker  → llm.message   (REUSED kind)
+//	worker-done On llm.message      in worker  → worker.done    (sibling consumes it)
+//
+// With worker Detached, request.received roots a FRESH top-level cone: the
+// worker's llm.message is a member of the worker cone only, never the meta cone,
+// so meta-watch (in meta) is not delivered it — meta.leak stays 0 while the
+// worker's own in:worker consumer still fires. Without Detached the worker cone
+// nests in the meta cone (membership = caused_by descent), so the SAME llm.message
+// IS a meta-cone member and meta-watch catches it — meta.leak fires. That control
+// proves the isolation is the detachment, not the wiring.
+func TestDetachedScope_ReusesKindInIsolation(t *testing.T) {
+	build := func(detached bool) []Decl {
+		return []Decl{
+			Scope{Name: "meta", Root: "task.meta"},
+			Scope{Name: "worker", Root: "request.received", Detached: detached},
+			Subscriber{
+				Name: "meta-brain", On: []string{"task.meta"}, In: "meta",
+				Emits: []string{"task.new"}, Body: emitKind("task.new"),
+			},
+			// the leak detector: a meta-cone subscription to the REUSED kind.
+			Subscriber{
+				Name: "meta-watch", On: []string{"llm.message"}, In: "meta",
+				Emits: []string{"meta.leak"}, Body: emitKind("meta.leak"),
+			},
+			// the port: a GLOBAL injector turns the dispatch into the worker root.
+			Subscriber{
+				Name: "resolver", On: []string{"task.new"}, In: "global",
+				Emits: []string{"request.received"}, Body: emitKind("request.received"),
+			},
+			Subscriber{
+				Name: "worker", On: []string{"request.received"}, In: "worker",
+				Emits: []string{"llm.message"}, Body: emitKind("llm.message"),
+			},
+			Subscriber{
+				Name: "worker-done", On: []string{"llm.message"}, In: "worker",
+				Emits: []string{"worker.done"}, Body: emitKind("worker.done"),
+			},
+		}
+	}
+
+	run := func(t *testing.T, detached bool) *Engine {
+		t.Helper()
+		ctx := context.Background()
+		e := New()
+		e.install(build(detached)...)
+		if _, err := e.Append(ctx, "task.meta", json.RawMessage(`{}`)); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		if err := e.Drain(ctx); err != nil {
+			t.Fatalf("Drain: %v", err)
+		}
+		return e
+	}
+
+	t.Run("detached isolates the reused kind", func(t *testing.T) {
+		e := run(t, true)
+		// The worker emitted its turn, and its OWN cone consumed it.
+		if got := countKind(e, "llm.message"); got != 1 {
+			t.Fatalf("llm.message count = %d, want 1 (worker emitted one turn)", got)
+		}
+		if got := countKind(e, "worker.done"); got != 1 {
+			t.Fatalf("worker.done count = %d, want 1 (the in:worker consumer fired)", got)
+		}
+		// The meta cone never saw the worker's llm.message — isolation holds.
+		if got := countKind(e, "meta.leak"); got != 0 {
+			t.Fatalf("meta.leak count = %d, want 0 (a detached worker's llm.message must NOT reach the meta cone)", got)
+		}
+		// Both cones close — the meta cone is not held open by the work it launched.
+		if got := countKind(e, "scope.meta.closed"); got != 1 {
+			t.Fatalf("scope.meta.closed count = %d, want 1 (fire-and-forget: meta closes)", got)
+		}
+		if got := countKind(e, "scope.worker.closed"); got != 1 {
+			t.Fatalf("scope.worker.closed count = %d, want 1", got)
+		}
+	})
+
+	t.Run("nested control leaks the reused kind", func(t *testing.T) {
+		e := run(t, false)
+		if got := countKind(e, "llm.message"); got != 1 {
+			t.Fatalf("llm.message count = %d, want 1", got)
+		}
+		// Without detachment the worker cone nests in the meta cone, so the
+		// meta-cone subscription catches the worker's llm.message.
+		if got := countKind(e, "meta.leak"); got != 1 {
+			t.Fatalf("meta.leak count = %d, want 1 (a nested worker's llm.message DOES reach the meta cone — this is the bug detachment fixes)", got)
+		}
+	})
+}

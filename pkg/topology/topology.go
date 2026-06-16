@@ -66,6 +66,9 @@ type ScopeSpec struct {
 	Name   string         `json:"name" yaml:"name"`
 	Root   string         `json:"root,omitempty" yaml:"root,omitempty"`
 	Budget map[string]int `json:"budget,omitempty" yaml:"budget,omitempty"`
+	// Detached roots a FRESH top-level cone that does not inherit its trigger's
+	// cones (doc 31 §4) — how a meta-agent dispatches an isolated sub-topology.
+	Detached bool `json:"detached,omitempty" yaml:"detached,omitempty"`
 }
 
 // ProjectionSpec declares a view: its fold patterns, horizon, type, and the
@@ -107,7 +110,7 @@ func Parse(data []byte) (Document, error) {
 func (d Document) Decls() ([]engine.Decl, error) {
 	var out []engine.Decl
 	for _, s := range d.Scopes {
-		out = append(out, engine.Scope{Name: s.Name, Root: s.Root, Budget: s.Budget})
+		out = append(out, engine.Scope{Name: s.Name, Root: s.Root, Budget: s.Budget, Detached: s.Detached})
 	}
 	for _, n := range d.Subscribers {
 		cfg, err := toRaw(n.Body.Config)
@@ -162,7 +165,7 @@ func FromDecls(decls []engine.Decl) Document {
 	for _, decl := range decls {
 		switch v := decl.(type) {
 		case engine.Scope:
-			d.Scopes = append(d.Scopes, ScopeSpec{Name: v.Name, Root: v.Root, Budget: v.Budget})
+			d.Scopes = append(d.Scopes, ScopeSpec{Name: v.Name, Root: v.Root, Budget: v.Budget, Detached: v.Detached})
 		case engine.Subscriber:
 			d.Subscribers = append(d.Subscribers, SubscriberSpec{
 				Name: v.Name, On: v.On, In: v.In, Reads: v.Reads, Emits: v.Emits, Scope: v.Scope,

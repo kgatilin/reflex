@@ -76,7 +76,7 @@ func (sr *scopeRuntime) rootsOf(ev Event, scope, kind string) []rootSpec {
 	var out []rootSpec
 	for _, s := range sr.declared {
 		if s.Root != "" && subjectMatch(s.Root, kind) {
-			out = append(out, rootSpec{name: s.Name, budget: s.Budget})
+			out = append(out, rootSpec{name: s.Name, budget: s.Budget, detached: s.Detached})
 		}
 	}
 	for _, n := range sr.nodes {
@@ -86,15 +86,30 @@ func (sr *scopeRuntime) rootsOf(ev Event, scope, kind string) []rootSpec {
 		if !subscriberMatches(n, scope, kind) {
 			continue
 		}
-		out = append(out, rootSpec{name: n.Scope, budget: budgetForScope(sr.declared, n.Scope)})
+		out = append(out, rootSpec{name: n.Scope, budget: budgetForScope(sr.declared, n.Scope), detached: detachedForScope(sr.declared, n.Scope)})
 	}
 	return out
 }
 
+// rootsDetached reports whether any scope this event roots is detached (doc 31
+// §4): a detached root starts a FRESH top-level cone that does not inherit the
+// rooting event's causal cones. admit and inheritedCones both gate inheritance
+// on this so the detached root event — and, transitively, its whole subtree —
+// lands in no parent cone.
+func (sr *scopeRuntime) rootsDetached(ev Event, scope, kind string) bool {
+	for _, rs := range sr.rootsOf(ev, scope, kind) {
+		if rs.detached {
+			return true
+		}
+	}
+	return false
+}
+
 // rootSpec names a scope instance to open on a root event.
 type rootSpec struct {
-	name   string
-	budget map[string]int
+	name     string
+	budget   map[string]int
+	detached bool
 }
 
 // budgetForScope finds the declared budget for a scope name (a node-rooted
@@ -107,6 +122,17 @@ func budgetForScope(declared []Scope, name string) map[string]int {
 		}
 	}
 	return nil
+}
+
+// detachedForScope reads the Detached flag for a scope name (a node-rooted scope
+// shares the same-named declared Scope's config, doc 24 §5 / doc 31 §4).
+func detachedForScope(declared []Scope, name string) bool {
+	for _, s := range declared {
+		if s.Name == name {
+			return s.Detached
+		}
+	}
+	return false
 }
 
 // instanceKey is the deterministic id of a scope instance: name + root span.
@@ -183,7 +209,12 @@ func (sr *scopeRuntime) admit(ev Event, scope, kind string) {
 	}
 
 	// Inherit covering cones from the causes, dropping any already closed
-	// (closure is monotone; a closed cone never reopens, doc 26 §2).
+	// (closure is monotone; a closed cone never reopens, doc 26 §2). A DETACHED
+	// root short-circuits this: rooting a detached scope starts a FRESH top-level
+	// cone (doc 31 §4), so the event inherits NO parent cone even though its
+	// causes are members of some — making the sub-computation a sibling, not a
+	// child. Detachment propagates transitively for free: descendants inherit
+	// from this event's (now parent-free) membership.
 	set := map[string]struct{}{}
 	var order []string
 	add := func(key string) {
@@ -193,10 +224,12 @@ func (sr *scopeRuntime) admit(ev Event, scope, kind string) {
 		set[key] = struct{}{}
 		order = append(order, key)
 	}
-	for _, cause := range ev.Trace.CausedBy {
-		for _, key := range sr.membership[cause] {
-			if inst := sr.instances[key]; inst != nil && !inst.closed {
-				add(key)
+	if !sr.rootsDetached(ev, scope, kind) {
+		for _, cause := range ev.Trace.CausedBy {
+			for _, key := range sr.membership[cause] {
+				if inst := sr.instances[key]; inst != nil && !inst.closed {
+					add(key)
+				}
 			}
 		}
 	}
@@ -347,6 +380,12 @@ func (sr *scopeRuntime) inheritedCones(ev Event) []string {
 		seen[key] = struct{}{}
 		out = append(out, key)
 	}
+	// A detached root inherits no parent cone (doc 31 §4) — so the budget gate
+	// never charges its launch to the launcher's cone, mirroring admit.
+	_, scope, kind := splitSubject(ev.Subject)
+	if sr.rootsDetached(ev, scope, kind) {
+		return nil
+	}
 	for _, cause := range ev.Trace.CausedBy {
 		for _, key := range sr.membership[cause] {
 			if inst := sr.instances[key]; inst != nil && !inst.closed {
@@ -354,7 +393,6 @@ func (sr *scopeRuntime) inheritedCones(ev Event) []string {
 			}
 		}
 	}
-	_, _, kind := splitSubject(ev.Subject)
 	if name, _, _, ok := parseScopeFact(kind); ok {
 		for _, cause := range ev.Trace.CausedBy {
 			key := instanceKey(name, cause)

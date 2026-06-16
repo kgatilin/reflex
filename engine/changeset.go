@@ -132,9 +132,10 @@ type subscriberSpec struct {
 }
 
 type scopeSpec struct {
-	Name   string         `json:"name"`
-	Root   string         `json:"root,omitempty"`
-	Budget map[string]int `json:"budget,omitempty"`
+	Name     string         `json:"name"`
+	Root     string         `json:"root,omitempty"`
+	Budget   map[string]int `json:"budget,omitempty"`
+	Detached bool           `json:"detached,omitempty"`
 }
 
 type projectionSpec struct {
@@ -157,7 +158,7 @@ func opsOf(decls []Decl) []Op {
 		case Subscriber:
 			out = append(out, Op{Verb: verbAdd, Kind: opKindSubscriber, Name: v.Name, Spec: mustMarshal(subscriberSpecOf(v))})
 		case Scope:
-			out = append(out, Op{Verb: verbAdd, Kind: opKindScope, Name: v.Name, Spec: mustMarshal(scopeSpec{Name: v.Name, Root: v.Root, Budget: v.Budget})})
+			out = append(out, Op{Verb: verbAdd, Kind: opKindScope, Name: v.Name, Spec: mustMarshal(scopeSpec{Name: v.Name, Root: v.Root, Budget: v.Budget, Detached: v.Detached})})
 		case Projection:
 			out = append(out, Op{Verb: verbAdd, Kind: opKindProjection, Name: v.Name, Spec: mustMarshal(projectionSpecOf(v))})
 		case EventKind:
@@ -218,7 +219,7 @@ func declsOfOps(ops []Op) ([]Decl, error) {
 			if err := json.Unmarshal(op.Spec, &s); err != nil {
 				return nil, fmt.Errorf("engine: changeset op scope %q: %w", op.Name, err)
 			}
-			out = append(out, Scope{Name: s.Name, Root: s.Root, Budget: s.Budget})
+			out = append(out, Scope{Name: s.Name, Root: s.Root, Budget: s.Budget, Detached: s.Detached})
 		case opKindProjection:
 			var s projectionSpec
 			if err := json.Unmarshal(op.Spec, &s); err != nil {
@@ -348,7 +349,7 @@ func foldTopology(log []Event, bodies map[string]Reaction) []Decl {
 	var out []Decl
 	for _, name := range scopeOrder {
 		if s, ok := scopes[name]; ok {
-			out = append(out, Scope{Name: s.Name, Root: s.Root, Budget: s.Budget})
+			out = append(out, Scope{Name: s.Name, Root: s.Root, Budget: s.Budget, Detached: s.Detached})
 		}
 	}
 	for _, name := range nodes.order {

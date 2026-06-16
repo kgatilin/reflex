@@ -101,6 +101,17 @@ type Scope struct {
 	// "loops are budgets"): a soft scope.budget_low fires one step early,
 	// the scope.budget_exhausted hard backstop refuses dispatch (G7).
 	Budget map[string]int
+	// Detached makes an instance of this scope TOP-LEVEL: it roots a FRESH
+	// cone that does NOT inherit its trigger's cones, even when the rooting
+	// event is internally caused (doc 31 §4). The causal link stays on the log
+	// (caused_by is untouched) — only scope membership detaches, so the
+	// sub-computation is a SIBLING of whatever launched it, not a child. This
+	// is how a meta-agent dispatches an isolated sub-topology in one runtime:
+	// kinds (llm.message, …) are reused freely across detached scopes, and the
+	// launcher's own cone is not held open by the work it dispatched
+	// (fire-and-forget). A scope rooted by an external event (no cause) is
+	// already top-level; Detached generalises that to internally-triggered roots.
+	Detached bool
 }
 
 func (Scope) isDecl() {}
