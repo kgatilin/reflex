@@ -126,3 +126,48 @@ The fixes that got us here (this push):
   instead of repeating one signature; clean architect quiescence after dispatch.
 
 ### Next: validate on the real SWE-bench instance in the container (pro brain).
+
+---
+
+## Container run on the REAL instance (psf/requests-3362, pro brain)
+
+The fixes held on `gemini-3.1-pro-preview`: **0 brain failures** across 30 turns
+(no 429, no thought_signature 400). The pipeline ran fully.
+
+**1) Architect** — 30 turns, 23 control calls, composed 1 scope + 5 events + 8
+subscribers + 1 projection, **2 applied / 0 rejected**, dispatched the worker.
+~117k in / 17k thought tokens (~$0.24). Clean.
+- ⚠️ Over-dispatched: `request.received=4` (built/launched repeatedly) — the
+  "doesn't quiesce after dispatch" issue again. Wasteful, not fatal.
+
+**2) Worker topology it built** — CORRECT and complete: a `detached` `worker`
+scope (root request.received, per-tool budgets 100, llm.message 30); a
+`worker.agent` llm wired to all 5 tools' results/failures, emitting the 5 `.call`
+kinds + `worker.done`; a `worker.history` projection with `params.emits` set right
+(so tool results render structured — the fragility did NOT bite with the pro
+model); tool subscribers + terminator + exhausted. A textbook worker.
+
+**3) Worker** — ran 46 turns, **41 real tool calls** (24 search, 10 read, 2 edit,
+7 test), ~461k in / 61k thought tokens (~$0.89). It worked hard.
+- ❌ **NOT SOLVED.** The diff touches ONLY test files (`tests/test_requests.py`,
+  `tests/test_utils.py`) — it added a test reproducing the bug and fixed an
+  unrelated pytest idiom, but NEVER edited the source (`requests/models.py` /
+  `utils.py` where `stream_decode_response_unicode` mishandles `encoding=None`).
+  So the hidden fail-to-pass tests will still fail.
+
+### Why the worker failed (root causes, for later)
+- 💡 The ARCHITECT wrote the worker's system prompt as "…**write tests**, search…
+  and edit the files to fix it." The worker over-indexed on the "write tests"
+  instruction and never pivoted to the source fix. The meta-prompt should bias the
+  worker toward fixing SOURCE, not authoring tests (SWE-bench supplies the tests).
+- 💡 `max_tokens: 4000` on the worker is low for reading real source files —
+  likely truncates context/edits.
+- 💡 No feedback loop forcing "did the target test pass?" before `worker.done`;
+  the worker declared done having only edited tests.
+
+### Verdict
+Plumbing: ✅ solved (architect designs+builds+dispatches; worker runs with
+structured tool I/O; no transport/encoding failures). Task outcome: ❌ the worker's
+REASONING/PROMPTING is the remaining gap — it builds and acts, but the
+architect-authored worker prompt steered it wrong. Next lever is meta-prompt
+quality (worker instructions), not kernel plumbing.
