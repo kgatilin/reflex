@@ -420,3 +420,59 @@ func TestDetachedScope_ReusesKindInIsolation(t *testing.T) {
 		}
 	})
 }
+
+// TestScope_ClosureBarrierCollapsesMultiCallTurn proves the fix for the
+// multi-call-turn branching (the architect's brain): wrap each turn in a SCOPE and
+// re-drive on its CLOSURE, not on each call's result. A "driver" (the brain
+// stand-in) fires on a `tick`, which roots a fresh `turn` scope, and emits THREE
+// silent siblings per turn (the parallel calls). Because the siblings are silent
+// and the driver re-drives only on scope.turn.closed (one per turn, via a ticker),
+// the driver fires exactly ONCE per tick — never once per sibling. Without the
+// barrier (subscribing to each sibling) it would fan out 3× per turn.
+func TestScope_ClosureBarrierCollapsesMultiCallTurn(t *testing.T) {
+	ctx := context.Background()
+	const turns = 3
+
+	decls := []Decl{
+		// session bounds the whole loop: at most `turns` ticks.
+		Scope{Name: "session", Root: "start", Budget: map[string]int{"tick": turns}},
+		// each tick roots a fresh turn cone (nested in session).
+		Scope{Name: "turn", Root: "tick"},
+		// ticker: the re-drive. Fires on the session start AND on each turn closure,
+		// emitting the next tick — so exactly one tick per settled turn.
+		Subscriber{
+			Name: "ticker", On: []string{"start", "scope.turn.closed"}, In: "session",
+			Emits: []string{"tick"}, Body: emitKind("tick"),
+		},
+		// driver (the brain stand-in): on each tick it emits THREE silent siblings
+		// (the parallel calls). It subscribes to tick (the closure), NOT to piece.
+		Subscriber{
+			Name: "driver", On: []string{"tick"}, In: "turn",
+			Emits: []string{"piece"}, Body: emitN("piece", 3),
+		},
+	}
+
+	e := New()
+	e.install(decls...)
+	if _, err := e.Append(ctx, "start", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := e.Drain(ctx); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	// `turns` ticks are admitted; the budget cap emits one more that is starved
+	// (on the log, inert) — the standard +1 of a budgeted loop.
+	if got := countKind(e, "tick"); got != turns+1 {
+		t.Fatalf("tick count = %d, want %d (turns admitted + 1 starved)", got, turns+1)
+	}
+	// The driver fired once per tick → 3 pieces per turn, 3*turns total. If it had
+	// branched per sibling, this would be far higher.
+	if got := countKind(e, "piece"); got != 3*turns {
+		t.Fatalf("piece count = %d, want %d (3 per turn, driver fired once per tick)", got, 3*turns)
+	}
+	// The barrier itself: one closure per turn.
+	if got := countKind(e, "scope.turn.closed"); got != turns {
+		t.Fatalf("scope.turn.closed = %d, want %d (one barrier per turn)", got, turns)
+	}
+}
