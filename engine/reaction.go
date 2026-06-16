@@ -14,6 +14,20 @@ type Reaction interface {
 	React(ctx context.Context, ev Event, views Views) ([]Emit, error)
 }
 
+// Reducer is a STATEFUL body (doc 33 §9d: view-as-reducer). The engine holds the
+// reducer's state per scope instance (a cache rebuildable from the log by replay,
+// G8) and threads it through Reduce, so the body itself stays pure: state in →
+// state + emits out. A node whose Body also implements Reducer is dispatched
+// through Reduce instead of React; its emits are processed identically (catalog
+// conformance, depth-first drive). state is nil on the first event of an instance —
+// the reducer mints its zero value. The emits are the reducer's CDC: a kind it
+// produces when its state crosses a transition (e.g. state.status.waiting),
+// bounded by the node's declared Emits allowlist (the graph reads that allowlist,
+// never this code — doc 33 §9d).
+type Reducer interface {
+	Reduce(state any, ev Event) (next any, emits []Emit)
+}
+
 // ReactionFunc adapts a plain function to Reaction.
 type ReactionFunc func(ctx context.Context, ev Event, views Views) ([]Emit, error)
 

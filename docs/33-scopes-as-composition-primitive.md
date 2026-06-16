@@ -363,6 +363,53 @@ loop, its own budget, its own state), and it yields the result through its
 output = the result. Simple ⇒ reaction; complex ⇒ scope — same `tool.X.call →
 tool.X.result` contract from the caller's view (the caller cannot tell which).
 
+### 9d. The View-reducer contract (the developer interface)
+
+A **View is a stateful reducer over its scope's events** — the developer's primary
+programming surface (code, not YAML). It unifies the View face (its cached state)
+and the Reaction face (its emits) into one object:
+
+```go
+// State is held by the ENGINE per scope instance (a cache, rebuildable from the
+// log by replay — G8). The body stays pure: state in, state + emits out.
+type Reducer interface {
+    Reduce(state any, ev Event) (next any, emits []Emit)   // fold one event, maybe emit (CDC)
+}
+```
+
+The whole agent loop is one reducer (`Agent{task, requested, responses, status}`):
+each event folds in; a `status` transition emits `state.status.<value>`. ~15 lines
+of code carry the join, the loop, and the done condition (§9 trace).
+
+**The graph never reads the code — it reads the declaration.** This is the
+standardisation that keeps the topology from breaking, and it is exactly how the
+`llm` body already works (arbitrary code, *declared* `Emits` allowlist; the engine
+lints `emit ⊆ Emits` at runtime, CONCEPT §A.4). A View is therefore a normal
+`Subscriber`:
+
+```yaml
+- name: agent.state
+  in:    task                                      # attached to the scope (≥1 per scope allowed)
+  on:    [request.received, tool.>, llm.message]   # what it reduces  → graph reachability
+  emits: [state.status.waiting, state.status.processing, state.status.done]   # what it MAY emit → graph
+  body:  { kind: view, config: { type: agent } }   # the reducer, resolved by name from the registry
+```
+
+Invariants that keep the topology valid:
+- **Emits are declared, never introspected.** The transition kinds are a finite
+  enum of registered `state.status.*` kinds; the reducer picks one at runtime,
+  bounded by `Emits`. The graph sees the whole enum.
+- **The body is named by a descriptor** (`BodyKind: view`, `BodyConfig`), like
+  `llm`/tools — descriptor on the log, code in the registry, so G8 holds (state
+  rebuilt by replay, wiring rebuilt from the fact).
+- **A View is a `Subscriber` with a stateful body.** Scope attach = `In`; the
+  topology language is unchanged — only a new body kind. Wiring is static (the
+  graph); logic is code (the reducer).
+
+This is the **division of labour**: a *library* of default nodes (`llm`, tool
+plugins) you wire; *your* code is the View — how you aggregate events into state
+and when you emit. YAML assembles reusable topologies; code models state.
+
 ### 9c. When you DO still need a sub-scope
 
 The state-predicate join is for a *lightweight* gather (tool results in the same

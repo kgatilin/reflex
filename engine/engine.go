@@ -51,13 +51,20 @@ type Engine struct {
 	// Drain all run (doc 26 §2a isolation needs N cones to exist). It is a fold
 	// over the log (rebuildScopes recomputes it), not a privileged store.
 	dispatched []bool
+	// reducerState holds the per-scope-instance cached state of stateful Reducer
+	// bodies (view-as-reducer, doc 33 §9d): nodeName → instanceID → state. It is a
+	// CACHE — recomputable by replaying Reduce over the cone's events in log order
+	// (G8) — held here so the body stays pure (state in → state + emits out). The
+	// instance key is the node's In-scope instance (sr.narrowestScope); "" for a
+	// global reducer (one shared instance).
+	reducerState map[string]map[string]any
 }
 
 // New returns an empty engine: no topology, no events. Everything it
 // will ever hold arrives through Apply and Append. Options configure the
 // engine (e.g. WithBodyResolver for the declarative/daemon path).
 func New(opts ...Option) *Engine {
-	e := &Engine{bodies: map[string]Reaction{}}
+	e := &Engine{bodies: map[string]Reaction{}, reducerState: map[string]map[string]any{}}
 	for _, o := range opts {
 		o(e)
 	}
@@ -560,12 +567,32 @@ func (e *Engine) fanOut(ctx context.Context, idx int, cls, scope, kind string, s
 				schema:      catLookup,
 			}
 		}
-		emits, err := n.Body.React(ctx, ev, views)
-		if err != nil {
-			p, _ := json.Marshal(map[string]string{"error": err.Error()})
-			child := e.appendEmit(ev, cls, Emit{Kind: n.Name + ".failed", Payload: p})
-			e.process(ctx, child, sr)
-			continue
+		var emits []Emit
+		if r, ok := n.Body.(Reducer); ok {
+			// Stateful body (doc 33 §9d): the engine owns the cached state per scope
+			// instance and threads it through Reduce, so the body stays pure. The
+			// instance key is the node's In-scope instance (the cone whose state this
+			// reduces); "" for a global reducer. Recomputable by replay (G8): Reduce
+			// is fed the cone's events in log order, so the same log rebuilds the same
+			// state.
+			inst := sr.narrowestScope(n.In, ev.Trace.SpanID)
+			cur := e.reducerState[n.Name]
+			if cur == nil {
+				cur = map[string]any{}
+				e.reducerState[n.Name] = cur
+			}
+			next, em := r.Reduce(cur[inst], ev)
+			cur[inst] = next
+			emits = em
+		} else {
+			var err error
+			emits, err = n.Body.React(ctx, ev, views)
+			if err != nil {
+				p, _ := json.Marshal(map[string]string{"error": err.Error()})
+				child := e.appendEmit(ev, cls, Emit{Kind: n.Name + ".failed", Payload: p})
+				e.process(ctx, child, sr)
+				continue
+			}
 		}
 		for _, em := range emits {
 			// Payload-conformance (doc 26 §4a runtime half): this is the ONE place

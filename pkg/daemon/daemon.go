@@ -23,6 +23,7 @@ import (
 	"github.com/kgatilin/reflex/nodes/llm"
 	"github.com/kgatilin/reflex/nodes/proxy"
 	"github.com/kgatilin/reflex/nodes/verifier"
+	"github.com/kgatilin/reflex/nodes/view"
 	"github.com/kgatilin/reflex/pkg/topology"
 )
 
@@ -67,6 +68,10 @@ func registerFactories() {
 	// operator topology wires it without re-declaring the schema.
 	nodes.Register("changeset", changeset.Factory)
 	nodes.RegisterCatalog("changeset", changeset.Catalog)
+	// "view" is the view-as-reducer body (doc 33 §9d): a stateful node whose state
+	// the engine holds per scope instance. Reducer types (e.g. "agent") self-register
+	// in their package init; importing nodes/view pulls them in.
+	nodes.Register("view", view.Factory)
 }
 
 // New builds a daemon with a fresh engine and the body resolver installed, plus
